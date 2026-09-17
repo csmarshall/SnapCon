@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 51,
+    "version": 52,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -1101,7 +1101,11 @@
       "transport_option_auto": "Detectar automáticamente",
       "transport_option_native": "API de FlashForge (puerto 8898)",
       "transport_option_moonraker": "Moonraker (puerto 7125)",
-      "transport_hint": "El firmware original ofrece la API de FlashForge en el puerto 8898. Un firmware modificado como ZMOD o Forge-X la sustituye por Moonraker en el puerto 7125. SnapCon detecta normalmente cuál está activo y vuelve a comprobarlo si cambia; fija uno concreto solo si la detección falla."
+      "transport_hint": "El firmware original ofrece la API de FlashForge en el puerto 8898. Un firmware modificado como ZMOD o Forge-X la sustituye por Moonraker en el puerto 7125. SnapCon detecta normalmente cuál está activo y vuelve a comprobarlo si cambia; fija uno concreto solo si la detección falla.",
+      "discover_progress": "{scanned} de {total} direcciones · {found} encontradas",
+      "discover_all_known": "Se encontraron {count}, todas ya están en tu lista de impresoras.",
+      "discover_known_hidden": "{count} ya están en tu lista de impresoras; no se muestran.",
+      "discover_cancelled": "Escaneo detenido."
     },
     "firmware": {
       "get_button": "Actualizar versiones",

@@ -11687,30 +11687,84 @@ function gatherPrinters(){
     allowedGroups:[...r.querySelectorAll(".pgroups-chk:checked")].map(c=>c.value)
   })).filter(p=>p.url);
 }
+// Reads the scan's NDJSON stream, calling onProgress for each batch, and
+// resolves with the final line. Kept separate from the rendering so the
+// progress display and the result handling stay readable.
+async function streamDiscover(url,onProgress){
+  const r=await fetch(url,{cache:"no-store"});
+  checkAuthFailure(r);
+  const ct=r.headers.get("content-type")||"";
+  if(!r.ok||!/ndjson/.test(ct)){
+    // An error (or an older server) answers with plain JSON, not a stream.
+    let j=null; try{ j=await r.json(); }catch{}
+    if(j&&j.error) return j;
+    throw new Error(j&&j.error?j.error:("HTTP "+r.status));
+  }
+  const reader=r.body.getReader(), dec=new TextDecoder();
+  let buf="",last=null;
+  for(;;){
+    const {done,value}=await reader.read();
+    if(done) break;
+    buf+=dec.decode(value,{stream:true});
+    let nl;
+    while((nl=buf.indexOf("\n"))>=0){
+      const line=buf.slice(0,nl); buf=buf.slice(nl+1);
+      if(!line.trim()) continue;
+      let obj; try{ obj=JSON.parse(line); }catch{ continue; }
+      if(obj.done||obj.error) last=obj; else onProgress(obj);
+    }
+  }
+  return last;
+}
+
 async function runDiscover(subnet){
-  const w=$("discwrap"); w.innerHTML='<div class="discrow"><span class="di">'+esc(t("settings.printers.discover_scanning",{subnet:subnet?subnet:t("settings.printers.discover_local_network_label")}))+'</span></div>';
+  const w=$("discwrap");
+  const label=subnet?subnet:t("settings.printers.discover_local_network_label");
+  // A bar rather than a motionless "Scanning…": a sweep is 254 addresses and
+  // the wait otherwise reads as a hang.
+  w.innerHTML=`<div class="discrow disc-progress"><span class="di">${esc(t("settings.printers.discover_scanning",{subnet:label}))}</span>`
+    +`<span class="disc-count" data-disccount></span></div>`
+    +`<div class="disc-bar"><div class="disc-bar-fill" data-discfill style="width:0%"></div></div>`;
+  const fill=w.querySelector("[data-discfill]"), count=w.querySelector("[data-disccount]");
   try{
     const url=subnet?"/api/discover?subnet="+encodeURIComponent(subnet):"/api/discover";
-    const d=await getJSON(url);
+    const d=await streamDiscover(url,p=>{
+      if(!p.total) return;
+      const pct=Math.min(100,Math.round((p.scanned||0)/p.total*100));
+      if(fill) fill.style.width=pct+"%";
+      if(count) count.textContent=t("settings.printers.discover_progress",{scanned:p.scanned||0,total:p.total,found:p.found||0});
+    });
+    if(!d){ w.innerHTML='<div class="discrow"><span class="di">'+esc(t("settings.printers.discover_cancelled"))+'</span></div>'; return; }
     if(d.error){ w.innerHTML='<div class="discrow"><span class="di" style="color:var(--bad)">'+esc(d.error)+'</span></div>'; return; }
     if(!d.found.length){ w.innerHTML='<div class="discrow"><span class="di">'+esc(t("settings.printers.discover_none_found",{subnets:(d.subnets||[]).join(", ")}))+'</span></div>'; return; }
     const have=new Set(gatherPrinters().map(p=>p.url.replace(/\/+$/,"")));
+    // Printers already in the list are left out entirely rather than listed
+    // with a disabled Added button: on a farm where everything has been added,
+    // that was a wall of rows to read through for nothing.
+    const newPrinters=d.found.filter(f=>!have.has(f.url.replace(/\/+$/,"")));
+    const known=d.found.length-newPrinters.length;
     w.innerHTML="";
-    const newPrinters=[];
-    d.found.forEach(f=>{
-      const already=have.has(f.url.replace(/\/+$/,""));
-      if(!already) newPrinters.push(f);
+    if(!newPrinters.length){
+      w.innerHTML='<div class="discrow"><span class="di">'+esc(t("settings.printers.discover_all_known",{count:known}))+'</span></div>';
+      $("addAllSave").style.display="none";
+      return;
+    }
+    if(known){
+      const note=document.createElement("div"); note.className="discrow";
+      note.innerHTML='<span class="di" style="color:var(--ink-faint)">'+esc(t("settings.printers.discover_known_hidden",{count:known}))+'</span>';
+      w.appendChild(note);
+    }
+    newPrinters.forEach(f=>{
       const row=document.createElement("div"); row.className="discrow";
       // The button's data-i18n attribute is kept in sync with its Add/Added
       // state at both points below (initial render, and the click handler)
       // so applyI18nToDom() re-translates the CURRENT state on a live locale
       // switch instead of resetting an already-clicked "Added" button back
       // to "Add" — same reasoning as #collapseAll's dataset-driven label.
-      const btnKey=already?"settings.printers.discover_added_button":"settings.printers.discover_add_button";
       row.innerHTML=`<span class="di"><b>${esc(f.device_name||f.machine_type||t("settings.printers.discover_printer_fallback"))}</b> · ${esc(f.ip)}${f.mac?" · "+esc(f.mac):""}${f.serial?" · "+esc(t("settings.printers.discover_serial_label",{value:f.serial})):""}</span>`+
-        `<button class="btn ghost" ${already?"disabled":""} data-i18n="${btnKey}">${t(btnKey)}</button>`;
+        `<button class="btn ghost" data-i18n="settings.printers.discover_add_button">${t("settings.printers.discover_add_button")}</button>`;
       const btn=row.querySelector("button");
-      if(!already) btn.addEventListener("click",()=>{ addPrinterRow(f.device_name||"U1", f.url, {serial:f.serial||""},true); btn.disabled=true; btn.textContent=t("settings.printers.discover_added_button"); btn.setAttribute("data-i18n","settings.printers.discover_added_button"); });
+      btn.addEventListener("click",()=>{ addPrinterRow(f.device_name||"U1", f.url, {serial:f.serial||""},true); btn.disabled=true; btn.textContent=t("settings.printers.discover_added_button"); btn.setAttribute("data-i18n","settings.printers.discover_added_button"); });
       w.appendChild(row);
     });
     const aab=$("addAllSave");
