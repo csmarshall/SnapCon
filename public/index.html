@@ -932,6 +932,15 @@
            entirely — no unload controls visible while picking a color. -->
       <div id="unloadColorMode" style="display:none">
         <div class="unload-color-helper" data-i18n="fleet.modal.unload.color_helper">Used for head matching when sending prints. Written to the printer itself.</div>
+
+        <!-- Material: only shown for a connector that declares setMaterial and
+             ships the printer's own tuned-filament list. -->
+        <div id="unloadMaterialRow" style="display:none">
+          <div class="unload-field-label" data-i18n="fleet.modal.unload.material_label">Material</div>
+          <select class="field" id="unloadMaterialSelect"></select>
+          <div class="settings-help" data-i18n="fleet.modal.unload.material_helper">What the printer has tuned print settings for. Changing it resets this toolhead's flow calibration.</div>
+        </div>
+
         <div class="unload-compare">
           <div class="unload-compare-now">
             <div class="unload-compare-swatch-sm" id="unloadNowSwatch"></div>

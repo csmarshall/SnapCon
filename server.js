@@ -2095,7 +2095,7 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // leaked to a user who can't see it.
     if (!p || !printerVisibleTo(req.user, p)) return res.status(400).json({ error: "Unknown printer" });
     const conn = getConnector(p.connector);
-    return res.json({ id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) });
+    return res.json({ id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) });
   }
   const out = await Promise.all(PRINTERS.map(async (p, i) => {
     if (!printerVisibleTo(req.user, p)) return null;
@@ -2105,7 +2105,7 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // (pfilemodal) can default to this printer's existing preferences for
     // every role, not just Admin (who already sees them via /api/config's
     // printers[]).
-    const row = { id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) };
+    const row = { id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) };
     const qf = queuedFile.get(i);
     const pl = pendingLoad.get(i);
     // queuedFile (uploading/ready/error) reflects the retry sweep actually
@@ -2402,7 +2402,7 @@ app.post("/api/unload", requireRegular, async (req, res) => {
 
 // ---- Relabel a slot's stored color/material on the printer itself ----
 app.post("/api/filament-color", requireRegular, async (req, res) => {
-  const { printer, extruder, hex } = req.body || {};
+  const { printer, extruder, hex, material } = req.body || {};
   const p = PRINTERS[printer];
   if (!p) return res.status(400).json({ error: "Unknown printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer" });
@@ -2411,13 +2411,27 @@ app.post("/api/filament-color", requireRegular, async (req, res) => {
   const c = getConnector(p.connector);
   if (!c.setFilamentColor) return res.status(400).json({ error: p.name + " does not support setting filament color" });
 
+  // Material is optional; when present it is resolved to the connector's own
+  // table entry HERE and that entry — never the request's strings — is what
+  // gets forwarded. The connector interpolates these values into a G-code
+  // line and the printer's firmware validates none of them, so this is a
+  // trust boundary (section 8), and the connector re-checks at the sink.
+  let resolvedMaterial;
+  if (material !== undefined && material !== null) {
+    if (!c.findFilamentMaterial) return res.status(400).json({ error: p.name + " does not support setting filament material" });
+    resolvedMaterial = c.findFilamentMaterial(material);
+    if (!resolvedMaterial) return res.status(400).json({ error: "Unknown filament material" });
+  }
+
   try {
     // May differ from the requested hex (e.g. AD5X snaps to its touchscreen's
     // fixed color palette) — the client shows this back to the user rather
     // than assuming its own request was applied verbatim.
-    const applied = await c.setFilamentColor(p, extruder, hex);
-    auditLog.log({ category: "job", event: "filament-color-set", ...actorFromReq(req), printerId: p.id, printerName: p.name, detail: { extruder, hex: applied || hex } });
-    res.json({ ok: true, printer: p.name, extruder, hex: applied || hex });
+    const applied = await c.setFilamentColor(p, extruder, hex, { material: resolvedMaterial });
+    const detail = { extruder, hex: applied || hex };
+    if (resolvedMaterial) detail.material = resolvedMaterial;
+    auditLog.log({ category: "job", event: "filament-color-set", ...actorFromReq(req), printerId: p.id, printerName: p.name, detail });
+    res.json({ ok: true, printer: p.name, extruder, hex: applied || hex, material: resolvedMaterial || null });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }

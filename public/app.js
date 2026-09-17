@@ -1529,10 +1529,13 @@ function refreshFleetModalsDynamicText(){
   if($("unloadmodal")&&$("unloadmodal").classList.contains("show")&&SPOOL_MODAL_PRINTER!==null){
     const p=FLEET.find(f=>f.id===SPOOL_MODAL_PRINTER);
     if(UNLOAD_DIALOG_MODE==="color"){
-      $("unloadtitle").textContent=t("fleet.modal.unload.color_mode_title");
+      $("unloadtitle").textContent=t(colorModeTitleKey());
       $("unloadSubtitle").textContent=t("fleet.modal.unload.color_mode_subtitle",{head:headLabel(SPOOL_MODAL_EXT),printer:(p&&p.name)||""});
       updateUnloadCompareSwatches();
       renderUnloadPaletteGrid();
+      // The keep-as-is option is translated text, so the select has to be
+      // rebuilt too — but only after preserving the user's pending pick.
+      renderUnloadMaterial();
     } else {
       $("unloadtitle").textContent=t("fleet.modal.unload.title",{head:headLabel(SPOOL_MODAL_EXT)});
       $("unloadmsg").textContent=t("fleet.modal.unload.confirm_message",{head:headLabel(SPOOL_MODAL_EXT)});
@@ -2085,6 +2088,7 @@ function wireUI(){
   document.querySelectorAll("#unloadColorTabs .scc-tab").forEach(b=>{
     b.addEventListener("click",()=>{ SPOOL_MODAL_TAB=b.dataset.scctab; renderUnloadColorTabs(); });
   });
+  $("unloadMaterialSelect").addEventListener("change", materialSelectChanged);
   $("unloadHexField").addEventListener("input",()=>applyCustomHex($("unloadHexField").value));
   $("unloadColorInput").addEventListener("input",applyNativeColor);
   ["unloadR","unloadG","unloadB"].forEach(id=>$(id).addEventListener("input",applyCustomRgb));
@@ -7410,6 +7414,11 @@ const UNLOAD_LOCK_ICON=`<svg viewBox="0 0 14 14" width="11" height="11" aria-hid
 // (target head, current vs pending color, which palette source applies).
 let SPOOL_MODAL_PRINTER=null, SPOOL_MODAL_EXT=null, SPOOL_MODAL_CURRENT=null, SPOOL_MODAL_PENDING=null,
     SPOOL_MODAL_TAB="palette", SPOOL_MODAL_FIXED_PALETTE=null, SPOOL_MODAL_DIRTY=false;
+// Material picker state. MATERIALS is the printer's own tuned-filament table
+// (null when this connector has none); BASE is what is loaded right now and
+// IDX what the user has picked, both indexes into it, -1 meaning "not one of
+// them". Apply is enabled by a colour change OR by IDX moving off BASE.
+let SPOOL_MODAL_MATERIALS=null, SPOOL_MODAL_MATERIAL_IDX=-1, SPOOL_MODAL_MATERIAL_BASE=-1, SPOOL_MODAL_MATERIAL_TEXT=null;
 let UNLOAD_DIALOG_MODE="unload"; // "unload" | "color" — mutually exclusive views sharing one dialog
 
 function openUnload(printerId,ext){
@@ -7443,7 +7452,25 @@ function openUnload(printerId,ext){
   const canEditColor=!!(p.capabilities&&p.capabilities.setColor)&&!isRfid;
   SPOOL_MODAL_FIXED_PALETTE=hasFixedPalette?p.colorPalette:null;
 
+  // Material rides along inside color mode. Same RFID rule as the color: the
+  // firmware refuses the write for an official spool, so it isn't offered.
+  const canEditMaterial=!!(p.capabilities&&p.capabilities.setMaterial)&&!isRfid&&Array.isArray(p.filamentMaterials)&&p.filamentMaterials.length;
+  SPOOL_MODAL_MATERIALS=canEditMaterial?p.filamentMaterials:null;
+  SPOOL_MODAL_MATERIAL_BASE=currentMaterialIndex(SPOOL_MODAL_MATERIALS,h);
+  SPOOL_MODAL_MATERIAL_IDX=SPOOL_MODAL_MATERIAL_BASE;
+  // Only needed when the load matches nothing in the table, to name it in the
+  // keep-as-is option — a material the printer has no tuned profile for.
+  SPOOL_MODAL_MATERIAL_TEXT=SPOOL_MODAL_MATERIAL_BASE<0
+    ? [h.material,h.sub].filter(Boolean).join(" ")||null
+    : null;
+
   $("unloadEditColorBtn").style.display=canEditColor?"":"none";
+  // Naming the scope of the action (section 5): the button opens a material
+  // picker too on a connector that has one. data-i18n moves with the label so
+  // a live language switch restores the right one.
+  const editKey=canEditMaterial?"fleet.modal.unload.edit_filament_button":"fleet.modal.unload.edit_color_button";
+  $("unloadEditColorBtn").textContent=t(editKey);
+  $("unloadEditColorBtn").setAttribute("data-i18n",editKey);
   $("unloadRfidBadge").innerHTML=isRfid?(UNLOAD_LOCK_ICON+esc(t("fleet.modal.unload.rfid_badge"))):"";
   $("unloadRfidBadge").style.display=isRfid?"":"none";
   $("unloadColorTabs").style.display=hasFixedPalette?"none":"";
@@ -7540,10 +7567,77 @@ async function doUnload(printerId,extruders){
 // while active — no unload confirmation, checkbox, or Unload button visible
 // alongside it. Entered via "Edit color", exited via Cancel (discard, back to
 // the unload view) or Apply (save, close the whole dialog). ----
+// ---- Material picker ----
+// The list offered is the printer's OWN tuned-filament table, shipped on the
+// fleet row by whichever connector declares setMaterial. It is deliberately
+// not the same list the U1's touchscreen offers: the screen can set BVOH,
+// which has no tuned profile and so has no entry here, and the table includes
+// engineering materials the screen omits. A slot holding something absent
+// from the table is therefore normal, and is left alone unless the user picks
+// something — see pendingMaterial().
+
+// Vendor is the optgroup, so the option itself only needs type + sub-type.
+function materialLabel(m){
+  return m.subType?(m.type+" "+m.subType):m.type;
+}
+
+// Which table entry is loaded right now, or -1 for "none of them". Matched on
+// the full (vendor, type, sub-type) triple because type and sub-type alone
+// are ambiguous — Generic PETG HF and Snapmaker PETG HF are different
+// filaments with different tuning.
+function currentMaterialIndex(materials,head){
+  if(!Array.isArray(materials)||!head||!head.loaded) return -1;
+  const vendor=head.vendor||"",type=head.material||"",sub=head.sub||"";
+  return materials.findIndex(m=>m.vendor===vendor&&m.type===type&&(m.subType||"")===sub);
+}
+
+// currentText: what the slot reports when it matches nothing in the table, so
+// the keep-as-is option can name it rather than reading as an empty choice.
+function materialOptionsHtml(materials,selectedIdx,currentText){
+  let html="";
+  if(selectedIdx<0){
+    const label=currentText
+      ?t("fleet.modal.unload.material_keep",{material:currentText})
+      :t("fleet.modal.unload.material_keep_unknown");
+    html+=`<option value="-1" selected>${esc(label)}</option>`;
+  }
+  let vendor=null;
+  (materials||[]).forEach((m,i)=>{
+    if(m.vendor!==vendor){
+      if(vendor!==null) html+="</optgroup>";
+      html+=`<optgroup label="${esc(m.vendor)}">`;
+      vendor=m.vendor;
+    }
+    html+=`<option value="${i}"${i===selectedIdx?" selected":""}>${esc(materialLabel(m))}</option>`;
+  });
+  if(vendor!==null) html+="</optgroup>";
+  return html;
+}
+
+// What to actually send. Null whenever the selection hasn't moved off what is
+// already loaded: every accepted write also resets that extruder's flow
+// calibration on the printer, so re-sending an unchanged material is not free.
+// Null also for anything out of range, so a stale or malformed index can never
+// invent a material the user didn't choose.
+function pendingMaterial(materials,idx,baseIdx){
+  if(!Array.isArray(materials)) return null;
+  if(idx===null||idx===undefined) return null;
+  const i=Number(idx);
+  if(!Number.isInteger(i)||i<0||i>=materials.length) return null;
+  if(i===Number(baseIdx)) return null;
+  return materials[i];
+}
+
+// The mode edits the color alone on a connector that can only set that, and
+// color plus material on one that can set both — the title has to say which.
+function colorModeTitleKey(){
+  return SPOOL_MODAL_MATERIALS?"fleet.modal.unload.filament_mode_title":"fleet.modal.unload.color_mode_title";
+}
+
 function enterColorMode(){
   UNLOAD_DIALOG_MODE="color";
   const p=FLEET.find(f=>f.id===SPOOL_MODAL_PRINTER);
-  $("unloadtitle").textContent=t("fleet.modal.unload.color_mode_title");
+  $("unloadtitle").textContent=t(colorModeTitleKey());
   $("unloadSubtitle").textContent=t("fleet.modal.unload.color_mode_subtitle",{head:headLabel(SPOOL_MODAL_EXT),printer:(p&&p.name)||""});
   $("unloadModeBody").style.display="none";
   $("unloadColorMode").style.display="";
@@ -7556,12 +7650,31 @@ function enterColorMode(){
   SPOOL_MODAL_PENDING={hex:SPOOL_MODAL_CURRENT.hex||"#FFFFFF",name:SPOOL_MODAL_CURRENT.name};
   SPOOL_MODAL_TAB="palette";
   SPOOL_MODAL_DIRTY=false;
+  // Same "starts fresh from the last-saved value" rule as the color above.
+  SPOOL_MODAL_MATERIAL_IDX=SPOOL_MODAL_MATERIAL_BASE;
   $("unloadSaveColorBtn").disabled=true;
 
+  renderUnloadMaterial();
   updateUnloadCompareSwatches();
   renderUnloadColorTabs();
   renderUnloadPaletteGrid();
   syncCustomFieldsFromPending();
+}
+function renderUnloadMaterial(){
+  const row=$("unloadMaterialRow");
+  if(!SPOOL_MODAL_MATERIALS){ row.style.display="none"; return; }
+  row.style.display="";
+  $("unloadMaterialSelect").innerHTML=materialOptionsHtml(SPOOL_MODAL_MATERIALS,SPOOL_MODAL_MATERIAL_IDX,SPOOL_MODAL_MATERIAL_TEXT);
+}
+function materialSelectChanged(){
+  SPOOL_MODAL_MATERIAL_IDX=parseInt($("unloadMaterialSelect").value,10);
+  updateUnloadApplyState();
+}
+// Apply is live when EITHER half of the dialog has been changed — a material
+// change alone is a real edit, with no color change needed to justify it.
+function updateUnloadApplyState(){
+  const materialChanged=!!pendingMaterial(SPOOL_MODAL_MATERIALS,SPOOL_MODAL_MATERIAL_IDX,SPOOL_MODAL_MATERIAL_BASE);
+  $("unloadSaveColorBtn").disabled=!(SPOOL_MODAL_DIRTY||materialChanged);
 }
 function exitColorMode(){
   UNLOAD_DIALOG_MODE="unload";
@@ -7709,14 +7822,22 @@ function applyNativeColor(){
 async function doApplyUnloadColor(){
   const st=$("unloadStatus");
   const requestedHex=SPOOL_MODAL_PENDING.hex;
-  st.className="pstatus work"; st.textContent=t("fleet.modal.unload.status_saving_color");
+  // Material is only sent when the picker actually moved off what is loaded
+  // (pendingMaterial returns null otherwise), so a color-only edit stays a
+  // color-only write and a spool the printer has no profile for is left
+  // exactly as it is.
+  const material=pendingMaterial(SPOOL_MODAL_MATERIALS,SPOOL_MODAL_MATERIAL_IDX,SPOOL_MODAL_MATERIAL_BASE);
+  st.className="pstatus work";
+  st.textContent=t(material?"fleet.modal.unload.status_saving_filament":"fleet.modal.unload.status_saving_color");
   try{
     // Real printer write (see connectors/snapmaker-u1-klipper.js's
     // setFilamentColor) — the same generic route AD5X's Color button used to
     // call directly. The palette/custom "name" picked here is a client-side
     // display convenience only (nameForHex()); there's no printer-side field
     // for it, so it's never sent.
-    const r=await postJSON("/api/filament-color",{printer:SPOOL_MODAL_PRINTER,extruder:SPOOL_MODAL_EXT,hex:requestedHex});
+    const body={printer:SPOOL_MODAL_PRINTER,extruder:SPOOL_MODAL_EXT,hex:requestedHex};
+    if(material) body.material=material;
+    const r=await postJSON("/api/filament-color",body);
     const d=await r.json(); if(!r.ok||d.error) throw new Error(d.error||("HTTP "+r.status));
     loadFleet();
     closeUnload(); // saved — exit the color picker and the unload dialog together

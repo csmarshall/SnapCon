@@ -27,7 +27,11 @@ exports.capabilities = {
   // touchscreen itself issues. Verified against dlgambill/u1hub (the
   // project this codebase forked from), whose implementation was checked
   // against real U1 hardware.
-  webUi: true, setColor: true, singleToolhead: false,
+  // setMaterial: the same SET_PRINT_FILAMENT_CONFIG command also writes a
+  // slot's vendor/type/sub-type. Declared separately from setColor because a
+  // connector can have one without the other (AD5X writes colour only), and
+  // because it needs data setColor doesn't — see filamentMaterials below.
+  webUi: true, setColor: true, setMaterial: true, singleToolhead: false,
   // filamentHeads means "show per-slot status" (colors/materials/active
   // lane); headMapping means "assigning a model color to a slot in the
   // print/send UI actually does something" — only true here because
@@ -81,6 +85,7 @@ exports.capabilities = {
 function decodeHeads(ptc) {
   const ex   = ptc.filament_exist || [];
   const rgba = ptc.filament_color_rgba || [];
+  const ven  = ptc.filament_vendor || [];
   const typ  = ptc.filament_type || [];
   const sub  = ptc.filament_sub_type || [];
   const off  = ptc.filament_official || [];
@@ -94,6 +99,11 @@ function decodeHeads(ptc) {
     return {
       loaded,
       hex,
+      // vendor completes the (vendor, type, sub-type) triple the printer
+      // actually stores — type alone is ambiguous, since the same type and
+      // sub-type exist under more than one vendor (Generic vs Snapmaker
+      // PETG HF). "NONE" is the firmware's empty-slot filler, not a vendor.
+      vendor: (loaded && ven[i] && ven[i] !== "NONE") ? ven[i] : null,
       material: loaded ? (typ[i] || null) : null,
       sub: (loaded && sub[i] && sub[i] !== "NONE") ? sub[i] : null,
       official: !!off[i]
@@ -264,11 +274,91 @@ async function unloadFilament(p, extruders) {
 }
 exports.unloadFilament = unloadFilament;
 
-// ---- Set a slot's stored color on the printer itself ----
+// ---- The filaments this printer has tuned print settings for ----
+// Captured from a live U1 (firmware 1.6.0) via FILAMENT_PARA_GET_ALL_INFO, a
+// read-only firmware command that dumps the filament_parameters tables. Held
+// as a static list rather than queried per request on purpose: that command
+// answers by writing ~55KB across ~177 entries into Moonraker's gcode_store
+// ring buffer, which evicts the printer's real command history every time.
+//
+// The dump's KEYS are lookup patterns of the form
+// `<vendor>_<type>_<subType>_<param>`, in which a lowercase `generic` token
+// means "any" (see print_task_config.py's _search_filament_param_value,
+// default_fill='generic'). The values a slot actually STORES spell those two
+// wildcards differently — vendor "Generic", subType "" — which is what is
+// recorded here. Confirmed by reading print_task_config off 16 live printers:
+// Generic/PLA/"" fleet-wide, plus a human-set Polymaker/PLA/PolyTerra and
+// RFID-set Snapmaker/PLA/Silk and Snapmaker/PLA/SnapSpeed, each matching its
+// table key exactly.
+//
+// NOT the same list as the touchscreen's material picker — the screen offers
+// BVOH, which has no tuned profile, and omits several engineering materials
+// that do. This is "what the printer has settings for", which is the useful
+// question when choosing what to load. The firmware validates none of these
+// strings and falls back to generic parameters for an unknown one, so a
+// filament missing here is a missing tuning profile, not a blocked material.
+const FILAMENT_MATERIALS = [
+  { vendor: "Generic", type: "ABS", subType: "" },
+  { vendor: "Generic", type: "ASA", subType: "" },
+  { vendor: "Generic", type: "PA", subType: "" },
+  { vendor: "Generic", type: "PA-CF", subType: "" },
+  { vendor: "Generic", type: "PA-GF", subType: "" },
+  { vendor: "Generic", type: "PA6-CF", subType: "" },
+  { vendor: "Generic", type: "PA6-GF", subType: "" },
+  { vendor: "Generic", type: "PC", subType: "" },
+  { vendor: "Generic", type: "PC-ABS", subType: "" },
+  { vendor: "Generic", type: "PEBA", subType: "" },
+  { vendor: "Generic", type: "PETG", subType: "" },
+  { vendor: "Generic", type: "PETG", subType: "HF" },
+  { vendor: "Generic", type: "PETG-CF", subType: "" },
+  { vendor: "Generic", type: "PLA", subType: "" },
+  { vendor: "Generic", type: "PLA-CF", subType: "" },
+  { vendor: "Generic", type: "PVA", subType: "" },
+  { vendor: "Generic", type: "TPU", subType: "" },
+  { vendor: "Generic", type: "TPU", subType: "90A" },
+  { vendor: "Generic", type: "TPU", subType: "95A HF" },
+  { vendor: "Polymaker", type: "ABS", subType: "PolyLite" },
+  { vendor: "Polymaker", type: "PETG", subType: "PolyLite" },
+  { vendor: "Polymaker", type: "PLA", subType: "PolyLite" },
+  { vendor: "Polymaker", type: "PLA", subType: "PolySonic" },
+  { vendor: "Polymaker", type: "PLA", subType: "PolyTerra" },
+  { vendor: "Snapmaker", type: "ABS", subType: "" },
+  { vendor: "Snapmaker", type: "ASA", subType: "" },
+  { vendor: "Snapmaker", type: "PEBA", subType: "90A" },
+  { vendor: "Snapmaker", type: "PETG", subType: "" },
+  { vendor: "Snapmaker", type: "PETG", subType: "HF" },
+  { vendor: "Snapmaker", type: "PETG", subType: "Translucent" },
+  { vendor: "Snapmaker", type: "PETG-CF", subType: "" },
+  { vendor: "Snapmaker", type: "PLA", subType: "Basic" },
+  { vendor: "Snapmaker", type: "PLA", subType: "Full Spectrum" },
+  { vendor: "Snapmaker", type: "PLA", subType: "Matte" },
+  { vendor: "Snapmaker", type: "PLA", subType: "Silk" },
+  { vendor: "Snapmaker", type: "PLA", subType: "SnapSpeed" },
+  { vendor: "Snapmaker", type: "PLA", subType: "Translucent" },
+  { vendor: "Snapmaker", type: "PLA", subType: "Wood" },
+  { vendor: "Snapmaker", type: "PLA-CF", subType: "" },
+  { vendor: "Snapmaker", type: "TPU", subType: "90A" },
+  { vendor: "Snapmaker", type: "TPU", subType: "95A HF" },
+];
+exports.filamentMaterials = FILAMENT_MATERIALS;
+
+// Resolves a requested {vendor, type, subType} to the table's OWN entry, or
+// null. Callers must write the returned object rather than what they were
+// given: these values are interpolated into a gcode line and the firmware
+// validates none of them, so identity against this table is the only thing
+// standing between a request body and the printer's command parser.
+function findFilamentMaterial(m) {
+  if (!m || typeof m !== "object") return null;
+  return FILAMENT_MATERIALS.find(x =>
+    x.vendor === m.vendor && x.type === m.type && x.subType === (m.subType || "")) || null;
+}
+exports.findFilamentMaterial = findFilamentMaterial;
+
+// ---- Set a slot's stored color and/or material on the printer itself ----
 // SET_PRINT_FILAMENT_CONFIG is a real, registered print_task_config.py
 // gcode command — the exact one the touchscreen itself issues — confirmed
-// against dlgambill/u1hub's implementation (this codebase's origin), which
-// was checked against real hardware. Deliberately mirrors that
+// against dlgambill/u1hub's implementation (this codebase's origin) and
+// re-read from Snapmaker/u1-klipper's own source. Deliberately mirrors that
 // implementation closely rather than reinventing it:
 //  - idle-only: the firmware has no documented "change color mid-print"
 //    story, and there's no reason to risk finding out live.
@@ -278,14 +368,42 @@ exports.unloadFilament = unloadFilament;
 //    which u1hub deliberately never does (forcing it also flips that slot's
 //    filament_official to false). This does the same: block, don't bypass.
 //  - after sending, re-query and confirm the printer actually reports back
-//    the value just sent — SAVE='1' on the gcode line is what u1hub's own
-//    real-hardware testing settled on for this to stick.
-async function setFilamentColor(p, ext, hex) {
+//    the values just sent.
+//
+// The material parameters are VENDOR / FILAMENT_TYPE / FILAMENT_SUBTYPE —
+// NOT the filament_vendor / filament_sub_type spellings the STATUS fields
+// use. A wrong name is not a silent no-op: the firmware raises a gcode error
+// and the touchscreen shows the user "System Anomaly". The three are also
+// all-or-nothing (cmd_SET_PRINT_FILAMENT_CONFIG raises "incomplete
+// parameters" if FILAMENT_TYPE arrives without the other two), so they are
+// always written as one group.
+//
+// Colour and material are separate branches of the same firmware command and
+// are deliberately sent together in a single call, because every accepted
+// call also runs FLOW_RESET_K on that extruder — splitting them into two
+// writes would reset that extruder's flow calibration twice.
+//
+// SAVE='1' is inherited from u1hub and kept for continuity. It is a no-op:
+// cmd_SET_PRINT_FILAMENT_CONFIG never reads a SAVE parameter and persists
+// unconditionally via update_snapmaker_config_file. Harmless, since Klipper
+// ignores unrecognised parameters — left in place rather than removed as an
+// unrelated change to a working write path.
+async function setFilamentColor(p, ext, hex, opts) {
   const slot = parseInt(ext, 10);
   if (!(slot >= 0 && slot <= 3)) throw new Error("Slot must be 0–3");
   const m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex || ""));
   if (!m) throw new Error("Color must be RRGGBB hex");
   const rgba = m[1].toUpperCase() + "FF";
+
+  // Resolved before anything is sent, so an unknown material costs the
+  // printer nothing at all.
+  const requested = (opts || {}).material;
+  const material = requested ? findFilamentMaterial(requested) : null;
+  if (requested && !material) {
+    throw new Error(
+      (requested.vendor || "?") + " " + (requested.type || "?") +
+      " is not a filament this printer has settings for");
+  }
 
   const { ok, status, json } = await http.fetchJSONTimeout(http.baseUrl(p) + "/printer/objects/query?print_stats&print_task_config", 3500);
   if (!ok) throw new Error("Moonraker " + status);
@@ -296,16 +414,32 @@ async function setFilamentColor(p, ext, hex) {
   if (!(ptc.filament_exist || [])[slot]) throw new Error("No filament loaded in slot T" + (slot + 1));
   if ((ptc.filament_edit || [])[slot] === false) throw new Error("T" + (slot + 1) + " is an official Snapmaker RFID spool — its color comes from the tag and can't be changed");
 
-  await http.sendGcode(p, `SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='${slot}' FILAMENT_COLOR_RGBA='${rgba}' SAVE='1'`);
+  let line = `SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='${slot}'`;
+  if (material) line += ` VENDOR='${material.vendor}' FILAMENT_TYPE='${material.type}' FILAMENT_SUBTYPE='${material.subType}'`;
+  line += ` FILAMENT_COLOR_RGBA='${rgba}' SAVE='1'`;
+  await http.sendGcode(p, line);
 
   const confirm = await http.fetchJSONTimeout(http.baseUrl(p) + "/printer/objects/query?print_task_config", 3500);
   if (!confirm.ok) throw new Error("Write sent but read-back failed: Moonraker " + confirm.status);
   const gotPtc = ((confirm.json.result || {}).status || {}).print_task_config || {};
   const got = (gotPtc.filament_color_rgba || [])[slot];
   if (String(got || "").toUpperCase() !== rgba) throw new Error("Write not confirmed — printer reports " + (got || "nothing"));
+  if (material) {
+    const gotType = (gotPtc.filament_type || [])[slot];
+    const gotVendor = (gotPtc.filament_vendor || [])[slot];
+    const gotSub = (gotPtc.filament_sub_type || [])[slot];
+    if (gotVendor !== material.vendor || gotType !== material.type || gotSub !== material.subType) {
+      const reported = [gotVendor, gotType, gotSub].filter(Boolean).join(" ").trim();
+      throw new Error("Material not confirmed — printer reports " + (reported || "nothing"));
+    }
+  }
   return "#" + m[1].toUpperCase();
 }
 exports.setFilamentColor = setFilamentColor;
+
+// exported for tests only — decodeHeads is the printer-data normalization
+// this connector and its WebSocket variant must keep agreeing on.
+exports._internal = { decodeHeads };
 
 // ---- Exclude-object (stock Klipper module — identical to generic Klipper) ----
 exports.getPlate = http.getPlate;

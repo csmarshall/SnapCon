@@ -27,6 +27,7 @@ test("probe(): full printing state — heads, hotend selection, plate, layer, sp
     print_task_config: {
       filament_exist: [true, false, true, true],
       filament_color_rgba: ["FF0000FF", null, "00FF00FF", "0000FFFF"],
+      filament_vendor: ["Generic", null, "Snapmaker", "NONE"],
       filament_type: ["PLA", null, "PETG", "ABS"],
       filament_sub_type: ["NONE", null, "SILK", "NONE"],
       filament_official: [true, false, false, true]
@@ -60,10 +61,13 @@ test("probe(): full printing state — heads, hotend selection, plate, layer, sp
     activeExt: 2,
     plate: { total: 2, excluded: 1, current: "obj2" },
     heads: [
-      { loaded: true, hex: "#FF0000", material: "PLA", sub: null, official: true },
-      { loaded: false, hex: null, material: null, sub: null, official: false },
-      { loaded: true, hex: "#00FF00", material: "PETG", sub: "SILK", official: false },
-      { loaded: true, hex: "#0000FF", material: "ABS", sub: null, official: true }
+      // vendor completes the triple the printer stores; "NONE" is the
+      // firmware's empty-slot filler and reads as absent, exactly as `sub`
+      // already did.
+      { loaded: true, hex: "#FF0000", vendor: "Generic", material: "PLA", sub: null, official: true },
+      { loaded: false, hex: null, vendor: null, material: null, sub: null, official: false },
+      { loaded: true, hex: "#00FF00", vendor: "Snapmaker", material: "PETG", sub: "SILK", official: false },
+      { loaded: true, hex: "#0000FF", vendor: null, material: "ABS", sub: null, official: true }
     ]
   });
 });
@@ -86,10 +90,10 @@ test("probe(): idle/minimal state — every optional field absent falls back to 
     activeExt: null,
     plate: null,
     heads: [
-      { loaded: false, hex: null, material: null, sub: null, official: false },
-      { loaded: false, hex: null, material: null, sub: null, official: false },
-      { loaded: false, hex: null, material: null, sub: null, official: false },
-      { loaded: false, hex: null, material: null, sub: null, official: false }
+      { loaded: false, hex: null, vendor: null, material: null, sub: null, official: false },
+      { loaded: false, hex: null, vendor: null, material: null, sub: null, official: false },
+      { loaded: false, hex: null, vendor: null, material: null, sub: null, official: false },
+      { loaded: false, hex: null, vendor: null, material: null, sub: null, official: false }
     ]
   });
 });

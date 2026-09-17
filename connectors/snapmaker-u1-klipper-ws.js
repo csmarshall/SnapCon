@@ -45,6 +45,7 @@ function debugLog(p, msg) { if (DEBUG) console.log(`[U1-Enhanced:debug] ${p.name
 function decodeHeads(ptc) {
   const ex   = ptc.filament_exist || [];
   const rgba = ptc.filament_color_rgba || [];
+  const ven  = ptc.filament_vendor || [];
   const typ  = ptc.filament_type || [];
   const sub  = ptc.filament_sub_type || [];
   const off  = ptc.filament_official || [];
@@ -58,6 +59,9 @@ function decodeHeads(ptc) {
     return {
       loaded,
       hex,
+      // Mirrors the HTTP connector's own decodeHeads — see its comment for
+      // why the vendor is carried and why "NONE" is not one.
+      vendor: (loaded && ven[i] && ven[i] !== "NONE") ? ven[i] : null,
       material: loaded ? (typ[i] || null) : null,
       sub: (loaded && sub[i] && sub[i] !== "NONE") ? sub[i] : null,
       official: !!off[i]
@@ -436,6 +440,13 @@ exports.bedTemp = base.bedTemp;
 exports.applyHeadMapping = base.applyHeadMapping;
 exports.unloadFilament = base.unloadFilament;
 exports.setFilamentColor = base.setFilamentColor;
+// The setMaterial capability (inherited via the capabilities passthrough
+// above) is only meaningful alongside the table it validates against — the
+// server ships filamentMaterials to the browser and findFilamentMaterial
+// guards the write, both looked up on the printer's OWN connector, which for
+// every real U1 is this one.
+exports.filamentMaterials = base.filamentMaterials;
+exports.findFilamentMaterial = base.findFilamentMaterial;
 exports.getPlate = base.getPlate;
 exports.excludeObject = base.excludeObject;
 exports.listFiles = base.listFiles;

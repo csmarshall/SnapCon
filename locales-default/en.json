@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 52,
+    "version": 53,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -261,7 +261,14 @@
         "color_mode_title": "Spool color",
         "color_mode_subtitle": "Head {head} on {printer}.",
         "status_saving_color": "Saving color…",
-        "error_hex_format": "Enter a 3- or 6-digit hex color, with or without \"#\"."
+        "error_hex_format": "Enter a 3- or 6-digit hex color, with or without \"#\".",
+        "material_label": "Material",
+        "material_helper": "What this printer has tuned print settings for — not the same list as its touchscreen. Changing it resets this toolhead's flow calibration.",
+        "material_keep": "Keep {material}",
+        "material_keep_unknown": "Keep current material",
+        "edit_filament_button": "Edit filament",
+        "filament_mode_title": "Spool color and material",
+        "status_saving_filament": "Saving…"
       },
       "snapshot": {
         "title_default": "Camera snapshot",

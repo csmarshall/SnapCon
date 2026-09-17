@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 52,
+    "version": 53,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -261,7 +261,14 @@
         "color_mode_title": "Color de la bobina",
         "color_mode_subtitle": "Cabezal {head} en {printer}.",
         "status_saving_color": "Guardando color…",
-        "error_hex_format": "Introduce un color hexadecimal de 3 o 6 dígitos, con o sin \"#\"."
+        "error_hex_format": "Introduce un color hexadecimal de 3 o 6 dígitos, con o sin \"#\".",
+        "material_label": "Material",
+        "material_helper": "Lo que esta impresora tiene configurado con ajustes de impresión afinados; no es la misma lista que la de su pantalla táctil. Cambiarlo restablece la calibración de flujo de este cabezal.",
+        "material_keep": "Mantener {material}",
+        "material_keep_unknown": "Mantener el material actual",
+        "edit_filament_button": "Editar filamento",
+        "filament_mode_title": "Color y material del carrete",
+        "status_saving_filament": "Guardando…"
       },
       "snapshot": {
         "title_default": "Instantánea de cámara",
