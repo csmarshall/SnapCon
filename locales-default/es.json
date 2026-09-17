@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 53,
+    "version": 54,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -1241,7 +1241,8 @@
       "summary_started": "Actualización iniciada en {n}",
       "summary_skipped": "{n} ya están actualizadas",
       "summary_rejected": "{n} rechazadas — mira las filas de abajo",
-      "summary_nothing": "No hay nada que hacer"
+      "summary_nothing": "No hay nada que hacer",
+      "reading_progress": "{read} de {total}"
     },
     "users": {
       "enable_label": "Activar gestión de acceso de usuarios",

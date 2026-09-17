@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 53,
+    "version": 54,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -1241,7 +1241,8 @@
       "summary_started": "Update started on {n}",
       "summary_skipped": "{n} already up to date",
       "summary_rejected": "{n} rejected — see the rows below",
-      "summary_nothing": "Nothing to do"
+      "summary_nothing": "Nothing to do",
+      "reading_progress": "{read} of {total}"
     },
     "users": {
       "enable_label": "Enable user access management",

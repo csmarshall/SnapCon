@@ -9949,6 +9949,16 @@ function syncFirmwareConnectorFilter(){
   sel.innerHTML=`<option value="">${esc(t("settings.firmware.filter_all_connectors"))}</option>`+
     present.map(c=>`<option value="${esc(c)}">${esc(connectorLabel(c))}</option>`).join("");
   if(prev&&present.includes(prev)) sel.value=prev;
+  // The tab lists only printers SnapCon can flash, which today is one
+  // connector, so the choice is "all" versus the only thing there is — the
+  // same dead end this function already refuses to offer for absent
+  // connectors. Hidden rather than removed: a second flashable connector
+  // brings it straight back.
+  const oneChoice=present.length<2;
+  sel.style.display=oneChoice?"none":"";
+  // A filter left pointing at a connector that is no longer offered would go
+  // on hiding rows from behind a control the user can no longer see.
+  if(oneChoice&&sel.value) sel.value="";
 }
 
 const FW_SORT_LABEL_KEYS={ default:"settings.firmware.sort_default", name:"settings.firmware.sort_name",
@@ -10020,12 +10030,42 @@ async function refreshFirmwareRow(idx){
   renderFirmwareList();
 }
 
+// Folds one line of the /api/firmware stream into the rows collected so far
+// and reports how far along the sweep is. Separate from the DOM so the part
+// that can silently produce a short printer list is testable on its own.
+function firmwareStreamFold(payload,rows){
+  if(Array.isArray(payload.rows)) payload.rows.forEach(r=>rows.push(r));
+  const total=payload.total||0;
+  const read=typeof payload.read==="number"?payload.read:rows.length;
+  return {total,read,pct:total?Math.min(100,Math.round(read/total*100)):0};
+}
+
 async function loadFirmware(){
   const st=$("fwStatus"), btn=$("fwGet");
   if(btn) btn.disabled=true;
-  st.className="pstatus work"; st.textContent=t("settings.firmware.reading");
+  // A bar rather than a motionless "Reading firmware…": reading a fleet takes
+  // as long as its slowest printer, and a frozen line for that whole time is
+  // indistinguishable from the tab having hung.
+  st.className="pstatus work";
+  st.innerHTML=`<span data-fwreading>${esc(t("settings.firmware.reading"))}</span>`
+    +`<span class="disc-count" data-fwcount></span>`
+    +`<span class="disc-bar fw-bar"><span class="disc-bar-fill" data-fwfill style="width:0%"></span></span>`;
+  const fill=st.querySelector("[data-fwfill]"), count=st.querySelector("[data-fwcount]");
   try{
-    const rows=await getJSON("/api/firmware");
+    const acc=[];
+    // ?stream=1 asks for the NDJSON progress stream; without it the endpoint
+    // keeps answering with the plain JSON array it always did, so a browser
+    // running a cached copy of an older app.js still works after an upgrade.
+    const d=await streamNdjson("/api/firmware?stream=1",p=>{
+      const pr=firmwareStreamFold(p,acc);
+      if(fill) fill.style.width=pr.pct+"%";
+      if(count&&pr.total) count.textContent=t("settings.firmware.reading_progress",{read:pr.read,total:pr.total});
+    });
+    if(d&&d.error) throw new Error(d.error);
+    // The done line carries the authoritative list; a stream cut short (server
+    // restarted, tab backgrounded out) still shows whatever did arrive rather
+    // than blanking the tab.
+    const rows=(d&&Array.isArray(d.rows))?d.rows:acc;
     FW_DATA=rows;
     FW_LOADED=true;
     FW_REFRESHED.clear();
@@ -11808,10 +11848,12 @@ function gatherPrinters(){
     allowedGroups:[...r.querySelectorAll(".pgroups-chk:checked")].map(c=>c.value)
   })).filter(p=>p.url);
 }
-// Reads the scan's NDJSON stream, calling onProgress for each batch, and
-// resolves with the final line. Kept separate from the rendering so the
-// progress display and the result handling stay readable.
-async function streamDiscover(url,onProgress){
+// Reads an NDJSON progress stream, calling onProgress for each intermediate
+// line, and resolves with the final done/error line (or null if the stream
+// ended without one). Kept separate from the rendering so the progress display
+// and the result handling stay readable. Shared by the discovery sweep and the
+// firmware inventory, both of which answer over a fleet-long wait.
+async function streamNdjson(url,onProgress){
   const r=await fetch(url,{cache:"no-store"});
   checkAuthFailure(r);
   const ct=r.headers.get("content-type")||"";
@@ -11849,7 +11891,7 @@ async function runDiscover(subnet){
   const fill=w.querySelector("[data-discfill]"), count=w.querySelector("[data-disccount]");
   try{
     const url=subnet?"/api/discover?subnet="+encodeURIComponent(subnet):"/api/discover";
-    const d=await streamDiscover(url,p=>{
+    const d=await streamNdjson(url,p=>{
       if(!p.total) return;
       const pct=Math.min(100,Math.round((p.scanned||0)/p.total*100));
       if(fill) fill.style.width=pct+"%";

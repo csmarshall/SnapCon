@@ -1513,6 +1513,12 @@
   .disc-count{font-family:var(--mono); font-size:11px; color:var(--ink-faint); white-space:nowrap;}
   .disc-bar{height:3px; border-radius:2px; background:var(--line-soft); overflow:hidden; margin:0 2px 10px;}
   .disc-bar-fill{height:100%; width:0; background:var(--signal); transition:width .25s ease;}
+  /* The same bar reused in the Firmware tab's status line, where it sits under
+     the text rather than as a standalone row — spans need the explicit block
+     display to take a height. */
+  .pstatus .fw-bar{display:block; width:100%; margin:6px 0 0;}
+  .pstatus .fw-bar .disc-bar-fill{display:block;}
+  .pstatus .disc-count{margin-left:8px;}
 
   .browse-item{display:block;width:100%;text-align:left;background:transparent;border:none;border-bottom:1px solid var(--line-soft);color:var(--ink);font:inherit;font-size:13px;padding:9px 13px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .browse-item:last-child{border-bottom:none;}
