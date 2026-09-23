@@ -447,6 +447,10 @@ exports.excludeObject = http.excludeObject;
 
 // ---- File management (stock Moonraker — identical to generic Klipper) ----
 exports.listFiles = http.listFiles;
+// "Does the printer already have this exact file?" — same shared Moonraker
+// implementation for every connector that stores files through it, so the
+// identity rules cannot drift between them.
+exports.compareRemoteFile = http.compareRemoteFile;
 exports.getThumbnail = http.getThumbnail;
 exports.getFileMetadata = http.getFileMetadata;
 

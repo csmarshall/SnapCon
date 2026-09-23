@@ -197,6 +197,25 @@ function getCapabilities(p) {
 }
 exports.getCapabilities = getCapabilities;
 
+// Which protocol this printer is actually being driven over, for display.
+// Same synchronous, no-I/O contract as getCapabilities above — the server
+// calls it while building every fleet row and cannot await.
+//
+// Reports the TRANSPORT, never the firmware mod: SnapCon detects whether
+// :8898 or Moonraker answers, not whether the mod is ZMOD or Forge-X, and
+// naming a mod it cannot identify would be inventing printer data.
+//
+// null before the first successful probe. The profile is in-memory only, so
+// that is also the state for one poll after a restart — the honest answer,
+// where defaulting to "native" would assert something unmeasured.
+function getTransport(p) {
+  if (!p) return null;
+  if (p.transport === "native" || p.transport === "moonraker") return p.transport;
+  const prof = mode.getProfile(p);
+  return (prof && prof.transport) || null;
+}
+exports.getTransport = getTransport;
+
 // ---- native path (unchanged behaviour) ----
 async function probeNative(p) {
   try {
@@ -348,17 +367,33 @@ async function applyHeadMapping(p, tools, map) {
 // the other" strategy could detect that is by observing a print fail to start:
 // a hung job on real hardware, possibly overnight.
 //
-// So this refuses instead of guessing. It is not a stub to be filled in
-// casually — lifting it requires a controlled multi-colour print on real
+// So this refuses BY DEFAULT instead of guessing. It is not a stub to be
+// flipped casually — changing the default requires a controlled print on real
 // AD5X/ZMOD hardware, with the exact macro sent and the observed behaviour
 // recorded in docs/superpowers/specs/flashforge-hardware-verification.md.
 // getCapabilities reports headMapping:false in this mode for the same reason.
-async function startPrintFileMoonraker(p) {
-  throw new Error(
-    "Starting a print over Moonraker is not yet verified on this firmware. " +
-    "The ZMOD print-start macro may require confirmation on the printer's touchscreen, " +
-    "which would leave an unattended job waiting. Start this print from the printer or Fluidd."
-  );
+//
+// Read live off an AD5X on ZMOD, the object list makes the risk concrete:
+// SDCARD_PRINT_FILE is present, there is NO BASE_SDCARD_PRINT_FILE to fall
+// back to, and there is a _ZSDCARD_PRINT_FILE / _ZSDCARD_PRINT_FILE_CONTINUE
+// pair — a start split into "begin" and "continue", which is the shape you
+// build around an interruption.
+//
+// allowMoonrakerPrintStart is the operator's explicit opt-in: someone who is
+// at the printer choosing to accept that risk. Tested for EXACTLY true, so no
+// stray truthy value from a hand-edited config.json can be mistaken for
+// consent. Until the behaviour is verified, this stays opt-in per printer
+// rather than becoming the default for everyone.
+async function startPrintFileMoonraker(p, filename) {
+  if (p.allowMoonrakerPrintStart !== true) {
+    throw new Error(
+      "Starting a print over Moonraker is not yet verified on this firmware. " +
+      "The ZMOD print-start macro may require confirmation on the printer's touchscreen, " +
+      "which would leave an unattended job waiting. Start this print from the printer or Fluidd, " +
+      "or turn on \"Allow starting prints over Moonraker\" in this printer's settings to try it anyway."
+    );
+  }
+  return http.startPrintFile(asMoon(p), filename);
 }
 
 async function startPrintFile(p, filename) {

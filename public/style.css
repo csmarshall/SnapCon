@@ -234,6 +234,10 @@
   .hdr-name{font-size:15px; font-weight:800; color:#eaecff; letter-spacing:-0.01em; line-height:1;}
   /* Both are near-white, tuned for a dark card — unreadable on the light
      card's white background. */
+  /* Which protocol a printer is driven over, beside its brand. Dimmer than
+     the brand itself: it qualifies the name rather than competing with it,
+     and it inherits .hdr-brand's uppercase and letter-spacing. */
+  .hdr-transport{opacity:.62; font-weight:500;}
   [data-theme="light"] .hdr-brand{color:var(--ink-dim);}
   [data-theme="light"] .hdr-name{color:var(--ink);}
   .prism-line{height:2px;margin-top:-2px;background:linear-gradient(90deg,transparent 0%,rgba(0,120,255,0.85) 15%,rgba(0,210,255,0.70) 38%,rgba(30,160,255,0.90) 58%,rgba(0,200,255,0.65) 80%,transparent 100%);box-shadow:0 0 10px rgba(0,180,255,0.45);}

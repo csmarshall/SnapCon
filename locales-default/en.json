@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 54,
+    "version": 58,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -110,7 +110,9 @@
       "bed_label": "Bed",
       "afc_active": "ACTIVE",
       "afc_last_used": "LAST USED",
-      "afc_loaded": "LOADED"
+      "afc_loaded": "LOADED",
+      "transport_native": "Native",
+      "transport_moonraker": "Moonraker"
     },
     "progress": {
       "total_time_label": "Total time",
@@ -196,7 +198,9 @@
       "status_printing_on": "Printing on {printer}",
       "status_printing_on_mapped": "Printing on {printer} — heads mapped",
       "status_uploaded": "Uploaded",
-      "status_uploaded_mapped": "Uploaded — heads mapped"
+      "status_uploaded_mapped": "Uploaded — heads mapped",
+      "status_printing_on_existing": "Already on {printer} — printing without uploading",
+      "status_already_on_printer": "Already on the printer — nothing to upload"
     },
     "modal": {
       "bed": {
@@ -871,7 +875,11 @@
       "head_mapping_label": "Head mapping",
       "head_mapping_desc": "Show color-to-head assignment UI when sending prints",
       "auto_match_label": "Auto-match colors",
-      "auto_match_desc": "Suggest the closest head color; off uses T1→T1 order"
+      "auto_match_desc": "Suggest the closest head color; off uses T1→T1 order",
+      "skip_identical_label": "Skip uploading a file the printer already has",
+      "skip_identical_desc": "Checks size, then samples the copy on the printer. Anything it cannot confirm is uploaded as usual.",
+      "overwrite_different_label": "Overwrite a file on the printer when the content differs",
+      "overwrite_different_desc": "On, a re-sliced file replaces the printer's copy of the same name. Off, SnapCon refuses and asks you to rename it. A copy it cannot check is always uploaded."
     },
     "browse": {
       "title": "Browse for folder",
@@ -1112,7 +1120,9 @@
       "discover_progress": "{scanned} of {total} addresses · {found} found",
       "discover_all_known": "Found {count}, all already in your printer list.",
       "discover_known_hidden": "{count} already in your printer list, not shown.",
-      "discover_cancelled": "Scan stopped."
+      "discover_cancelled": "Scan stopped.",
+      "zmod_start_label": "Allow starting prints over Moonraker",
+      "zmod_start_desc": "Unverified on this firmware. ZMOD replaces the print-start command with its own, which may ask for confirmation on the printer's touchscreen — a queued job would then wait for someone to tap it. Leave off unless you are at the printer."
     },
     "firmware": {
       "get_button": "Refresh versions",

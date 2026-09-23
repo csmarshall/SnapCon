@@ -1381,6 +1381,96 @@ function fileTypeRefusal(capabilities, name, printerName) {
   return `${printerName} cannot print "${name}". It accepts ${list}.`;
 }
 
+// ---- Never write over the job a printer is running ----
+// Moonraker's upload endpoint takes no overwrite flag and replaces a
+// same-named file in place, while Klipper's virtual_sdcard streams the RUNNING
+// job out of that same file by byte offset. Sending a file whose name matches
+// the active job can therefore corrupt a print that is hours in. Whether
+// Moonraker truncates in place is deliberately not established experimentally
+// — the whole point is to never find out on someone's 22-hour job.
+//
+// Pure, so the rule itself is testable without a printer. `activeFilename` is
+// whatever the connector last reported as the running file; the STATE carries
+// the decision, because connectors deliberately leave a stale filename on the
+// payload after a job ends and on a Klippy fault, as a diagnostic.
+function activeJobConflict(printerState, activeFilename, targetName) {
+  if (printerState !== "printing" && printerState !== "paused") return false;
+  if (!activeFilename || !targetName) return false;
+  // Basename on both sides: a stored path can carry a subfolder while an
+  // upload lands under a bare basename, so comparing raw strings would miss
+  // exactly the collision this exists to catch. Case-sensitive — these are
+  // Linux filesystems, where Job.gcode and job.gcode are two different files.
+  const base = s => String(s).replace(/\\/g, "/").split("/").pop();
+  return base(activeFilename) === base(targetName);
+}
+
+// Throws a 409 when sending `name` to `p` would disturb its running job.
+// probeCached() re-probes an online printer on every call (it caches only
+// OFFLINE results), so this reads current state rather than a stale snapshot —
+// which matters here more than anywhere else in the app.
+// `action` only picks the wording: "send" is about to overwrite the file,
+// "start" is about to re-start the one already running. Both are refused.
+async function assertNotActiveJobFile(p, name, action = "send") {
+  let st;
+  try { st = await probeCached(p); } catch { return; } // unreachable: it cannot be printing at us
+  if (!st || !st.online) return;
+  if (!activeJobConflict(st.state, st.filename, name)) return;
+  const e = new Error(action === "start"
+    ? `${p.name} is already printing "${name}". Wait for it to finish before starting it again.`
+    : `"${name}" is the file ${p.name} is printing right now. Sending it would overwrite the job in progress. ` +
+      `Wait for it to finish, or send the file under a different name.`);
+  e.status = 409;
+  throw e;
+}
+
+// ---- Don't re-send a file the printer already has, byte for byte ----
+// Measured on real hardware: confirming a 65MB job took 309ms and moved 192KB
+// (see connectors/http-utils.js compareRemoteFile). The upload it replaces
+// moves the whole file.
+//
+// Every uncertain answer falls through to uploading, because a wrong "yes"
+// would start a print from the wrong bytes while a wrong "no" only costs the
+// transfer SnapCon performs today. So: the setting must be on, the connector
+// must support the comparison, it must not throw, and it must report exactly
+// true. Defaults ON when absent, like allowMapping and suggestMatching.
+// One comparison answers both questions, so the printer is asked once:
+//   "skip"    — it already has these exact bytes
+//   "refuse"  — it has a DIFFERENT file of this name and the operator has
+//               asked not to overwrite those
+//   "upload"  — everything else, which is what SnapCon has always done
+//
+// Both settings default ON, and both directions fail towards uploading.
+// Refusing is only ever returned for a difference actually PROVEN: a copy that
+// could not be verified (an old Moonraker, a refused Range read) reads as
+// unknown, not as different, because blocking every send to such a printer
+// would be far worse than the clobber it is guarding against.
+async function decideUpload(p, name, localPath) {
+  const skipIdentical = CFG.skipIdenticalUploads !== false;
+  const guardDifferent = CFG.overwriteDifferentFiles === false;
+  // Nothing either setting could change — don't spend a round trip finding out.
+  if (!skipIdentical && !guardDifferent) return { action: "upload" };
+
+  const c = getConnector(p.connector);
+  if (!c.compareRemoteFile) return { action: "upload" };
+
+  let cmp;
+  try { cmp = await c.compareRemoteFile(p, name, localPath); }
+  catch { return { action: "upload" }; }
+  if (!cmp) return { action: "upload" };
+
+  if (cmp.identical === true) return skipIdentical ? { action: "skip" } : { action: "upload" };
+
+  const provenDifferent = cmp.present === true && !cmp.unverified;
+  if (guardDifferent && provenDifferent) {
+    return {
+      action: "refuse",
+      reason: `${p.name} already has a different file called "${name}". ` +
+        `Overwriting files that differ is switched off in Settings — turn it on, or send this one under a different name.`,
+    };
+  }
+  return { action: "upload" };
+}
+
 app.post("/api/print", requireRegular, async (req, res) => {
   const { file, printer, start, map, prefs } = req.body || {};
   const p = PRINTERS[printer];
@@ -1393,6 +1483,10 @@ app.post("/api/print", requireRegular, async (req, res) => {
   // refused here rather than after a multi-megabyte transfer.
   const typeRefusal = fileTypeRefusal(getCapabilities(p.connector, p), path.basename(fp), p.name);
   if (typeRefusal) return res.status(400).json({ error: typeRefusal });
+  // Ahead of the upload-or-queue decision below: queuing a file that would
+  // overwrite the running job only defers the damage.
+  try { await assertNotActiveJobFile(p, path.basename(fp)); }
+  catch (e) { return res.status(e.status || 409).json({ error: e.message }); }
 
   // map is { logicalToolIndex: physicalHeadIndex }. Reject two tools → same head —
   // but only when actually starting a print. A plain upload just stages the file
@@ -1451,6 +1545,15 @@ app.post("/api/print", requireRegular, async (req, res) => {
     return res.json({ ok: true, mode: "pending", printer: p.name });
   }
 
+  // Decided BEFORE the job id is handed out, so a refusal is a plain HTTP
+  // error the user sees immediately rather than a job that fails a moment
+  // later. Costs one sub-second round trip, and only when a setting could act
+  // on the answer.
+  let plan;
+  try { plan = await decideUpload(p, name, fp); }
+  catch { plan = { action: "upload" }; }
+  if (plan.action === "refuse") return res.status(409).json({ error: plan.reason });
+
   // Kick the work off in the background and hand the client a job id to poll.
   const jobId = newJobId();
   const job = { phase: "upload", sent: 0, total: 0, done: false, error: null, result: null, ts: Date.now() };
@@ -1460,8 +1563,13 @@ app.post("/api/print", requireRegular, async (req, res) => {
 
   (async () => {
     try {
-      await c.uploadFile(p, fp, name, job);               // 1) upload (with progress)
-      console.log(`[print] ${p.name}: upload resolved for "${name}" (start=${start})`);
+      if (plan.action === "skip") {
+        job.skippedUpload = true;
+        console.log(`[print] ${p.name}: "${name}" already on the printer, upload skipped`);
+      } else {
+        await c.uploadFile(p, fp, name, job);             // 1) upload (with progress)
+        console.log(`[print] ${p.name}: upload resolved for "${name}" (start=${start})`);
+      }
       // 2) toolhead mapping + print-preference macros (connector-optional) —
       // still needed with no mapping chosen (tools=[]) when the printer has
       // its own preferences (auto-level/flow-calibrate/timelapse) to send
@@ -1506,7 +1614,9 @@ app.post("/api/print", requireRegular, async (req, res) => {
 app.get("/api/print-status", requireAuth, (req, res) => {
   const job = JOBS.get(req.query.job);
   if (!job) return res.status(404).json({ error: "No such job" });
-  const out = { phase: job.phase, sent: job.sent, total: job.total, done: job.done, error: job.error, result: job.result };
+  // skippedUpload travels so the client can say the transfer was skipped
+  // rather than leaving a suspiciously instant "done" unexplained.
+  const out = { phase: job.phase, sent: job.sent, total: job.total, done: job.done, error: job.error, result: job.result, skippedUpload: !!job.skippedUpload };
   if (job.done) setTimeout(() => JOBS.delete(req.query.job), 5000);
   res.json(out);
 });
@@ -1604,7 +1714,7 @@ async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needs
   }
 }
 
-app.post("/api/printfile", requireRegular, (req, res) => {
+app.post("/api/printfile", requireRegular, async (req, res) => {
   const { printer, filename, map, prefs } = req.body || {};
   const p = PRINTERS[printer];
   if (!p) return res.status(400).json({ error: "Unknown printer" });
@@ -1617,6 +1727,11 @@ app.post("/api/printfile", requireRegular, (req, res) => {
     const why = fileTypeRefusal(getCapabilities(p.connector, p), filename, p.name);
     if (why) return res.status(400).json({ error: why });
   }
+  // Nothing is uploaded here, so there is no file to corrupt — but asking a
+  // printer to start the job it is already running produces a confusing
+  // failure from Klipper, and SnapCon can say what is actually wrong.
+  try { await assertNotActiveJobFile(p, filename, "start"); }
+  catch (e) { return res.status(e.status || 409).json({ error: e.message }); }
 
   // Same head-mapping macros as the upload flow (map = { paletteIdx: headIdx }).
   let tools = [];
@@ -1926,6 +2041,10 @@ async function uploadNotifiedFile(idx, pl) {
   queuedFile.set(idx, { name: pl.name, status: "uploading", ts: Date.now() });
   saveQueuedFiles();
   try {
+    // This path fires when a previously-busy printer looks idle enough to
+    // receive the deferred file. "Looks idle" is a sampled observation, so
+    // re-check against the running job immediately before writing.
+    await assertNotActiveJobFile(p, pl.name);
     await c.uploadFile(p, pl.file, pl.name, { sent: 0, total: 0 });
     // Only ever set when this came from the Upload-button queue (not the
     // --load CLI hook, which has no color-mapping concept) — apply the same
@@ -2021,7 +2140,21 @@ async function attemptQueueDispatch(printerId) {
 
   const name = item.file.name;
   try {
-    if (!item.alreadyUploaded) await c.uploadFile(p, fp, name, { sent: 0, total: 0 });
+    // The queue reaches the same printers as the card and needs the same
+    // protection: dispatch decides a printer is idle from a sampled probe, and
+    // a job can start between that decision and this write.
+    await assertNotActiveJobFile(p, name);
+    // alreadyUploaded is the queue's own "this one is staged" flag; the
+    // comparison answers the same question for a file that got there any other
+    // way, including a previous run of this very job.
+    if (!item.alreadyUploaded) {
+      const plan = await decideUpload(p, name, fp);
+      // A refusal is a real failure for a queued job — it cannot print what it
+      // is not allowed to place — so it goes down the same path as any other
+      // dispatch error rather than silently starting the wrong file.
+      if (plan.action === "refuse") throw new Error(plan.reason);
+      if (plan.action !== "skip") await c.uploadFile(p, fp, name, { sent: 0, total: 0 });
+    }
     const tools = Object.keys(item.map || {}).map(Number).sort((a, b) => a - b);
     await withStartSequence(p, async () => {
       if (c.applyHeadMapping && (tools.length || printerHasAnyDefaultPref(p) || wantsAnyPref(item.prefs))) {
@@ -2095,7 +2228,7 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // leaked to a user who can't see it.
     if (!p || !printerVisibleTo(req.user, p)) return res.status(400).json({ error: "Unknown printer" });
     const conn = getConnector(p.connector);
-    return res.json({ id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) });
+    return res.json({ id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), transport: conn.getTransport ? conn.getTransport(p) : null, ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) });
   }
   const out = await Promise.all(PRINTERS.map(async (p, i) => {
     if (!printerVisibleTo(req.user, p)) return null;
@@ -2105,7 +2238,11 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // (pfilemodal) can default to this printer's existing preferences for
     // every role, not just Admin (who already sees them via /api/config's
     // printers[]).
-    const row = { id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) };
+    // transport: which protocol this printer is actually driven over, where
+    // the connector can say (FlashForge's stock API vs Moonraker after a
+    // firmware mod). Synchronous and I/O-free by the same contract
+    // getCapabilities has; null for every connector that speaks only one.
+    const row = { id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), transport: conn.getTransport ? conn.getTransport(p) : null, ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) };
     const qf = queuedFile.get(i);
     const pl = pendingLoad.get(i);
     // queuedFile (uploading/ready/error) reflects the retry sweep actually
@@ -3078,6 +3215,8 @@ function publicCfg(role) {
     siteName: CFG.siteName || "",
     allowMapping: CFG.allowMapping !== false,
     suggestMatching: CFG.suggestMatching !== false,
+    skipIdenticalUploads: CFG.skipIdenticalUploads !== false,
+    overwriteDifferentFiles: CFG.overwriteDifferentFiles !== false,
     usersEnabled: !!CFG.usersEnabled,
     configured: PRINTERS.length > 0,
     locale: CFG.locale || "en"
@@ -3318,6 +3457,12 @@ async function buildPrinterRecord(p, existing) {
   // Moonraker a firmware mod exposes, instead of auto-detecting. An allowlist,
   // not a passthrough — anything else, absent included, means auto.
   if (p.transport === "native" || p.transport === "moonraker") o.transport = p.transport;
+  // The operator's explicit opt-in to SnapCon starting prints over Moonraker
+  // on an AD5X running ZMOD, where the print-start macro may open a
+  // touchscreen dialog (see connectors/flashforge-ad5x.js's hardware gate).
+  // Stored only when EXACTLY true, so the connector's `!== true` check can
+  // never be satisfied by a leftover or hand-edited truthy value.
+  if (p.allowMoonrakerPrintStart === true) o.allowMoonrakerPrintStart = true;
   if (p.serial) o.serial = String(p.serial);
   o.id = (existing && existing.id) || newPrinterId();
   // Printer Pool assignment is changed only via the dedicated
@@ -3519,6 +3664,8 @@ app.post("/api/config", requireAdmin, async (req, res) => {
     // value, not to false, or unchecking them would never persist.
     allowMapping: (typeof b.allowMapping === "boolean") ? b.allowMapping : (CFG.allowMapping !== false),
     suggestMatching: (typeof b.suggestMatching === "boolean") ? b.suggestMatching : (CFG.suggestMatching !== false),
+    skipIdenticalUploads: (typeof b.skipIdenticalUploads === "boolean") ? b.skipIdenticalUploads : (CFG.skipIdenticalUploads !== false),
+    overwriteDifferentFiles: (typeof b.overwriteDifferentFiles === "boolean") ? b.overwriteDifferentFiles : (CFG.overwriteDifferentFiles !== false),
     usersEnabled: b.usersEnabled ? true : undefined,
     resend: (b.resend && typeof b.resend === "object") ? {
       apiKey: (typeof b.resend.apiKey === "string" && b.resend.apiKey.trim()) ? b.resend.apiKey.trim() : ((CFG.resend && CFG.resend.apiKey) || undefined),

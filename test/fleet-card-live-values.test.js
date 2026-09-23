@@ -39,8 +39,14 @@ function extractFn(name) {
   return appSrc.slice(start, end + 2);
 }
 
-const sandbox = { STATUS_OVERRIDE: new Map(), JSON };
+// Both client-only stores cardSignature() consults: the phase badge and the
+// result line a print/upload action last wrote (see setCardStatus).
+const sandbox = { STATUS_OVERRIDE: new Map(), CARD_STATUS: new Map(), JSON };
 vm.createContext(sandbox);
+// cardSignature resolves the displayed file through the same helper the card
+// and list view use, so the real one comes along rather than a stand-in that
+// could disagree with it.
+vm.runInContext(extractFn("cardFileStem"), sandbox);
 vm.runInContext(extractFn("cardSignature"), sandbox);
 const cardSignature = sandbox.cardSignature;
 
@@ -131,6 +137,16 @@ test("statusOverride still invalidates the signature", () => {
   finally { sandbox.STATUS_OVERRIDE.clear(); }
 });
 
+test("cardStatus still invalidates the signature", () => {
+  // The result line lives in a store rather than the card's DOM precisely so
+  // a rebuild can restore it — which only works if a new message forces that
+  // rebuild in the first place.
+  const before = sigOf(BASE());
+  sandbox.CARD_STATUS.set("3", { cls: "pstatus err", txt: "Could not start the print" });
+  try { assert.notEqual(sigOf(BASE()), before); }
+  finally { sandbox.CARD_STATUS.clear(); }
+});
+
 test("the remaining structural fields all still invalidate the signature", () => {
   const base = sigOf(BASE());
   for (const [field, value] of [
@@ -149,9 +165,12 @@ test("exactly four fields are absent from the signature — nothing else silentl
   const sig = JSON.parse(cardSignature(BASE()));
   const keys = Object.keys(sig).sort();
   assert.deepEqual(keys, [
-    "activeExt", "brand", "capabilities", "completedAt", "errorCode", "filamentUsed",
-    "filename", "forceDefaults", "heads", "layer", "message", "name", "online",
-    "plate", "queuedFile", "state", "statusOverride", "stem", "tags", "url"
+    // cardStatus and statusOverride are the two client-only stores: both are
+    // rendered into the card, so both must force the rebuild that shows them.
+    "activeExt", "brand", "capabilities", "cardStatus", "completedAt", "errorCode",
+    "filamentUsed", "filename", "forceDefaults", "heads", "layer", "message", "name",
+    "online", "plate", "queuedFile", "state", "statusOverride", "stem", "tags",
+    "transport", "url"
   ]);
   for (const gone of ["progress", "elapsed", "bed", "hotend"]) {
     assert.equal(gone in sig, false, gone + " must stay out of the signature");

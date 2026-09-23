@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 54,
+    "version": 58,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -110,7 +110,9 @@
       "bed_label": "Cama",
       "afc_active": "ACTIVA",
       "afc_last_used": "ÚLTIMA USADA",
-      "afc_loaded": "CARGADA"
+      "afc_loaded": "CARGADA",
+      "transport_native": "Nativo",
+      "transport_moonraker": "Moonraker"
     },
     "progress": {
       "total_time_label": "Tiempo total",
@@ -196,7 +198,9 @@
       "status_printing_on": "Imprimiendo en {printer}",
       "status_printing_on_mapped": "Imprimiendo en {printer} — cabezales asignados",
       "status_uploaded": "Subido",
-      "status_uploaded_mapped": "Subido — cabezales asignados"
+      "status_uploaded_mapped": "Subido — cabezales asignados",
+      "status_printing_on_existing": "Ya está en {printer}: imprimiendo sin subir",
+      "status_already_on_printer": "Ya está en la impresora: no hay nada que subir"
     },
     "modal": {
       "bed": {
@@ -871,7 +875,11 @@
       "head_mapping_label": "Asignación de cabezales",
       "head_mapping_desc": "Mostrar la interfaz de asignación de color a cabezal al enviar impresiones",
       "auto_match_label": "Auto-coincidencia de colores",
-      "auto_match_desc": "Sugiere el color de cabezal más cercano; desactivado usa el orden T1→T1"
+      "auto_match_desc": "Sugiere el color de cabezal más cercano; desactivado usa el orden T1→T1",
+      "skip_identical_label": "Omitir la subida si la impresora ya tiene el archivo",
+      "skip_identical_desc": "Comprueba el tamaño y luego muestrea la copia en la impresora. Todo lo que no pueda confirmar se sube como siempre.",
+      "overwrite_different_label": "Sobrescribir un archivo de la impresora cuando el contenido difiere",
+      "overwrite_different_desc": "Activado, un archivo recortado reemplaza la copia del mismo nombre en la impresora. Desactivado, SnapCon se niega y te pide que lo renombres. Una copia que no puede comprobar siempre se sube."
     },
     "browse": {
       "title": "Buscar carpeta",
@@ -1112,7 +1120,9 @@
       "discover_progress": "{scanned} de {total} direcciones · {found} encontradas",
       "discover_all_known": "Se encontraron {count}, todas ya están en tu lista de impresoras.",
       "discover_known_hidden": "{count} ya están en tu lista de impresoras; no se muestran.",
-      "discover_cancelled": "Escaneo detenido."
+      "discover_cancelled": "Escaneo detenido.",
+      "zmod_start_label": "Permitir iniciar impresiones por Moonraker",
+      "zmod_start_desc": "Sin verificar en este firmware. ZMOD reemplaza el comando de inicio de impresión por el suyo, que puede pedir confirmación en la pantalla táctil de la impresora; un trabajo en cola esperaría a que alguien la toque. Déjalo desactivado salvo que estés junto a la impresora."
     },
     "firmware": {
       "get_button": "Actualizar versiones",

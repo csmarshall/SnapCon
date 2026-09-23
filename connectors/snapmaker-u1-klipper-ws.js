@@ -450,6 +450,7 @@ exports.findFilamentMaterial = base.findFilamentMaterial;
 exports.getPlate = base.getPlate;
 exports.excludeObject = base.excludeObject;
 exports.listFiles = base.listFiles;
+exports.compareRemoteFile = base.compareRemoteFile;
 exports.getThumbnail = base.getThumbnail;
 exports.getFileMetadata = base.getFileMetadata;
 exports.getFirmwareInfo = base.getFirmwareInfo;

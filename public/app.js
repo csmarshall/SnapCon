@@ -367,6 +367,34 @@ function camBucket(p){
 // pstatus/send-row text already has: another browser tab watching the same
 // fleet won't see it, only the tab that triggered the action.
 const STATUS_OVERRIDE = new Map(); // String(printer id) -> {statusColor, statusTxt}
+
+// The result line a print/upload action last wrote on a printer's card.
+// Client-only, exactly like STATUS_OVERRIDE above, and held here for the same
+// reason: a card is destroyed and rebuilt whenever its signature changes, and
+// buildCardHtml cannot put back text that only ever lived in the old card's
+// DOM. That is not a rare case — clearing an action's own phase badge changes
+// the signature, so finishing an action reliably destroyed the message saying
+// how it finished, which is how a connector refusing to start a print showed
+// up as an upload followed by a silent return to Idle.
+const CARD_STATUS = new Map(); // String(printer id) -> {cls, txt}
+function setCardStatus(printerId, cls, txt){
+  const key=String(printerId);
+  if(txt) CARD_STATUS.set(key,{cls,txt}); else CARD_STATUS.delete(key);
+  // Straight to the screen: the message is the whole point of writing it, and
+  // waiting for the next poll to repaint would put it several seconds behind
+  // the action it describes.
+  renderFleet({incremental:true});
+}
+function cardStatusFor(p){
+  return (p&&CARD_STATUS.get(String(p.id)))||null;
+}
+// Both the class and the text are escaped: the text is very often a message
+// straight from a connector or a printer (CLAUDE.md section 8), and the class
+// lands inside an attribute.
+function cardStatusHtml(p){
+  const s=cardStatusFor(p);
+  return `<div class="${s?esc(s.cls):"pstatus"}" id="pst-${esc(p.id)}">${s?esc(s.txt):""}</div>`;
+}
 function statusColorText(p){
   const override=STATUS_OVERRIDE.get(String(p.id));
   if(override) return override;
@@ -5056,7 +5084,7 @@ function renderSkeletonFleet(){
     card.innerHTML=
       `<div class="top">`+
       `<span class="pn"><span class="printer-icon-sm" style="opacity:.35"></span>`+
-      `<span><div class="hdr-brand">${esc(p.brand||'SnapMaker')}</div><div class="hdr-name">${esc(p.name||'—')}</div></span></span>`+
+      `<span><div class="hdr-brand">${brandHtml(p)}</div><div class="hdr-name">${esc(p.name||'—')}</div></span></span>`+
       `<span class="status-badge" style="--status-color:var(--idle)">${esc(t("fleet.status.connecting_badge"))}</span>`+
       `</div>`+
       `<div class="prism-line" style="opacity:.2"></div>`+
@@ -5376,11 +5404,58 @@ function updateFleetCardLiveValues(card, p){
   setText('[data-live="bed-target"]', bedBar.targetTxt);
   setBar('[data-live="bed-bar"]', bedBar);
 }
+// Which protocol a printer is being driven over, for the tag beside its
+// brand. Only the two transports SnapCon actually detects are ever rendered —
+// the value crosses from config.json and a connector into the page, so an
+// unrecognised one is dropped rather than echoed.
+//
+// This names the TRANSPORT, never the firmware mod: SnapCon detects whether a
+// FlashForge answers on its stock API or on Moonraker, not whether the mod is
+// ZMOD or Forge-X, and printing a mod name it cannot identify would be
+// inventing printer data.
+function transportLabel(p){
+  if(!p) return null;
+  if(p.transport==="native") return t("fleet.card.transport_native");
+  if(p.transport==="moonraker") return t("fleet.card.transport_moonraker");
+  return null;
+}
+
+// The brand line's inner HTML, shared by the card and the list view so the two
+// cannot drift. p.brand is a free-text field the user owns — the tag is
+// appended for display only and never written back into it.
+function brandHtml(p){
+  const brand=esc((p&&p.brand)||"SnapMaker");
+  const label=transportLabel(p);
+  return label?`${brand} <span class="hdr-transport">(${esc(label)})</span>`:brand;
+}
+
+// Which file a printer's card is about — its filename slot, its thumbnail, and
+// the enlarged-thumbnail dialog all answer this the same way.
+//
+// A file SnapCon has staged but not started ("Loaded") outranks the printer's
+// own filename, because for an idle printer that filename is history and the
+// staged one is what happens next. That flips while a print is RUNNING: then
+// p.filename is the job on the machine, and a staged file is merely waiting
+// its turn. Getting this backwards showed a printing AD5X the name and
+// thumbnail of a file it was not printing.
+function cardFileStem(p){
+  if(!p) return "";
+  const printing=p.state==="printing"||p.state==="paused";
+  const queuedReady=(p.queuedFile&&p.queuedFile.status==="ready")?p.queuedFile.name:null;
+  // Still falls back to the staged name when a just-started print has no
+  // filename reported yet — showing nothing would be the worse answer.
+  return (printing?(p.filename||queuedReady):(queuedReady||p.filename))||"";
+}
+
 function cardSignature(p){
-  const queuedReady=p.queuedFile&&p.queuedFile.status==='ready'?p.queuedFile:null;
-  const stem=queuedReady?queuedReady.name:(p.filename||"");
+  const stem=cardFileStem(p);
   return JSON.stringify({
-    online:p.online, state:p.state, name:p.name, brand:p.brand, url:p.url,
+    // transport rides with brand: it is rendered beside it, and a printer
+    // that switches protocol (a firmware mod installed or removed) must
+    // repaint or the card keeps a label that is now wrong.
+    // ||null, not the bare value: JSON.stringify drops undefined keys, so a
+    // bare p.transport would make the signature's SHAPE depend on the brand.
+    online:p.online, state:p.state, name:p.name, brand:p.brand, transport:p.transport||null, url:p.url,
     // progress/elapsed/bed/hotend are deliberately ABSENT — they are the
     // four values that move on their own while a printer runs, and while
     // they were in here every actively printing card was destroyed and
@@ -5411,7 +5486,10 @@ function cardSignature(p){
     // change there needs to force a rebuild the same way a real server-
     // reported change does, or the badge would only catch up once
     // something else in this signature also happened to change.
-    statusOverride:STATUS_OVERRIDE.get(String(p.id))||null
+    statusOverride:STATUS_OVERRIDE.get(String(p.id))||null,
+    // Same reasoning as statusOverride: client-only state the card renders,
+    // so a new result message has to force the rebuild that displays it.
+    cardStatus:CARD_STATUS.get(String(p.id))||null
   });
 }
 // "Check again" on the monitoring-only note. The operator has just switched
@@ -5527,7 +5605,7 @@ function buildCardHtml(p, need, dragEnabled){
       }
     }
     card.innerHTML=`
-      <div class="top">${gridToolbarActive()?`<label class="cam-select"><input type="checkbox" class="cam-chk checkbox-input on-surface" data-camsel="${p.id}"${CAM_SELECTED.has(p.id)?' checked':''}></label>`:''}<span class="pn"><span><div class="hdr-brand">${esc(p.brand||'SnapMaker')}</div><div class="hdr-name">${esc(p.name)}</div></span></span><div class="card-right">${p.online?`<div class="card-pills">${canEject(p)?`<button class="pill-btn pill-btn-sm" ${canAct()?"":"disabled"} data-eject="${p.id}" title="${esc(t("printer.action_eject"))}"><img src="/eject-pill.svg" alt="${esc(t("printer.action_eject"))}"></button>`:''}${p.capabilities?.camera?`<button class="pill-btn pill-btn-sm" data-snap="${p.id}" title="${esc(t("printer.action_camera"))}"><img src="/camera-pill.svg" alt="${esc(t("printer.action_camera"))}"></button>`:''}${p.capabilities?.webUi?`<a class="pill-btn pill-btn-sm" href="${esc(p.url||'#')}" target="_blank" rel="noopener" title="${esc(t("printer.action_web_interface_title"))}"><img src="/fluidd-pill.svg" alt="${esc(t("printer.action_web_interface_alt"))}"></a>`:''}</div>`:''}<span class="status-badge${dragEnabled?' drag-handle':''}"${dragEnabled?` draggable="true" title="${esc(t("fleet.card.drag_title"))}"`:''} style="--status-color:${statusColor}">${statusTxt}</span></div></div>
+      <div class="top">${gridToolbarActive()?`<label class="cam-select"><input type="checkbox" class="cam-chk checkbox-input on-surface" data-camsel="${p.id}"${CAM_SELECTED.has(p.id)?' checked':''}></label>`:''}<span class="pn"><span><div class="hdr-brand">${brandHtml(p)}</div><div class="hdr-name">${esc(p.name)}</div></span></span><div class="card-right">${p.online?`<div class="card-pills">${canEject(p)?`<button class="pill-btn pill-btn-sm" ${canAct()?"":"disabled"} data-eject="${p.id}" title="${esc(t("printer.action_eject"))}"><img src="/eject-pill.svg" alt="${esc(t("printer.action_eject"))}"></button>`:''}${p.capabilities?.camera?`<button class="pill-btn pill-btn-sm" data-snap="${p.id}" title="${esc(t("printer.action_camera"))}"><img src="/camera-pill.svg" alt="${esc(t("printer.action_camera"))}"></button>`:''}${p.capabilities?.webUi?`<a class="pill-btn pill-btn-sm" href="${esc(p.url||'#')}" target="_blank" rel="noopener" title="${esc(t("printer.action_web_interface_title"))}"><img src="/fluidd-pill.svg" alt="${esc(t("printer.action_web_interface_alt"))}"></a>`:''}</div>`:''}<span class="status-badge${dragEnabled?' drag-handle':''}"${dragEnabled?` draggable="true" title="${esc(t("fleet.card.drag_title"))}"`:''} style="--status-color:${statusColor}">${statusTxt}</span></div></div>
       <div class="prism-line${p.state==='error'?' err-line':p.state==='cancelled'?' cancelled-line':p.state==='paused'?' pause-line':p.state==='complete'?' complete-line':''}"></div>
       ${VIEW_MODE==='camera'?(!p.online
           ? `<div class="cam-shot-placeholder"><span>${esc(t("printer_status.offline"))}</span></div>`
@@ -5560,8 +5638,7 @@ function buildCardHtml(p, need, dragEnabled){
         // statusColorText) — otherwise this thumbnail would show the
         // last-printed file's preview while everything else on the card
         // already points at the newly queued one.
-        const queuedReady=p.queuedFile&&p.queuedFile.status==='ready'?p.queuedFile:null;
-        const stem=queuedReady?queuedReady.name:(p.filename||"");
+        const stem=cardFileStem(p);
         const thumbCell=stem
           ? `<div class="stats-cell stats-thumb-cell" data-thumb="${p.id}" tabindex="0" role="button" title="${esc(t("fleet.card.thumb_enlarge_title"))}"><img class="stats-thumb" src="/api/thumbnail?printer=${p.id}&file=${encodeURIComponent(stem)}&t=${thumbToken(p,stem)}" alt="" onerror="thumbRetry(this)"></div>`
           : `<div class="stats-cell stats-thumb-cell"><span class="stats-thumb-empty">—</span></div>`;
@@ -5592,8 +5669,7 @@ function buildCardHtml(p, need, dragEnabled){
         // and reusing this same spot (rather than a separate line above the
         // stats-bar) is what keeps an idle-with-something-loaded card the
         // same height as any other idle card.
-        const queuedReady=p.queuedFile&&p.queuedFile.status==='ready'?p.queuedFile:null;
-        const stem=queuedReady?queuedReady.name:(p.filename||"");
+        const stem=cardFileStem(p);
         // Built once, reused as-is for regular/compact (a sibling of
         // .prog-file, unchanged from before) and nested inside .cam-prog-file
         // for camera view, where the thumbnail spans both the filename row
@@ -5647,7 +5723,7 @@ function buildCardHtml(p, need, dragEnabled){
             + (p.state==='complete'&&p.filename?`<button class="btn-chip" ${canAct()?"":"disabled"} data-reprint="${p.id}" title="${esc(t("printer.action_reprint_title",{filename:p.filename}))}"><img src="/reprint-icon.svg" alt=""><span>${esc(t("printer.action_reprint"))}</span></button>`:"")
         }
       </div>
-      <div class="pstatus" id="pst-${p.id}"></div>`;
+      ${cardStatusHtml(p)}`;
     return card;
 }
 // Replaces the old wrap.innerHTML=""+forEach full rebuild for the card-grid
@@ -5985,8 +6061,7 @@ function renderFleetListRows(camFleet, wrap, camRefreshMs){
     // progress-section's own `stem`) — otherwise this column would keep
     // showing the last-printed file while the status badge next to it
     // already says "Loaded" for a different one.
-    const queuedReady=p.queuedFile&&p.queuedFile.status==='ready'?p.queuedFile:null;
-    const stem=queuedReady?queuedReady.name:(p.filename||"");
+    const stem=cardFileStem(p);
     const fileCell=stem
       ? `<div class="list-file-cell" data-thumb="${p.id}" tabindex="0" role="button" title="${esc(t("fleet.card.thumb_enlarge_title"))}"><img class="list-thumb" src="/api/thumbnail?printer=${p.id}&file=${encodeURIComponent(stem)}&t=${thumbToken(p,stem)}" alt="" onerror="thumbRetry(this)"><span class="list-file-name">${esc(stem)}</span></div>`
       : `<span class="list-file-empty">—</span>`;
@@ -6033,7 +6108,7 @@ function renderFleetListRows(camFleet, wrap, camRefreshMs){
     const tr=document.createElement("tr");
     tr.className="list-row"+(p.online?"":" offline");
     tr.innerHTML=`<td class="list-th-chk"><label class="cam-select"><input type="checkbox" class="cam-chk checkbox-input" data-camsel="${p.id}"${CAM_SELECTED.has(p.id)?' checked':''}></label></td>`+
-      `<td class="list-printer-cell"><div class="hdr-brand">${esc(p.brand||'SnapMaker')}</div><div class="hdr-name" title="${esc(p.name)}">${esc(p.name)}</div></td>`+
+      `<td class="list-printer-cell"><div class="hdr-brand">${brandHtml(p)}</div><div class="hdr-name" title="${esc(p.name)}">${esc(p.name)}</div></td>`+
       `<td>${(p.tags||[]).filter(t=>!isColorTag(t)).map(t=>`<span class="list-tag">${esc(t)}</span>`).join("")||'<span class="list-file-empty">—</span>'}</td>`+
       `<td>${fileCell}</td>`+
       `<td><span class="status-badge" style="--status-color:${statusColor}">${statusTxt}</span></td>`+
@@ -6072,8 +6147,11 @@ function queuedFileBannerHtml(p){
 // returns, so the outcome only arrives via pollJob -- treating the 200 as
 // success would report a print started that may still fail minutes later.
 async function printQueuedFile(printerId, filename, prefs){
-  const st=$("pst-"+printerId);
-  if(st){ st.className="pstatus work"; st.textContent=t("fleet.queued.starting_print_status"); }
+  // Reports through the card-status store, never a captured element: this
+  // line lives inside a card that is rebuilt when the job's phase badge
+  // clears, which is exactly when the final message is written.
+  const st=(cls,txt)=>setCardStatus(printerId,cls,txt);
+  st("pstatus work", t("fleet.queued.starting_print_status"));
   let ok=false;
   try{
     const r=await postJSON("/api/printfile",{printer:printerId,filename,map:{},prefs});
@@ -6082,8 +6160,8 @@ async function printQueuedFile(printerId, filename, prefs){
     // pollJob writes its own generic completion text. This path had its own
     // wording before 9a and keeps it: the conversion is synchronous -> async,
     // not a change to what the operator reads.
-    if(ok&&st){ st.className="pstatus ok"; st.textContent=t("fleet.queued.printing_status",{filename}); }
-  }catch(e){ if(st){ st.className="pstatus err"; st.textContent=e.message; } }
+    if(ok) st("pstatus ok", t("fleet.queued.printing_status",{filename}));
+  }catch(e){ st("pstatus err", e.message); }
   loadFleet();
   return ok;
 }
@@ -6431,8 +6509,11 @@ async function pushTo(printer, start, extraUI, prefs, onProgress, plate){
   const map={};
   if(ALLOW_MAPPING) neededColorsOrSlot().forEach(n=>{ const v=MAPSEL[printer+":"+n.i]; if(v!==undefined) map[n.i]=parseInt(v,10); });
   const mapped=Object.keys(map).length;
-  const st=$("pst-"+printer);
-  if(st){ st.className="pstatus"; st.textContent=""; }
+  // Same reason as printQueuedFile: the card holding this line is rebuilt when
+  // the job's phase badge clears, so the message has to live in the store the
+  // rebuild reads from, not in the card's own DOM.
+  const st=(cls,txt)=>setCardStatus(printer,cls,txt);
+  st("pstatus","");
   if(extraUI) setRowUI(extraUI, 0, "", t("fleet.print.status_uploading"));
   // Capture the clicked button to animate its background as a fill bar
   const progressBtn=document.querySelector(`button[data-id="${printer}"][data-start="${start?'1':'0'}"]`);
@@ -6447,7 +6528,7 @@ async function pushTo(printer, start, extraUI, prefs, onProgress, plate){
       // Printer's busy — server queued the file instead of racing an upload
       // against the active print; loadFleet() below picks up p.queuedFile
       // and renders the existing "ready to print" banner once it lands.
-      if(st){ st.className="pstatus ok"; st.textContent=t("fleet.print.status_queued_will_upload"); }
+      st("pstatus ok", t("fleet.print.status_queued_will_upload"));
       if(extraUI) setRowUI(extraUI, 100, "ok", t("fleet.print.status_queued_short"));
       if(progressBtn){ progressBtn.style.background=''; progressBtn.disabled=false; }
       ok=true;
@@ -6455,7 +6536,7 @@ async function pushTo(printer, start, extraUI, prefs, onProgress, plate){
       ok=await pollJob(d.jobId, st, start, mapped, progressBtn, extraUI, prefs, printer, onProgress);
     }
   }catch(e){
-    if(st){ st.className="pstatus err"; st.textContent=e.message; }
+    st("pstatus err", e.message);
     if(extraUI) setRowUI(extraUI, 100, "err", e.message);
     if(progressBtn){ progressBtn.style.background=btnOrigBg; progressBtn.disabled=false; }
   }
@@ -6532,17 +6613,30 @@ function makePhaseOverride(printerId, onChange){
 }
 // `onProgress(pct)` lets a caller driving several uploads at once (the Send
 // modal) show them as one figure; the per-printer button and row keep their own.
+// `st` is either a status ELEMENT the caller owns — a modal's, which nothing
+// rebuilds underneath it — or a setStatus(cls, txt) CALLBACK for a line that
+// lives inside a fleet card, which is rebuilt the moment this job's phase
+// badge clears. A card caller must pass the callback (see setCardStatus);
+// handing over the element would be handing over something about to be
+// destroyed.
 async function pollJob(jobId, st, start, mapped, btn, extraUI, prefs, printerId, onProgress){
   const ov=makePhaseOverride(printerId);
   const setOverride=(phase,badge)=>ov.set(phase,badge);
   const clearOverride=()=>ov.clear();
+  const setStatus=typeof st==="function"
+    ? st
+    : (cls,txt)=>{ if(st){ st.className=cls; st.textContent=txt; } };
   try{
     for(;;){
       await new Promise(r=>setTimeout(r,400));
       let d;
       try{ d=await getJSON("/api/print-status?job="+encodeURIComponent(jobId)); }catch(e){ continue; }
       if(d.error){
-        if(st){ st.className="pstatus err"; st.textContent=d.error; }
+        // Order matters: clearOverride() re-renders synchronously, so the
+        // message has to be written AFTER the card it belongs on has been
+        // rebuilt, not before.
+        clearOverride();
+        setStatus("pstatus err", d.error);
         if(extraUI) setRowUI(extraUI, 100, "err", d.error);
         if(btn){ btn.style.background=''; btn.disabled=false; }
         return false;
@@ -6560,7 +6654,7 @@ async function pollJob(jobId, st, start, mapped, btn, extraUI, prefs, printerId,
       }
       else if(d.phase==="mapping"){
         const mapTxt=mappingPhaseText(mapped, prefs);
-        if(st){ st.className="pstatus work"; st.textContent=mapTxt; } setBtnFill(btn,100);
+        setStatus("pstatus work", mapTxt); setBtnFill(btn,100);
         if(extraUI) setRowUI(extraUI, 100, "work", mapTxt);
         // Klipper's own reported state stays "standby"/idle for the whole
         // physical leveling/calibration pass (see mappingPhaseBadge's own
@@ -6573,21 +6667,27 @@ async function pollJob(jobId, st, start, mapped, btn, extraUI, prefs, printerId,
         // shared poller is ready when the connector starts reporting it, and
         // costs one branch. No 9e behaviour is implemented anywhere.
         const prepTxt=t("printer_status.preparing");
-        if(st){ st.className="pstatus work"; st.textContent=prepTxt; } setBtnFill(btn,100);
+        setStatus("pstatus work", prepTxt); setBtnFill(btn,100);
         if(extraUI) setRowUI(extraUI, 100, "work", prepTxt);
         setOverride("preparing",{statusColor:"var(--busy)",statusTxt:prepTxt});
       }
       else if(d.phase==="starting"){
         clearOverride();
-        if(st){ st.className="pstatus work"; st.textContent=t("fleet.queued.starting_print_status"); } setBtnFill(btn,100);
+        setStatus("pstatus work", t("fleet.queued.starting_print_status")); setBtnFill(btn,100);
         if(extraUI) setRowUI(extraUI, 100, "work", t("fleet.queued.starting_print_status"));
       }
       if(d.done){
         clearOverride();
-        const doneTxt=start
-          ? t(mapped?"fleet.print.status_printing_on_mapped":"fleet.print.status_printing_on", {printer:(d.result&&d.result.printer)||""})
-          : t(mapped?"fleet.print.status_uploaded_mapped":"fleet.print.status_uploaded");
-        if(st){ st.className="pstatus ok"; st.textContent=doneTxt; }
+        // A skipped transfer finishes suspiciously fast — say why, or an
+        // instant "Uploaded" reads as something having gone wrong.
+        const doneTxt=d.skippedUpload
+          ? (start
+              ? t("fleet.print.status_printing_on_existing", {printer:(d.result&&d.result.printer)||""})
+              : t("fleet.print.status_already_on_printer"))
+          : (start
+              ? t(mapped?"fleet.print.status_printing_on_mapped":"fleet.print.status_printing_on", {printer:(d.result&&d.result.printer)||""})
+              : t(mapped?"fleet.print.status_uploaded_mapped":"fleet.print.status_uploaded"));
+        setStatus("pstatus ok", doneTxt);
         if(extraUI) setRowUI(extraUI, 100, "ok", doneTxt);
         if(btn){ btn.style.background=''; btn.disabled=false; }
         return true;
@@ -7363,8 +7463,7 @@ function openThumb(printerId){
   // Same "Loaded" precedence as the card/list file-name slots (see
   // statusColorText) — otherwise this would enlarge the last-printed file's
   // thumbnail instead of the one the card is actually showing right now.
-  const queuedReady=p.queuedFile&&p.queuedFile.status==='ready'?p.queuedFile.name:null;
-  const name=queuedReady||p.filename;
+  const name=cardFileStem(p);
   $("thumbtitle").textContent=p.name+(name?' — '+name:'');
   const w=$("thumbwrap");
   if(!name){ w.innerHTML='<span style="color:var(--ink-dim)">No file loaded</span>'; }
@@ -10443,6 +10542,8 @@ function generalTabValues(){
     folder:$("setFolder").value.trim(), refresh:$("setRefresh").value, currency:$("setCurrency").value,
     filamentCost:$("setFilamentCost").value, electricityRate:$("setElectricityRate").value,
     allowMapping:$("setAllowMapping").checked, suggestMatching:$("setSuggestMatching").checked,
+    skipIdenticalUploads:$("setSkipIdenticalUploads").checked,
+    overwriteDifferentFiles:$("setOverwriteDifferent").checked,
     logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(),
     logsRetentionDays:$("setLogsRetentionDays").value, cameraRetentionDays:$("setCameraRetentionDays").value,
     gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), gcodeSyncRetentionDays:$("setGcodeSyncRetentionDays").value,
@@ -10458,6 +10559,8 @@ function setGeneralTabValues(v){
   $("setElectricityRate").value=v.electricityRate;
   $("setAllowMapping").checked=v.allowMapping;
   $("setSuggestMatching").checked=v.suggestMatching;
+  $("setSkipIdenticalUploads").checked=v.skipIdenticalUploads;
+  $("setOverwriteDifferent").checked=v.overwriteDifferentFiles;
   $("setLogsFolder").value=v.logsFolder||"";
   $("setCameraFolder").value=v.cameraFolder||"";
   $("setLogsRetentionDays").value=v.logsRetentionDays||"";
@@ -10578,6 +10681,9 @@ async function loadConfigUI(){
     $("setAltDisplay").value=ALT_DISPLAY;
     ALLOW_MAPPING=c.allowMapping!==false; $("setAllowMapping").checked=ALLOW_MAPPING;
     SUGGEST_MATCHING=c.suggestMatching!==false; $("setSuggestMatching").checked=SUGGEST_MATCHING;
+    // Absent means on, matching the server's own default.
+    $("setSkipIdenticalUploads").checked=c.skipIdenticalUploads!==false;
+    $("setOverwriteDifferent").checked=c.overwriteDifferentFiles!==false;
     $("setUsersEnabled").checked=!!c.usersEnabled;
     $("bootstrapAdmin").style.display="none";
     if($("dockerRestartRow")) $("dockerRestartRow").style.display=c.isDocker?"flex":"none";
@@ -10847,6 +10953,7 @@ function serializeRowForDiff(row){
     externalSpool:row.querySelector('[id^="pextspool-"]').checked,
     filamentMode:row.querySelector(".pfilmode").value,
     transport:row.querySelector(".ptransport").value,
+    allowMoonrakerPrintStart:!!(row.querySelector('[id^="pzmodstart-"]')||{}).checked,
     tags:row.querySelector(".ptags").value.trim(),
     allowedGroups:[...row.querySelectorAll(".pgroups-chk:checked")].map(c=>c.value).sort().join(",")
   });
@@ -11104,6 +11211,12 @@ function addPrinterRow(name,url,opts,autoOpen){
     `</select>`+
     `<div class="hint" style="margin-top:6px" data-i18n="settings.printers.transport_hint">${t("settings.printers.transport_hint")}</div>`+
     `</div>`+
+    // Only meaningful on an AD5X actually running Moonraker — see the
+    // visibility rule in syncPrintPrefVisibility. Deliberately worded as the
+    // unverified thing it is rather than as a feature.
+    `<div class="zmodstart-wrap" style="display:none;margin-top:10px">`+
+    switchHtml("pzmodstart-"+uid,opts.allowMoonrakerPrintStart===true,t("settings.printers.zmod_start_label"),t("settings.printers.zmod_start_desc"),false,"settings.printers.zmod_start_label","settings.printers.zmod_start_desc")+
+    `</div>`+
     `</div>`+
 
     `<div class="prow-section"><div class="prow-section-title" data-i18n="settings.printers.section_behavior">${t("settings.printers.section_behavior")}</div>`+
@@ -11155,6 +11268,7 @@ function addPrinterRow(name,url,opts,autoOpen){
   const filModeWrap=row.querySelector(".filmode-wrap"), filModeEl=row.querySelector(".pfilmode");
   filModeEl.value=(opts.filamentMode==="cfs")?"cfs":"single";
   const transportWrap=row.querySelector(".transport-wrap"), transportEl=row.querySelector(".ptransport");
+  const zmodStartWrap=row.querySelector(".zmodstart-wrap"), zmodStartEl=row.querySelector('[id^="pzmodstart-"]');
   const tokenField=row.querySelector(".ptoken-field");
   transportEl.value=(opts.transport==="native"||opts.transport==="moonraker")?opts.transport:"auto";
   const syncPrintPrefVisibility=()=>{
@@ -11179,6 +11293,17 @@ function addPrinterRow(name,url,opts,autoOpen){
     const isFlashForge=connectorEl.value==="flashforge-ad5x"||connectorEl.value==="flashforge-adventurer";
     transportWrap.style.display=isFlashForge?"":"none";
     if(!isFlashForge) transportEl.value="auto";
+    // Starting a print over Moonraker is gated on AD5X/ZMOD only, so the
+    // switch appears only where it can do anything: this connector, and this
+    // printer actually on Moonraker — either pinned here, or detected (the
+    // fleet row's transport, matched by url since that is what this row has).
+    // Auto-and-not-yet-detected shows nothing rather than a control whose
+    // effect is unknown.
+    const detected=(FLEET.find(f=>f.url===url)||{}).transport;
+    const onMoonraker=transportEl.value==="moonraker"||(transportEl.value==="auto"&&detected==="moonraker");
+    const canZmodStart=connectorEl.value==="flashforge-ad5x"&&onMoonraker;
+    zmodStartWrap.style.display=canZmodStart?"":"none";
+    if(!canZmodStart) zmodStartEl.checked=false;
     // Some printers have no Moonraker API token to give (a Bambu Lab printer
     // authenticates with its serial and the access code on its screen), and a
     // field that can only ever be empty is a control that does nothing.
@@ -11839,6 +11964,9 @@ function gatherPrinters(){
     // connectors ever read it. "auto" is the absence of a pin, so it is sent
     // as undefined rather than stored.
     transport:(v=>v==="native"||v==="moonraker"?v:undefined)(r.querySelector(".ptransport").value),
+    // Only ever sent as true or omitted — the server stores it only when
+    // exactly true, and the connector treats anything else as "not opted in".
+    allowMoonrakerPrintStart:(r.querySelector('[id^="pzmodstart-"]')||{}).checked?true:undefined,
     serial:r.querySelector(".pserial").value.trim()||undefined,
     // Both secrets read from their OWN field: a bare ".secret-field" lookup
     // would return whichever comes first in the row (the token's) for both.
@@ -12046,7 +12174,7 @@ async function saveConfig(){
   const logsRetentionDays=parseInt($("setLogsRetentionDays").value,10);
   const cameraRetentionDays=parseInt($("setCameraRetentionDays").value,10);
   const gcodeSyncRetentionDays=parseInt($("setGcodeSyncRetentionDays").value,10);
-  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, alternateDisplay:ALT_DISPLAY, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, locale:$("setLocale")?$("setLocale").value:undefined,
+  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, alternateDisplay:ALT_DISPLAY, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, locale:$("setLocale")?$("setLocale").value:undefined,
     usersEnabled:$("setUsersEnabled").checked||undefined,
     resend:{ apiKey:$("setResendKey").value.trim(), fromAddress:$("setResendFrom").value.trim() },
     otp:{

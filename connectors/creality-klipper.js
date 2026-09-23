@@ -766,6 +766,10 @@ exports.excludeObject = http.excludeObject;
 
 // ---- File management ----
 exports.listFiles = http.listFiles;
+// "Does the printer already have this exact file?" — same shared Moonraker
+// implementation for every connector that stores files through it, so the
+// identity rules cannot drift between them.
+exports.compareRemoteFile = http.compareRemoteFile;
 exports.getFileMetadata = http.getFileMetadata;
 
 // Thumbnail: embedded base64 PNG in the gcode's own header comments, NOT a

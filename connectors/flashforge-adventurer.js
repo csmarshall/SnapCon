@@ -172,6 +172,25 @@ function getCapabilities(p) {
 }
 exports.getCapabilities = getCapabilities;
 
+// Which protocol this printer is actually being driven over, for display.
+// Same synchronous, no-I/O contract as getCapabilities above.
+//
+// Reports the TRANSPORT, never the firmware mod. This connector can tell a
+// ZMOD box from a Forge-X one in ONE narrow respect (printStartOverridden,
+// above), and that check is deliberately tri-state with null-for-unknown
+// because it exists to decide whether print-start needs a touchscreen
+// confirmation — it is not a mod identity, and must not be presented as one.
+//
+// null before the first successful probe: the profile is in-memory only, so
+// that is also the state for one poll after a restart.
+function getTransport(p) {
+  if (!p) return null;
+  if (p.transport === "native" || p.transport === "moonraker") return p.transport;
+  const prof = mode.getProfile(p);
+  return (prof && prof.transport) || null;
+}
+exports.getTransport = getTransport;
+
 // ---- control dispatch ----
 // Status is only half the job: a modded printer has :8898 CLOSED, so any
 // control call left pointing at the native API fails outright rather than

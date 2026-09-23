@@ -166,15 +166,111 @@ async function listFiles(p) {
     .map(f => ({ path: f.path, size: f.size, modified: f.modified }))
     .sort((a, b) => b.modified - a.modified);
 }
+// ---- "Does the printer already have this exact file?" ----
+// Moonraker publishes no checksum for gcode files (verified against a live U1:
+// its metadata carries size/modified/uuid/job_id and slicer fields, nothing
+// hash-like), and downloading a copy to hash would cost more than the upload
+// it is meant to save — the largest job in the reference fleet is 182MB.
+//
+// So identity is established from exact byte size plus three 64KB windows read
+// over HTTP Range and compared against the local file. Verified end to end on
+// real hardware against a genuine duplicate: all three windows matched and
+// 196608 bytes moved, 3% of that file.
+//
+// This is a strong indicator, NOT proof: a false positive would need two
+// different sliced files of identical length that also agree at head, middle
+// and tail. Every uncertain answer therefore fails CLOSED — `identical` is
+// only ever true when all of it was actually checked, so anything unverifiable
+// simply gets uploaded as before.
+const IDENTITY_WINDOW = 64 * 1024;
+const baseNameOf = s => String(s).replace(/\\/g, "/").split("/").pop();
+
+async function compareRemoteFile(p, name, localPath) {
+  // Throws if the local file is gone — a caller must not read that as a match.
+  const localSize = fs.statSync(localPath).size;
+
+  const wanted = baseNameOf(name);
+  // The printer's copy may sit in a subfolder while uploads land at the root,
+  // so the listing is matched on basename.
+  const remote = (await listFiles(p)).find(f => baseNameOf(f.path) === wanted);
+  if (!remote) return { present: false, sameSize: false, identical: false, localSize, remoteSize: null };
+  if (remote.size !== localSize) {
+    // Disproof is free: differing lengths settle it with no content read.
+    return { present: true, sameSize: false, identical: false, localSize, remoteSize: remote.size };
+  }
+
+  const url = baseUrl(p) + "/server/files/gcodes/" + String(remote.path).split("/").map(encodeURIComponent).join("/");
+  // Head, middle and tail: a re-slice that changed only infill differs in the
+  // middle, and one that changed only end-gcode differs at the tail.
+  const win = Math.min(IDENTITY_WINDOW, localSize);
+  const starts = [...new Set([0, Math.max(0, Math.floor(localSize / 2) - Math.floor(win / 2)), Math.max(0, localSize - win)])];
+
+  const fd = fs.openSync(localPath, "r");
+  try {
+    for (const start of starts) {
+      const len = Math.min(win, localSize - start);
+      if (len <= 0) continue;
+      let res;
+      try { res = await fetchTimeout(url, 10000, { headers: { Range: `bytes=${start}-${start + len - 1}` } }); }
+      catch { return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size, unverified: true }; }
+      // 206 is the only answer that proves the range was honoured; a 200 would
+      // be the whole file and must not be compared against one window.
+      if (!res.ok || res.status !== 206) {
+        return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size, unverified: true };
+      }
+      const remoteChunk = Buffer.from(await res.arrayBuffer());
+      const localChunk = Buffer.alloc(len);
+      fs.readSync(fd, localChunk, 0, len, start);
+      if (remoteChunk.length !== len || !remoteChunk.equals(localChunk)) {
+        return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size };
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { present: true, sameSize: true, identical: true, localSize, remoteSize: remote.size };
+}
+
 // `file` is the real filename as reported by the printer (with its actual
 // extension) — Moonraker's thumbnail cache is keyed by the extension-less
 // stem instead ("<stem>-300x300.png"), so that stripping happens here,
 // internally, rather than the caller pre-computing a Moonraker-specific stem
 // that a different connector (e.g. FlashForge, which wants the exact
 // filename) would misinterpret.
+// Moonraker's own metadata is the only reliable way to locate a preview. This
+// used to guess "gcodes/.thumbs/<stem>-300x300.png", which is a slicer
+// convention rather than an API — and one that only some slicers follow. Read
+// live off two printers holding thumbnails in the same .thumbs/ directory:
+//
+//   U1 Navy    96x96, 48x48, 300x300     -> the guess happened to hit
+//   AD5X Blue  32x32, 64x64, 140x110     -> no 300x300 at all, so it 404'd
+//
+// The U1 worked by coincidence of what its slicer emits, and every printer
+// configured for other sizes silently lost its previews. /server/files/metadata
+// reports what is actually there, and is documented rather than inferred.
 async function getThumbnail(p, file) {
-  const stem = String(file).replace(/\.[^./\\]+$/, "");
-  const url = baseUrl(p) + "/server/files/gcodes/.thumbs/" + encodeURIComponent(stem) + "-300x300.png";
+  const base = baseUrl(p);
+  const meta = await fetchJSONTimeout(base + "/server/files/metadata?filename=" + encodeURIComponent(file), 5000);
+  if (!meta.ok) { const e = new Error("Moonraker " + meta.status); e.status = meta.status; throw e; }
+  const thumbs = (((meta.json || {}).result || {}).thumbnails) || [];
+  // No preview is a legitimate answer for a plain gcode file, not a fault —
+  // the route turns this into a 404 and the card simply shows nothing.
+  if (!thumbs.length) { const e = new Error("No preview stored for " + file); e.status = 404; throw e; }
+
+  // Largest available: the array's order carries no meaning (300x300 is last
+  // on the U1, 140x110 is second on the AD5X), and the card scales down.
+  const area = t => (Number(t.width) || 0) * (Number(t.height) || 0);
+  const best = thumbs.reduce((a, b) => (area(b) > area(a) ? b : a));
+
+  // relative_path is relative to the GCODE FILE's own directory, so a file in
+  // a subfolder has its .thumbs/ beside it, not at the gcodes root.
+  const name = String(file);
+  const dir = name.includes("/") ? name.slice(0, name.lastIndexOf("/") + 1) : "";
+  const rel = dir + String(best.relative_path || "");
+  // Encode per segment: these names routinely contain spaces and brackets,
+  // and the separators have to survive.
+  const url = base + "/server/files/gcodes/" + rel.split("/").map(encodeURIComponent).join("/");
+
   const r = await fetchTimeout(url, 5000);
   if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
   return { contentType: r.headers.get("content-type") || "image/png", buffer: Buffer.from(await r.arrayBuffer()) };
@@ -643,7 +739,7 @@ module.exports = {
   uploadWithProgress, uploadFile,
   pause, resume, cancel, eject, estop, bedTemp, startPrintFile,
   getPlate, excludeObject,
-  listFiles, getThumbnail, getFileMetadata,
+  listFiles, getThumbnail, getFileMetadata, compareRemoteFile,
   queryFirmwareInfo, queryHealth, pickIface,
   queryRemoteFileList, downloadRemoteFile, deleteRemoteFile, queryRecentlyPrintedFiles,
   // exported for tests only
