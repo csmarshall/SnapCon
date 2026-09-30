@@ -89,7 +89,7 @@ function connectorCaps(type){
 const BRAND_EDITABLE_CONNECTOR="klipper-moonraker";
 // True only for a brand string SnapCon itself derives from a connector.
 // A generic-Klipper printer with a typed brand ("Voron") is deliberately
-// NOT one of these — see isCompatiblePrinter(), which treats an unknown
+// NOT one of these — see sendMatch(), which treats an unknown
 // brand as "can't tell" rather than a mismatch.
 function isKnownConnectorBrand(brand){
   const b=String(brand||"").trim().toLowerCase();
@@ -2546,13 +2546,13 @@ function wireUI(){
     syncSendSelectAll();
   });
   $("sendSelectCompatible").addEventListener("click",()=>{
-    const detectedBrand=MAP?detectPrinterBrand(MAP.printerModel,MAP.printerSettingsId):null;
+    const fid=fileIdentity();
     document.querySelectorAll(".send-chk").forEach(c=>{
       const row=FLEET.find(p=>p.id===c.dataset.id);
       // Keeps confirmed-compatible AND "can't tell" printers checked —
-      // only a KNOWN mismatch (isCompatiblePrinter===false, same test the
-      // red row-name highlighting uses) is excluded.
-      c.checked=!row||isCompatiblePrinter(detectedBrand,row.brand)!==false;
+      // only a KNOWN mismatch (isSendMismatch, the same test the red
+      // row-name highlighting uses) is excluded.
+      c.checked=!row||!isSendMismatch(row,fid);
     });
   });
 }
@@ -4871,57 +4871,37 @@ function neededColors(){ return MAP ? MAP.palette.filter(s=>s.used) : []; }
 // standing in for the whole file instead of hiding the picker entirely.
 function neededColorsOrSlot(){ const need=neededColors(); return need.length?need:[{i:0,hex:null,type:'',wt:''}]; }
 
-// Maps a file's raw slicer-reported metadata to the connector brand it was
-// actually sliced for, reusing CONNECTOR_TYPES (already loaded for the
-// Settings > Printers connector picker) rather than a hardcoded brand list
-// — a new connector's brand is picked up automatically, no change needed
-// here.
-//
-// printerSettingsId (OrcaSlicer-family "Vendor@Model" system-preset id,
-// e.g. "Creality@K1") is checked FIRST and preferred when it matches,
-// since it explicitly names the vendor — printer_model can instead just
-// describe the interface/profile chosen (e.g. "Generic Klipper Printer":
-// Klipper is the protocol several different brands speak, not a brand
-// itself), which is a weaker, easily-misleading signal on its own. Confirmed
-// on a real file: printer_model said "Generic Klipper Printer" while
-// printer_settings_id said "Creality@K1" for the same Creality-sliced file.
-//
-// Returns: null when the file has neither field (nothing to detect); false
-// when it has at least one but neither matches any registered connector's
-// brand; otherwise the matched brand string, in the same casing FLEET
-// printers' own p.brand field uses (see isCompatiblePrinter).
-function detectPrinterBrand(printerModel, printerSettingsId){
-  if(!printerModel&&!printerSettingsId) return null;
-  const brands=[...new Set(CONNECTOR_TYPES.map(c=>c.brand).filter(Boolean))];
-  if(printerSettingsId){
-    const vendor=String(printerSettingsId).split("@")[0].toLowerCase();
-    const hit=brands.find(b=>vendor.includes(b.toLowerCase()));
-    if(hit) return hit;
-  }
-  if(printerModel){
-    const text=printerModel.toLowerCase();
-    const hit=brands.find(b=>text.includes(b.toLowerCase()));
-    if(hit) return hit;
-  }
-  return false;
+// What the selected file says about the printer it was sliced for: family,
+// brand, and how sure. The rules live in public/printer-identity.js, shared
+// with the server, so the Send dialog and the job card never grow their own
+// string matching. hasData false = the file names no printer at all; brand
+// false = it names one SnapCon does not know.
+function fileIdentity(){
+  if(!MAP) return null;
+  return PrinterIdentity.identifyFile({
+    printerModel:MAP.printerModel, printerSettingsId:MAP.printerSettingsId,
+    printCompatiblePrinters:MAP.printCompatiblePrinters, defaultPrintProfile:MAP.defaultPrintProfile,
+    printerModelId:MAP.printerModelId
+  }, CONNECTOR_TYPES.map(c=>c.brand));
 }
 
-// Send-to-printers compatibility: true/false only when both the file's
-// detected brand and this printer's own recorded brand (set from the
-// connector at add-printer time — see the brandEl.value assignment in the
-// printer-add form) are actually known; null ("can't tell") for a
-// not-detected/unmatched file brand or a printer with no recorded brand —
-// deliberately never flagged incompatible on missing information, only on
-// a genuine, known mismatch.
-function isCompatiblePrinter(detectedBrand, printerBrand){
-  if(!detectedBrand || !printerBrand) return null;
-  // A generic-Klipper printer can carry a user-typed brand ("Voron"), which
-  // detectPrinterBrand() can never return — it only ever matches registered
-  // connector brands. Comparing the two would report a mismatch for every
-  // detectable file, so an unrecognized brand is "can't tell" instead, the
-  // same as a missing one above.
-  if(!isKnownConnectorBrand(printerBrand)) return null;
-  return detectedBrand===printerBrand;
+// How the selected file suits one fleet printer ("match", "model_mismatch",
+// "brand_mismatch" or "unknown"). A printer's family comes from the server
+// (printerFamily on the fleet row). A user-typed brand ("Voron") is never a
+// mismatch: the file could never have named it.
+function sendMatch(p, fid){
+  const f=fid===undefined?fileIdentity():fid;
+  if(!f||!p) return { status:"unknown", confident:false };
+  return PrinterIdentity.compare(f, { key:p.printerFamily||null, brand:p.brand||null }, isKnownConnectorBrand);
+}
+
+// A KNOWN mismatch: another brand, or another model of the same brand when
+// the file is sure which printer it was made for. Only this unticks a printer
+// in Send or asks before sending. "Can't tell" never does: requiring a
+// positive match would open the dialog with nothing ticked.
+function isSendMismatch(p, fid){
+  const m=sendMatch(p, fid);
+  return m.status==="brand_mismatch"||(m.status==="model_mismatch"&&m.confident);
 }
 
 // ---- Pre-send checks for a Bambu .3mf ----
@@ -4936,7 +4916,7 @@ function isCompatiblePrinter(detectedBrand, printerBrand){
 // Only models SnapCon has actually been run against are compared. The code the
 // file carries (printer_model_id, e.g. "N7") is Bambu's internal one, and
 // mapping it to a product name is only known where it has been seen.
-const BAMBU_MODEL_CODES = { "Bambu Lab P2S": "N7" };
+const BAMBU_MODEL_CODES = PrinterIdentity.BAMBU_MODEL_CODES;
 function bambuSendIssues(file, printer){
   const out=[];
   if(!file) return out;
@@ -4981,14 +4961,18 @@ function renderJob(){
   const metaParts=[...(MAP.meta||[])];
   if(totalCost>0) metaParts.push("$"+totalCost.toFixed(2));
   $("jmeta").textContent=metaParts.join("  ·  ");
-  // detected printer brand — MAP.printerModel is raw slicer-reported data;
-  // detectPrinterBrand() maps it to one of SnapCon's own connector brands
+  // detected printer — MAP.printerModel is raw slicer-reported data;
+  // fileIdentity() maps it to a printer model or one of SnapCon's own brands
   // (or "Unknown"), which is what's actually displayed, untranslated
   // Creality/SnapMaker/FlashForge proper nouns aside.
   const compat=$("jcompat");
-  const detectedBrand=detectPrinterBrand(MAP.printerModel,MAP.printerSettingsId);
-  if(detectedBrand!==null){
-    compat.style.display=""; compat.textContent=t("fleet.job.detected_printer",{brand:detectedBrand||t("fleet.job.brand_unknown")});
+  const fid=fileIdentity();
+  if(fid&&fid.hasData){
+    // The model when it is known ("Creality Ender-3 V3 Plus"), else the brand.
+    // A family inferred from a generic printer_model is only "probably".
+    const name=fid.label||fid.brand||t("fleet.job.brand_unknown");
+    const key=fid.label&&fid.confidence!=="high"?"fleet.job.detected_printer_likely":"fleet.job.detected_printer";
+    compat.style.display=""; compat.textContent=t(key,{brand:name});
   } else { compat.style.display="none"; }
   // thumbnail
   const thumb=$("jthumb");
@@ -6784,8 +6768,15 @@ function sendPlatePickerHtml(){
 // The file-shape checks come from bambuSendIssues; the filament check is here
 // because it depends on the trays this particular printer has loaded right now.
 function sendIssuesFor(p){
-  const issues=(MAP&&p&&p.capabilities&&Array.isArray(p.capabilities.fileTypes)&&p.capabilities.fileTypes.includes("3mf")&&/\.3mf$/i.test(SELECTED||""))
-    ? bambuSendIssues(MAP,p) : [];
+  const bambu3mf=!!(MAP&&p&&p.capabilities&&Array.isArray(p.capabilities.fileTypes)&&p.capabilities.fileTypes.includes("3mf")&&/\.3mf$/i.test(SELECTED||""));
+  const issues=bambu3mf ? bambuSendIssues(MAP,p) : [];
+  // Same brand, different model: a warning, never a refusal. The Bambu checks
+  // above already compare models their own way, so they are not told twice.
+  const fid=fileIdentity();
+  const m=sendMatch(p,fid);
+  if(!bambu3mf&&m.status==="model_mismatch"&&fid&&fid.label&&p.printerFamilyLabel){
+    issues.push({ level:"warn", text:t(m.confident?"fleet.send.issue_other_model":"fleet.send.issue_other_model_likely",{file:fid.label,printer:p.printerFamilyLabel}) });
+  }
   const unmatched=unmatchedFilaments(p);
   if(unmatched.length){
     issues.push({ level:"error", text:t("fleet.send.blocked_material",{materials:unmatched.join(", ")}) });
@@ -6810,12 +6801,12 @@ function unmatchedFilaments(p){
 }
 
 function renderSendList(){
-  const detectedBrand=MAP?detectPrinterBrand(MAP.printerModel,MAP.printerSettingsId):null;
+  const fid=fileIdentity();
   $('sendlist').innerHTML=urlFilterFleet(FLEET).map(p=>{
     const idle=isIdle(p);
     const dot=p.online?(idle?'var(--ok)':'var(--busy)'):'var(--idle)';
     const {statusTxt}=statusColorText(p);
-    const incompatible=isCompatiblePrinter(detectedBrand,p.brand)===false;
+    const incompatible=isSendMismatch(p,fid);
     // What the file itself says about this printer: an unsliced project it
     // cannot start, a plate sliced for another model, a nozzle that does not
     // match. A blocking problem unticks the row and disables it — there is no
@@ -6862,10 +6853,10 @@ async function doSendUpload(start){
     $('sendFooterStatus').textContent=t("fleet.send.blocked_summary",{names:blockers.map(x=>x.p.name).join(", ")});
     return;
   }
-  const detectedBrand=MAP?detectPrinterBrand(MAP.printerModel,MAP.printerSettingsId):null;
+  const fid=fileIdentity();
   const hasIncompatible=checked.some(id=>{
     const row=FLEET.find(p=>p.id===id);
-    return row && isCompatiblePrinter(detectedBrand,row.brand)===false;
+    return row && isSendMismatch(row,fid);
   });
   if(hasIncompatible && !confirm(t("fleet.modal.send.confirm_incompatible"))) return;
   setSendBtnsDisabled(true);

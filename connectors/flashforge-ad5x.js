@@ -16,6 +16,8 @@ const { normHex } = require("../parser");
 
 exports.label = "FlashForge AD5X";
 exports.brand = "FlashForge";
+// One machine per connector — see public/printer-identity.js.
+exports.printerFamily = "flashforge-ad5x";
 // Address contract: same fixed 8898 API as the Adventurer, with the port field
 // exposed only because a firmware mod (ZMOD) takes 8898 down and serves
 // Moonraker on 7125 instead. Stored URLs stay host-only, so existing configs

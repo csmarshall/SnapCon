@@ -15,6 +15,9 @@ const http = require("./http-utils");
 
 exports.label = "SnapMaker U1 (Old)";
 exports.brand = "SnapMaker";
+// This connector only ever drives one machine, so it names it for
+// public/printer-identity.js (which a fleet row resolves through).
+exports.printerFamily = "snapmaker-u1";
 // Address contract (see connectors/index.js): the U1 serves Moonraker on
 // the plain HTTP port, so there is no port for the user to set — the
 // stored URL stays host-only and this connector never adds one.

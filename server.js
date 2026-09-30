@@ -35,6 +35,9 @@ const locales = require("./locales");
 const { readNotifyToken, ensureNotifyToken, timingSafeTokenEqual } = require("./notifyToken");
 const { isPathWithinFolder, resolveWithinFolder } = require("./pathSafety");
 const { sendWebhook, redactUrls } = require("./webhookNotify");
+// Shared with the browser (served from public/): the one place slicer metadata
+// and connector knowledge become a printer identity.
+const PrinterIdentity = require("./public/printer-identity.js");
 
 // Defense in depth, not a substitute for fixing the actual bug: an unhandled
 // promise rejection anywhere (a bare setTimeout callback with no .catch(), a
@@ -1931,6 +1934,18 @@ function stampCompletedAt(p, result) {
   return result;
 }
 
+// Which machine a fleet row is: from the connector when it only drives one
+// model, else a model the connector detected (Creality) or the printer reports
+// (Bambu). null when none of those is known — the Send dialog then compares
+// brands only, as it always did.
+function printerFamilyFields(p, conn, caps) {
+  const idn = PrinterIdentity.identifyPrinter({
+    connectorFamily: conn.printerFamily, model: p.model,
+    capabilitiesModel: caps && caps.model, brand: p.brand,
+  });
+  return { printerFamily: idn.key, printerFamilyLabel: idn.label };
+}
+
 // The WebRTC signaling URL only reaches the client through the fleet row —
 // it is derived from the printer's own host by the connector, never stored
 // in config.json and never hardcoded. Absent for every printer that has no
@@ -2283,7 +2298,7 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // leaked to a user who can't see it.
     if (!p || !printerVisibleTo(req.user, p)) return res.status(400).json({ error: "Unknown printer" });
     const conn = getConnector(p.connector);
-    return res.json({ id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), transport: conn.getTransport ? conn.getTransport(p) : null, ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) });
+    return res.json({ id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...printerFamilyFields(p, conn, getCapabilities(p.connector, p)), transport: conn.getTransport ? conn.getTransport(p) : null, ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) });
   }
   const out = await Promise.all(PRINTERS.map(async (p, i) => {
     if (!printerVisibleTo(req.user, p)) return null;
@@ -2297,7 +2312,7 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // the connector can say (FlashForge's stock API vs Moonraker after a
     // firmware mod). Synchronous and I/O-free by the same contract
     // getCapabilities has; null for every connector that speaks only one.
-    const row = { id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), transport: conn.getTransport ? conn.getTransport(p) : null, ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) };
+    const row = { id: i, url: p.url, brand: p.brand || "SnapMaker", tags: p.tags || [], capabilities: getCapabilities(p.connector, p), ...printerFamilyFields(p, conn, getCapabilities(p.connector, p)), transport: conn.getTransport ? conn.getTransport(p) : null, ...webrtcCameraFields(p, conn), colorPalette: conn.colorPalette, filamentMaterials: conn.filamentMaterials, autoLevel: !!p.autoLevel, flowCalibrate: !!p.flowCalibrate, timelapse: !!p.timelapse, forceDefaults: p.forceDefaults !== false, ...(await probeCached(p)) };
     const qf = queuedFile.get(i);
     const pl = pendingLoad.get(i);
     // queuedFile (uploading/ready/error) reflects the retry sweep actually

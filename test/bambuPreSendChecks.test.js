@@ -29,7 +29,10 @@ function translate(key, vals) {
   assert.ok(typeof s === "string", "missing locale string: " + key);
   return String(s).replace(/\{(\w+)\}/g, (_, k) => (vals && vals[k] != null ? vals[k] : "{" + k + "}"));
 }
-const sandbox = { Math, JSON, String, Number, Array, Object, t: translate };
+// BAMBU_MODEL_CODES now comes from the shared printer-identity module, which
+// the page loads before app.js.
+const sandbox = { Math, JSON, String, Number, Array, Object, t: translate,
+  PrinterIdentity: require("../public/printer-identity.js") };
 vm.createContext(sandbox);
 const codes = appSrc.slice(appSrc.indexOf("const BAMBU_MODEL_CODES ="));
 vm.runInContext(codes.slice(0, codes.indexOf("\n") + 1), sandbox);

@@ -596,3 +596,18 @@ the folder it was in. When the queue came to print it, SnapCon looked for the fi
 G-code folder, didn't find it, and failed the item as missing — for any file kept in a subfolder.
 Queue items now keep the full location. Items added before this fix still carry only the name; if
 one fails as missing, remove it and queue the file again.
+
+### Send checks the printer model, not only the brand
+Send used to compare brands only, so a file sliced for one Creality machine was offered to every
+Creality printer. A file in a real library, kept under a `K1C` folder, turned out to be sliced for an
+Ender-3 V3 Plus. SnapCon now reads which machine a file was sliced for and compares it with each
+printer's own model.
+- **Another model of the same brand** gets a warning on that printer's row ("Sliced for a Creality
+  Ender-3 V3 Plus. This printer is a Creality SPARKX i7.") and is left unticked. Sending anyway still
+  works after one confirmation. Nothing is refused.
+- When a file only *probably* names its printer (its printer model is a generic "Generic Klipper
+  Printer" and the machine comes from its profile name), the warning says "Probably", and the
+  printer stays ticked.
+- The job card names the model when it is known: "Sliced for Snapmaker U1".
+- A printer whose exact model SnapCon cannot tell (an Adventurer 5M vs 5M Pro) is compared by
+  brand only, as before.

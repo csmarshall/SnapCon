@@ -174,8 +174,14 @@ function makeParser({ scanBody = false } = {}) {
       // printer_model, which can just name the interface/profile chosen
       // (e.g. "Generic Klipper Printer" — Klipper is the protocol several
       // brands speak, not a brand itself) rather than the actual
-      // manufacturer. See detectPrinterBrand() in public/app.js.
+      // manufacturer. See public/printer-identity.js.
       printerSettingsId: cfg["printer_settings_id"] || null,
+      // Further evidence for public/printer-identity.js: the process preset's
+      // compatible-printer list names the machine even when printer_model is
+      // generic. default_print_profile is kept for the record only — a real
+      // AD5X file carries an AD5M Pro value there, inherited from its preset.
+      printCompatiblePrinters: cfg["print_compatible_printers"] || null,
+      defaultPrintProfile: cfg["default_print_profile"] || null,
       meta, anyTC: any, noColors: !colours.length,
       keys, allKeys: Object.keys(cfg)
     };

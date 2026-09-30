@@ -29,6 +29,7 @@ const base = require("./snapmaker-u1-klipper");
 
 exports.label = "SnapMaker U1";
 exports.brand = "SnapMaker";
+exports.printerFamily = base.printerFamily;
 exports.capabilities = base.capabilities;
 // Addressed exactly like the HTTP connector it delegates to — the
 // WebSocket endpoint is derived from the same URL, not configured
