@@ -10299,6 +10299,9 @@ async function loadLibrarySettings(quiet){
     $("libBackupInfo").textContent=!b?"":(b.newest
       ? t("settings.library.backup_info",{when:fmtTime(libStampMs(b.newest.stamp)),count:b.count})
       : t("settings.library.backup_none"));
+    const be=b&&b.lastError;
+    $("libBackupError").style.display=be?"":"none";
+    if(be) $("libBackupError").textContent=t(be.code==="db_corrupt"?"settings.library.backup_refused_corrupt":"settings.library.backup_failed_notice",{when:fmtTime(be.at),error:be.message});
     if(!st.available){ $("libRootsList").innerHTML=""; return; }
     const d=await getJSON("/api/library/roots");
     LIB_ROOTS=d.roots||[];

@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 62,
+    "version": 63,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-30"
   },
@@ -1516,7 +1516,9 @@
         "worker_down": "El proceso en segundo plano de la biblioteca no está en marcha.",
         "db_corrupt": "La base de datos de la biblioteca no superó la comprobación de integridad, así que no se copió. Se conservan las copias anteriores.",
         "backup_failed": "La copia de seguridad falló."
-      }
+      },
+      "backup_failed_notice": "La última copia falló {when}: {error}. SnapCon lo vuelve a intentar cada hora.",
+      "backup_refused_corrupt": "La última copia ({when}) se rechazó: la base de datos de la biblioteca no superó la comprobación de integridad, así que no se copió encima de tus copias buenas. Esas se conservan. Reinicia SnapCon para restaurar la más reciente."
     }
   }
 }

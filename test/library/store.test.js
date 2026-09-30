@@ -192,3 +192,31 @@ test("a damaged database is never backed up over the good copies", () => {
   assert.throws(() => runBackup({ DatabaseSync, dbPath, backupsDir, reason: "nightly", now: tick }), e => /integrity|malformed|corrupt/i.test(e.message));
   assert.equal(listBackups(backupsDir).length, 1, "the one good backup is still the only one");
 });
+
+test("after a backup is refused for failing its integrity check, the next start checks fully and restores", () => {
+  const base = tmpBase();
+  const s = open(base, { now: tick }); seed(s.db);
+  for (let i = 0; i < 200; i++) s.db.prepare("INSERT INTO tags (name) VALUES (?)").run("tag-" + i + "-".repeat(200));
+  // A leaf page of the tags table: data that startup never reads.
+  const pageSize = s.db.prepare("PRAGMA page_size").get().page_size;
+  const page = s.db.prepare("SELECT pageno FROM dbstat WHERE name = 'tags' AND pagetype = 'leaf' ORDER BY pageno LIMIT 1 OFFSET 1").get().pageno;
+  s.close();
+  const dbPath = path.join(base, "library-data", "library.db"), backupsDir = path.join(base, "library-data", "backups");
+  runBackup({ DatabaseSync, dbPath, backupsDir, reason: "nightly", now: tick });
+  const buf = fs.readFileSync(dbPath);
+  buf.fill(0xa5, (page - 1) * pageSize + 8, page * pageSize);   // keep the page header's first bytes, garble its cells
+  fs.writeFileSync(dbPath, buf);
+  // A plain start does not notice: only the header and schema are read.
+  const quiet1 = open(base, { now: tick });
+  assert.equal(quiet1.available, true);
+  assert.equal(quiet1.recovery, null);
+  quiet1.requestIntegrityCheck("integrity check failed");   // what a refused backup does
+  quiet1.close();
+  // The next start runs the full check, finds the damage, and restores.
+  const s2 = open(base, { now: tick });
+  assert.equal(s2.available, true);
+  assert.ok(s2.recovery && s2.recovery.restoredFrom, "restored from the good backup");
+  assert.equal(s2.db.prepare("SELECT name FROM models").get().name, "Beardie");
+  assert.equal(fs.existsSync(path.join(base, "library-data", "integrity-check-requested")), false, "the request is used once");
+  s2.close();
+});

@@ -92,6 +92,7 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
   const dir = path.join(baseDir, "library-data");
   const dbPath = path.join(dir, "library.db");
   const backupsDir = path.join(dir, "backups");
+  const checkMarker = path.join(dir, "integrity-check-requested");
   const DatabaseSync = sqlite;
   const state = { available: false, reason: null, recovery: null, db: null };
 
@@ -172,6 +173,20 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
     const existed = fs.existsSync(dbPath);
     try {
       db = openAndProbe(dbPath);
+      // Opening only proves the header and schema are readable. A full check
+      // costs ~3.75 s at 100k files (measured in M1), too much for every
+      // start, so it runs only when a backup was refused because the
+      // database failed its integrity check (requestIntegrityCheck below).
+      if (fs.existsSync(checkMarker)) {
+        const res = db.prepare("PRAGMA quick_check").all().map(r => Object.values(r)[0]);
+        fs.rmSync(checkMarker, { force: true });
+        if (!(res.length === 1 && res[0] === "ok")) {
+          db.close();
+          const e = new Error("integrity check failed: " + res.slice(0, 3).join("; "));
+          e.errcode = 11;
+          throw e;
+        }
+      }
     } catch (e) {
       if (!existed || !isCorruption(e)) return unavailable("cannot open library.db: " + e.message);
       // Corrupt: keep the evidence, restore the newest good backup.
@@ -272,6 +287,8 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
     get db() { return state.db; },
     schemaVersion: () => (state.db ? state.db.prepare("PRAGMA user_version").get().user_version : null),
     listBackups: () => listBackups(backupsDir),
+    // Asks the next start to run a full integrity check (see open()).
+    requestIntegrityCheck: reason => { try { fs.writeFileSync(checkMarker, String(reason || "")); } catch {} },
     close: () => { if (state.db) { try { state.db.close(); } catch {} state.db = null; state.available = false; } },
   };
   return api;

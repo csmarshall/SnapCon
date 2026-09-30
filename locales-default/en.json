@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 62,
+    "version": 63,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-30"
   },
@@ -1516,7 +1516,9 @@
         "worker_down": "The Library's background worker isn't running.",
         "db_corrupt": "The Library database failed its integrity check, so it wasn't backed up. The earlier backups are kept.",
         "backup_failed": "The backup failed."
-      }
+      },
+      "backup_failed_notice": "The last backup failed {when}: {error}. SnapCon tries again every hour.",
+      "backup_refused_corrupt": "The last backup ({when}) was refused: the Library database failed its integrity check, so it wasn't copied over your good backups. Those are kept. Restart SnapCon to restore the newest one."
     }
   }
 }

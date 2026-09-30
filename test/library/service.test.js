@@ -175,3 +175,17 @@ test("an unavailable Library refuses changes with a 503-shaped error and lists n
   await assert.rejects(svc.addRoot({ path: base }), e => e.status === 503 && e.code === "library_unavailable");
   await svc.stop();
 });
+
+test("a failed backup is shown in the status until a backup succeeds", async () => {
+  const { svc, base } = make();
+  const backups = path.join(base, "library-data", "backups");
+  fs.rmSync(backups, { recursive: true, force: true });
+  fs.writeFileSync(backups, "a file where the backups folder should be");
+  await assert.rejects(svc.backupNow("nightly"), { code: "backup_failed" });
+  const err = svc.status().backups.lastError;
+  assert.ok(err && err.code === "backup_failed" && err.reason === "nightly");
+  fs.rmSync(backups);
+  await svc.backupNow("manual");
+  assert.equal(svc.status().backups.lastError, null);
+  await svc.stop();
+});

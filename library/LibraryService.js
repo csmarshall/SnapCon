@@ -33,6 +33,10 @@ function createLibraryService({
   let tickTimer = null, backupTimer = null;
   const probe = new Map();   // rootId -> { failures, nextAt, inFlight, realPath }
   let probeChain = Promise.resolve();
+  // The last backup failure, until a backup succeeds. A nightly backup that
+  // refuses because the database fails its integrity check must not be a
+  // log line nobody reads: it shows in Settings > Library.
+  let lastBackupError = null;
 
   const requireAvailable = () => {
     if (!store.available) throw new LibraryError(503, "library_unavailable", "The Library is unavailable: " + store.reason);
@@ -206,10 +210,17 @@ function createLibraryService({
     try {
       const res = await worker.request("backup", { dbPath: store.dbPath, backupsDir: store.backupsDir, reason });
       log.log(`[library] backup ${res.file} (${Math.round(res.bytes / 1024)} KB, ${res.ms} ms)`);
+      lastBackupError = null;
       return res;
     } catch (e) {
       log.error("[library] backup failed: " + e.message);
-      throw new LibraryError(500, e.code === "LIBRARY_DB_CORRUPT" ? "db_corrupt" : "backup_failed", "Backup failed: " + e.message);
+      const code = e.code === "LIBRARY_DB_CORRUPT" ? "db_corrupt" : "backup_failed";
+      lastBackupError = { at: now(), code, reason, message: e.message };
+      // The live database failed its integrity check: have the next start
+      // check it fully and, if it is damaged, restore the newest good backup.
+      if (code === "db_corrupt") store.requestIntegrityCheck(e.message);
+      audit("backup-failed", {}, { code, reason, message: e.message });
+      throw new LibraryError(500, code, "Backup failed: " + e.message);
     }
   }
 
@@ -253,7 +264,7 @@ function createLibraryService({
       available: store.available, reason: store.reason, schemaVersion: store.schemaVersion(),
       recovery: store.recovery,
       worker: worker ? worker.mode : null,
-      backups: { count: backups.filter(b => b.reason !== "pre-migration").length, newest: backups.find(b => b.reason !== "pre-migration") || null },
+      backups: { count: backups.filter(b => b.reason !== "pre-migration").length, newest: backups.find(b => b.reason !== "pre-migration") || null, lastError: lastBackupError },
     };
   }
 
