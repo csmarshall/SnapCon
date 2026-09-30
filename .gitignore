@@ -11,6 +11,7 @@ notify-token.json
 remote-access-data/
 audit-data/
 sync-data/
+library-data/
 data/
 locales/
 .claude/

@@ -118,6 +118,11 @@ test("Queue: docker-compose.yml mounts the whole data directory, not a single qu
   assert.ok(hosts.includes("./data"), "data must be mounted as a directory — queue-data.json's atomic temp-file-then-rename-with-backup sequence needs the temp file and the real file on the same underlying mount, or Queue Management state is wiped by recreating the container");
 });
 
+test("Library: docker-compose.yml mounts the whole library-data directory", () => {
+  const hosts = composeHostVolumePaths();
+  assert.ok(hosts.includes("./library-data"), "library-data must be mounted as a directory — library.db runs in WAL mode (its -wal/-shm sidecars) and holds the nightly backups; without it a container recreate wipes every Library decision, location and print history");
+});
+
 test("i18n: docker-compose.yml mounts the locales directory, or admin-added/edited languages are wiped by recreating the container", () => {
   const hosts = composeHostVolumePaths();
   assert.ok(hosts.includes("./locales"), "locales must be mounted as a directory — it's seeded once on first run and then holds every admin-added or admin-edited language; without this mount a container recreate reverts it to just the two bundled defaults");

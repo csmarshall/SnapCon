@@ -64,3 +64,12 @@ services:
       # a container recreate silently reverts to the two bundled defaults
       # and discards anything an admin added/edited.
       - ./locales:/app/locales                       # installed/edited language files
+      # Model Library database and its nightly backups. A directory, for the
+      # same WAL-sidecar reason as audit-data above.
+      - ./library-data:/app/library-data               # Library index, decisions, history, backups
+      # Model Library locations: every folder you add under Settings > Library
+      # must be mounted into the container, and added there by its path INSIDE
+      # the container (e.g. /models). Mount them read-only — the Library never
+      # writes to them. A NAS share is mounted on the host first (CIFS/NFS),
+      # then passed through like this:
+      # - /mnt/nas/models:/models:ro

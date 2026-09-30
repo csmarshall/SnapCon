@@ -29,6 +29,8 @@ const u1Firmware = require("./connectors/snapmaker-u1-firmware");
 const firmwareImage = require("./connectors/firmwareImage");
 const { createRemoteAccessService } = require("./remote-access/RemoteAccessService");
 const { createAuditLog } = require("./audit/AuditLog");
+const { createLibraryService } = require("./library/LibraryService");
+const { registerLibraryRoutes } = require("./library/routes");
 const { createSyncEngine } = require("./sync/SyncEngine");
 const { loadConfigFile } = require("./configLoader");
 const locales = require("./locales");
@@ -428,6 +430,19 @@ function actorFromReq(req) {
   const name = [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
   return { userId: u.id, userLabel: name || u.loginName };
 }
+
+// Model Library (docs/library-design.md) — the only module the routes below
+// talk to for it. Same shape as audit/sync/queue: its own library-data/
+// directory, node:sqlite, and "unavailable" instead of a crash if anything
+// about its database is wrong. Its worker thread and location checks start
+// with the server (see app.listen below). The G-code folder is always one of
+// its locations and follows Settings > General.
+const library = createLibraryService({
+  baseDir: BASE_DIR,
+  getGcodeFolder: () => FOLDER,
+  audit: (event, actor, detail) => auditLog.log({ category: "library", event, ...actor, detail }),
+});
+registerLibraryRoutes(app, { library, requireAuth, actorFromReq });
 
 // Explicit index route so the UI is served even when running from a packaged
 // binary (where express.static from the snapshot can be unreliable).
@@ -3825,6 +3840,7 @@ app.post("/api/config", requireAdmin, async (req, res) => {
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
     loadConfig();
+    library.syncGcodeRoot();   // the G-code folder may have moved
     if (configDiff.length) auditLog.log({ category: "admin", event: "settings-updated", ...actorFromReq(req), detail: { changed: configDiff } });
     res.json({ ok: true, ...publicCfg(req.user.role) });
   } catch (e) {
@@ -5557,6 +5573,7 @@ const httpServer = app.listen(PORT, () => {
   // neither of which can happen correctly before app.listen's callback fires.
   remoteAccess.startupInit().catch(e => console.error("[remote-access] startupInit failed:", e.message));
   reconcileQueuesOnStartup().catch(e => console.error("[queue] startup reconciliation failed:", e.message));
+  library.start();
 });
 
 // Graceful shutdown — new to this codebase (previously nothing here handled
@@ -5579,9 +5596,11 @@ function shutdown(signal) {
   const forceExitTimer = setTimeout(() => process.exit(0), 8000);
   if (forceExitTimer.unref) forceExitTimer.unref();
 
-  Promise.resolve(remoteAccess.disableForShutdown()) // stop cloudflared only — token/config are retained so the next boot reconnects
-    .catch(e => console.error("[remote-access] shutdown:", e.message))
-    .finally(() => { clearTimeout(forceExitTimer); process.exit(0); });
+  Promise.all([
+    Promise.resolve(remoteAccess.disableForShutdown()) // stop cloudflared only — token/config are retained so the next boot reconnects
+      .catch(e => console.error("[remote-access] shutdown:", e.message)),
+    library.stop().catch(e => console.error("[library] shutdown:", e.message)),
+  ]).finally(() => { clearTimeout(forceExitTimer); process.exit(0); });
 }
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
