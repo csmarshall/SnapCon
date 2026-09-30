@@ -129,6 +129,7 @@
         <button class="set-tab" data-tab="remote" data-i18n="settings.tabs.remote">Remote Access</button>
         <button class="set-tab" data-tab="logs" data-i18n="settings.tabs.logs">Logs</button>
         <button class="set-tab" data-tab="queue" data-i18n="settings.tabs.queue">Queue Management</button>
+        <button class="set-tab" data-tab="library" data-i18n="settings.tabs.library">Library</button>
       </div>
 
       <div class="set-panel" id="tab-general">
@@ -750,6 +751,51 @@
         </div>
         <span class="pstatus" aria-live="polite" id="printerPoolStatus"></span>
       </div>
+      </div>
+
+      <!-- Settings > Library: Library locations and backups. Every control acts
+           immediately (like Printer Pools above), so there is no Save row. -->
+      <div class="set-panel" id="tab-library" style="display:none">
+        <div class="setcard" id="libUnavailableCard" style="display:none"><div class="settings-warning" id="libUnavailable"></div></div>
+        <div class="setcard" id="libRecoveryCard" style="display:none"><div class="settings-warning" id="libRecovery"></div></div>
+
+        <div class="setcard">
+          <div class="fl" data-i18n="settings.library.locations_title">Library locations</div>
+          <div class="settings-help" style="margin-bottom:10px" data-i18n="settings.library.locations_desc">Folders the Library reads models and prints from. SnapCon never moves, renames or deletes anything in them.</div>
+          <div id="libRootsList"></div>
+        </div>
+
+        <div class="setcard">
+          <div class="fl" style="margin-bottom:8px" data-i18n="settings.library.add_title">Add a location</div>
+          <label class="fl" for="libNewPath" data-i18n="settings.library.path_label">Folder</label>
+          <div style="display:flex;gap:8px">
+            <input class="field" id="libNewPath" spellcheck="false" autocomplete="off" style="flex:1">
+            <button class="btn ghost" id="libBrowseBtn" data-i18n="common.browse" style="flex:none;white-space:nowrap">Browse…</button>
+          </div>
+          <div class="settings-help" data-i18n="settings.library.path_help">A local folder or a network share, such as \\server\share\models. In Docker, the folder's path inside the container.</div>
+          <label class="fl" for="libNewName" style="margin-top:10px" data-i18n="settings.library.name_label">Name</label>
+          <input class="field" id="libNewName" maxlength="60" style="max-width:320px">
+          <div class="settings-help" data-i18n="settings.library.name_help">Optional. Defaults to the folder's name.</div>
+          <label class="fl" for="libNewGrouping" style="margin-top:10px" data-i18n="settings.library.grouping_label">How files become models</label>
+          <select class="field" id="libNewGrouping" style="max-width:320px">
+            <option value="folders" data-i18n="settings.library.grouping_folders">Each folder is one model</option>
+            <option value="files" data-i18n="settings.library.grouping_files">Group individual files</option>
+          </select>
+          <div class="settings-help" data-i18n="settings.library.grouping_help">"Each folder is one model" suits downloaded model packs. "Group individual files" suits folders organised by printer or designer, like the G-code folder.</div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn primary" id="libAddBtn" data-i18n="settings.library.add_button">Add location</button>
+            <span class="pstatus" aria-live="polite" id="libAddStatus"></span>
+          </div>
+        </div>
+
+        <div class="setcard">
+          <div class="fl" data-i18n="settings.library.backups_title">Backups</div>
+          <div class="settings-help" id="libBackupInfo"></div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn ghost" id="libBackupBtn" data-i18n="settings.library.backup_now">Back up now</button>
+            <span class="pstatus" aria-live="polite" id="libBackupStatus"></span>
+          </div>
+        </div>
       </div>
 
       <div class="row" style="margin-top:16px" id="globalSaveRow">

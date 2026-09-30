@@ -2501,6 +2501,8 @@ function wireUI(){
     }catch(e){ st.className="pstatus err"; st.textContent=e.message; }
   });
 
+  initLibrarySettings();
+
   $("fwGet").addEventListener("click", loadFirmware);
   $("fwSelect").addEventListener("click", openFirmwarePicker);
   $("fwDeploy").addEventListener("click", confirmFirmwareDeploy);
@@ -10239,7 +10241,11 @@ function showSetTab(name){
   // viewing logs are both immediate actions — so neither shows a Save row.
   // Firmware is in this list because nothing on it is a saved setting: the
   // two toggles persist on change, and everything else is an action.
-  if($("globalSaveRow")) $("globalSaveRow").style.display=(SETTINGS_TAB_TRACKERS[name]||name==="remote"||name==="logs"||name==="queue"||name==="firmware")?"none":"";
+  if($("globalSaveRow")) $("globalSaveRow").style.display=(SETTINGS_TAB_TRACKERS[name]||name==="remote"||name==="logs"||name==="queue"||name==="firmware"||name==="library")?"none":"";
+  // Library locations change status on their own (a share goes offline); poll
+  // only while the tab is visible, like Remote Access below.
+  if(name==="library"){ loadLibrarySettings(); if(!LIB_POLL_TIMER) LIB_POLL_TIMER=setInterval(()=>loadLibrarySettings(true), 5000); }
+  else if(LIB_POLL_TIMER){ clearInterval(LIB_POLL_TIMER); LIB_POLL_TIMER=null; }
   // Remote Access has its own live status poller — only run it while its tab
   // is actually visible, same reasoning as the fleet poller not running
   // forever in the background for no reason.
@@ -10260,6 +10266,136 @@ function showSetTab(name){
     pollFirmwareStatus();
   }
   else scheduleFirmwareStatusPoll(0);
+}
+
+// ---- Settings > Library: locations and backups (docs/library-design.md §13) ----
+// Every control acts immediately, like Printer Pools. The server decides what
+// is allowed (library/routes.js); an error carries a code this translates.
+let LIB_POLL_TIMER=null, LIB_INFLIGHT=false, LIB_ROOTS=[];
+function libErrorText(d, fallback){
+  const key=d&&d.code?"settings.library.err."+d.code:null;
+  const s=key?t(key):null;
+  return s&&s!==key?s:((d&&d.error)||fallback);
+}
+async function libRequest(method, url, body){
+  const r=checkAuthFailure(await fetch(url,{method,headers:{"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined}));
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(libErrorText(d,"HTTP "+r.status));
+  return d;
+}
+async function loadLibrarySettings(quiet){
+  if(LIB_INFLIGHT) return;
+  LIB_INFLIGHT=true;
+  try{
+    const st=await getJSON("/api/library/status");
+    $("libUnavailableCard").style.display=st.available?"none":"";
+    if(!st.available) $("libUnavailable").textContent=t("settings.library.unavailable",{reason:st.reason||""});
+    const rec=st.recovery;
+    $("libRecoveryCard").style.display=rec?"":"none";
+    if(rec) $("libRecovery").textContent=rec.restoredFrom
+      ? t("settings.library.recovered_backup",{file:rec.restoredFrom,kept:(rec.quarantined||[]).join(", ")})
+      : t("settings.library.recovered_fresh",{kept:(rec.quarantined||[]).join(", ")});
+    const b=st.backups;
+    $("libBackupInfo").textContent=!b?"":(b.newest
+      ? t("settings.library.backup_info",{when:fmtTime(libStampMs(b.newest.stamp)),count:b.count})
+      : t("settings.library.backup_none"));
+    if(!st.available){ $("libRootsList").innerHTML=""; return; }
+    const d=await getJSON("/api/library/roots");
+    LIB_ROOTS=d.roots||[];
+    renderLibraryRoots();
+  }catch(e){ if(!quiet) $("libAddStatus").textContent=e.message; }
+  finally{ LIB_INFLIGHT=false; }
+}
+// Backup names carry a local timestamp: library-YYYYMMDD-HHMMSS-reason.db
+function libStampMs(s){ const m=/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(s||""); return m?new Date(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6]).getTime():Date.now(); }
+function libStatusView(r){
+  if(r.checking||r.status==="pending") return { cls:"", text:t("settings.library.status_checking") };
+  if(!r.enabled) return { cls:"", text:t("settings.library.status_disabled") };
+  if(r.status==="ok") return { cls:"ok", text:t("settings.library.status_ok",{when:r.lastOkAt?fmtTime(r.lastOkAt):"—"}) };
+  if(r.status==="offline") return { cls:"warn", text:t("settings.library.status_offline",{error:r.lastError||""}) };
+  return { cls:"err", text:t("settings.library.status_error",{error:r.lastError||""}) };
+}
+function renderLibraryRoots(){
+  const list=$("libRootsList");
+  // Don't replace a row whose name is being edited: a 5 s refresh would throw
+  // the typing away.
+  if(list.contains(document.activeElement)&&document.activeElement.classList.contains("lib-root-name")) return;
+  list.innerHTML=LIB_ROOTS.map(r=>{
+    const s=libStatusView(r);
+    const gcode=r.isGcodeFolder;
+    const grouping=t(r.grouping==="files"?"settings.library.grouping_files":"settings.library.grouping_folders");
+    return `<div class="lib-root" data-root="${esc(r.id)}">
+      <div class="lib-root-main">
+        <label class="fl" for="libName_${esc(r.id)}">${esc(t("settings.library.name_label"))}</label>
+        <input class="field lib-root-name" id="libName_${esc(r.id)}" value="${esc(r.name)}" maxlength="60" ${gcode?`disabled title="${esc(t("settings.library.gcode_fixed_title"))}"`:""}>
+        <div class="lib-root-path" title="${esc(r.path||"")}">${esc(r.path||"")}</div>
+        <div class="settings-help">${esc(grouping)}${gcode?" · "+esc(t("settings.library.gcode_note")):""}</div>
+        <div class="settings-help ${s.cls}" aria-live="polite">${esc(s.text)}</div>
+      </div>
+      <div class="lib-root-actions">
+        ${switchHtml("libEn_"+r.id, r.enabled, t("settings.library.enabled_label"), "", false)}
+        <button type="button" class="btn ghost lib-rescan" ${r.checking?`disabled title="${esc(t("settings.library.checking_title"))}"`:""}>${esc(t("settings.library.rescan"))}</button>
+        <button type="button" class="btn danger lib-remove" ${gcode?`disabled title="${esc(t("settings.library.gcode_fixed_title"))}"`:""}>${esc(t("settings.library.remove"))}</button>
+      </div>
+    </div>`;
+  }).join("");
+  const idOf=el=>el.closest("[data-root]").dataset.root;
+  list.querySelectorAll(".lib-root-name").forEach(inp=>{
+    const orig=inp.value;
+    inp.addEventListener("change",async()=>{
+      const name=inp.value.trim();
+      if(!name||name===orig){ inp.value=orig; return; }
+      try{ await libRequest("PATCH","/api/library/roots/"+encodeURIComponent(idOf(inp)),{name}); await loadLibrarySettings(); }
+      catch(e){ alert(e.message); inp.value=orig; }
+    });
+  });
+  list.querySelectorAll(".lib-root .switch-input").forEach(sw=>{
+    sw.addEventListener("change",async()=>{
+      try{ await libRequest("PATCH","/api/library/roots/"+encodeURIComponent(idOf(sw)),{enabled:sw.checked}); await loadLibrarySettings(); }
+      catch(e){ alert(e.message); sw.checked=!sw.checked; }
+    });
+  });
+  list.querySelectorAll(".lib-rescan").forEach(btn=>{
+    btn.addEventListener("click",async()=>{
+      btn.disabled=true;
+      try{ await libRequest("POST","/api/library/roots/"+encodeURIComponent(idOf(btn))+"/rescan"); }
+      catch(e){ alert(e.message); }
+      await loadLibrarySettings();
+    });
+  });
+  list.querySelectorAll(".lib-remove").forEach(btn=>{
+    btn.addEventListener("click",async()=>{
+      const r=LIB_ROOTS.find(x=>x.id===idOf(btn));
+      if(!r||!confirm(t("settings.library.remove_confirm",{name:r.name}))) return;
+      try{ await libRequest("DELETE","/api/library/roots/"+encodeURIComponent(r.id)); await loadLibrarySettings(); }
+      catch(e){ alert(e.message); }
+    });
+  });
+}
+function initLibrarySettings(){
+  $("libBrowseBtn").addEventListener("click",()=>openBrowse("libNewPath"));
+  $("libAddBtn").addEventListener("click",async()=>{
+    const st=$("libAddStatus");
+    const path=$("libNewPath").value.trim();
+    if(!path){ st.className="pstatus err"; st.textContent=t("settings.library.err.path_required"); return; }
+    st.className="pstatus work"; st.textContent=t("settings.library.adding");
+    $("libAddBtn").disabled=true;
+    try{
+      await libRequest("POST","/api/library/roots",{path,name:$("libNewName").value.trim()||undefined,grouping:$("libNewGrouping").value});
+      $("libNewPath").value=""; $("libNewName").value="";
+      st.className="pstatus ok"; st.textContent=t("settings.library.added");
+      await loadLibrarySettings();
+    }catch(e){ st.className="pstatus err"; st.textContent=e.message; }
+    finally{ $("libAddBtn").disabled=false; }
+  });
+  $("libBackupBtn").addEventListener("click",async()=>{
+    const st=$("libBackupStatus");
+    st.className="pstatus work"; st.textContent=t("settings.library.backing_up");
+    $("libBackupBtn").disabled=true;
+    try{ await libRequest("POST","/api/library/backup"); st.className="pstatus ok"; st.textContent=t("settings.library.backed_up"); await loadLibrarySettings(); }
+    catch(e){ st.className="pstatus err"; st.textContent=e.message; }
+    finally{ $("libBackupBtn").disabled=false; }
+  });
 }
 
 // ---- Remote Access (Cloudflare Tunnel, managed) — Development Preview ----

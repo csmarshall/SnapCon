@@ -1321,6 +1321,15 @@
   .settings-help.ok{color:var(--ok);}
   .settings-help.err{color:var(--bad);}
   .settings-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:16px;}
+  /* Settings > Library: one row per Library location. The path column flexes
+     and truncates (full path in its title) so a long UNC path never widens
+     the card; the actions wrap under it on a narrow screen. */
+  .lib-root{display:flex; flex-wrap:wrap; align-items:flex-start; gap:12px; padding:12px 0; border-top:1px solid var(--line-soft);}
+  .lib-root:first-child{border-top:none; padding-top:0;}
+  .lib-root-main{flex:1 1 280px; min-width:0;}
+  .lib-root-main .lib-root-name{max-width:320px;}
+  .lib-root-path{font-family:var(--mono); font-size:12px; color:var(--ink-dim); margin:6px 0 2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .lib-root-actions{display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:18px;}
   /* Printer sync's What/Destination/Delete-after table — a plain div grid,
      not a native <table>, matching this file's existing row patterns. Each
      .sync-row (including the header) shares one column template so the

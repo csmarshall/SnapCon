@@ -515,7 +515,8 @@ test("Stop after current never interrupts a flash", () => {
 test("the two toggles are saved settings, and the tab has no Save button", () => {
   // Nothing else on this tab is a stored value, so a Save button there is
   // just a control that does nothing for the thing in front of you.
-  assert.match(appSrc, /name==="queue"\|\|name==="firmware"\)\?"none":""/);
+  // Firmware is in showSetTab's no-Save-row list, wherever it sits in it.
+  assert.match(appSrc, /\|\|name==="firmware"(\|\|name==="[a-z]+")*\)\?"none":""/);
   assert.match(appSrc, /\["fwSkipCurrent","fwVerify"\]\.forEach\(id=>\{/);
   assert.match(appSrc, /postJSON\("\/api\/firmware-options"/);
   // Its own route: a partial /api/config post falls back to the current value
