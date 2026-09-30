@@ -6825,7 +6825,7 @@ function renderSendList(){
     const notes=issues.map(i=>`<span class="send-issue ${i.level==="error"?"err":"warn"}">${esc(i.text)}</span>`).join("");
     return `<label class="send-row${blocked?' blocked':''}">
       <div class="send-row-fill" data-fill="${esc(p.id)}"></div>
-      <input type="checkbox" class="send-chk checkbox-input" data-id="${esc(p.id)}" ${idle&&!blocked?'checked':''} ${blocked?'disabled':''}>
+      <input type="checkbox" class="send-chk checkbox-input" data-id="${esc(p.id)}" ${idle&&!blocked&&!incompatible?'checked':''} ${blocked?'disabled':''}>
       <span class="send-dot" style="background:${dot}"></span>
       <span class="send-name${incompatible?' incompatible':''}">${esc(p.name)}</span>
       <span class="send-status-txt" data-rst="${esc(p.id)}">${esc(statusTxt)}</span>
