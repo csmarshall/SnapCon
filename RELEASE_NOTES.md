@@ -547,3 +547,52 @@ what the numbers meant, and a wrong countdown is worse than none.
 
 Chamber temperature is still not shown. The printer reports two readings that might be it, and
 neither has been confirmed.
+
+
+0.7.3
+
+### "Upload" now always means upload
+The Upload button used to do two different things depending on the printer, with nothing on screen
+saying which. On an ordinary printer it staged a file. On a printer belonging to a **queue pool** the
+same click created a **queue item**, which the queue engine would later upload *and start printing*.
+
+Upload now always means upload. Scheduling a print is a separate, explicit choice.
+
+- **Upload into queue** (Settings → Sending prints) — **off by default**. When off, uploading to a
+  queue-managed printer simply puts the file there and leaves the queue alone. When on, the file is
+  uploaded *and* added to that printer's queue so it prints in turn.
+- **If you use Queue Management, read this one.** With the setting off — the default — an Upload
+  click on a pooled printer no longer schedules a print. The file lands on the printer and nothing
+  else happens. Turn **Upload into queue** on to get the old behaviour back.
+- It applies **always**, not only when the printer happens to be mid-print. A setting that only
+  sometimes does what its label says is the thing this replaces.
+
+### Uploading to a printer that is already printing
+- **Allow uploading while a printer is printing** (Settings → Sending prints) — **on by default**.
+  Uploads used to be deferred until the printer was free; now they go straight through.
+- **Starting a second print on a busy printer is refused**, whatever that setting says. That had no
+  server-side guard at all before — only a disabled button.
+- **A file can never be sent over the one being printed.** Moonraker replaces a same-named file in
+  place while Klipper is streaming the running job out of it, so SnapCon refuses that outright on
+  every path: the card, the printer-files dialog and the queue.
+
+### Sending a file the printer already has
+- **Skip uploading a file the printer already has** — on by default. SnapCon compares the exact byte
+  size, then samples three windows of the copy on the printer and compares them with your file. A
+  65MB job was confirmed in 309ms, moving 192KB instead of 65MB.
+- Anything it cannot confirm is uploaded as usual. The check can only ever skip work, never block it.
+- **Overwrite a file on the printer when the content differs** — on by default, so re-slicing and
+  re-sending under the same name keeps working. Turn it off and SnapCon refuses to replace a file
+  whose content differs, and asks you to rename instead.
+
+### Send to printers: only compatible printers are pre-ticked
+Opening Send with a file sliced for one printer family used to tick every idle printer, other brands
+included. Now a printer SnapCon knows is a mismatch is left unticked (and still marked, as before).
+When the file's brand cannot be determined, every idle printer is pre-ticked exactly as before.
+
+### Fixed: a queued upload from a subfolder failed as "file missing"
+Uploading to a queue-managed printer added a queue item that remembered only the file's name, not
+the folder it was in. When the queue came to print it, SnapCon looked for the file at the top of the
+G-code folder, didn't find it, and failed the item as missing — for any file kept in a subfolder.
+Queue items now keep the full location. Items added before this fix still carry only the name; if
+one fails as missing, remove it and queue the file again.
