@@ -1454,6 +1454,16 @@ function uploadDisposition({ start, busy, allowWhilePrinting, uploadIntoQueue, p
   return { action: "upload", queue, alreadyUploaded: queue };
 }
 
+// A queue item names its file as { name, sub } relative to the G-code folder,
+// and dispatch rebuilds the path from exactly that pair. Derived from the
+// resolved path so a file in a subfolder keeps its subfolder: a bare basename
+// made dispatch look at the top of the folder and fail the item as missing.
+function queueFileRef(fp, folder) {
+  const parts = path.relative(folder, fp).split(path.sep);
+  const name = parts.pop();
+  return { name, sub: parts.join("/") };
+}
+
 // ---- Don't re-send a file the printer already has, byte for byte ----
 // Measured on real hardware: confirming a 65MB job took 309ms and moved 192KB
 // (see connectors/http-utils.js compareRemoteFile). The upload it replaces
@@ -1569,7 +1579,7 @@ app.post("/api/print", requireRegular, async (req, res) => {
       ...state,
       queue: [...state.queue, {
         id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: !!uploaded,
-        file: { name, sub: "", sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
+        file: { ...queueFileRef(fp, FOLDER), sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
         map, prefs, createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
         queuedBy: actor, retryOfItemId: null, dispatchSnapshot: null
       }],
