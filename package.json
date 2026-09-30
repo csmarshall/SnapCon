@@ -30,6 +30,9 @@
       "node22-macos-arm64",
       "node22-linux-x64"
     ],
-    "outputPath": "dist"
+    "outputPath": "dist",
+    "scripts": [
+      "library/indexer-worker.js"
+    ]
   }
 }

@@ -1,0 +1,280 @@
+// library/LibraryStore.js — the Library's SQLite database: opening it,
+// migrating it, backing it up, recovering it, and rebuilding its derived half.
+//
+// node:sqlite, as audit/ and sync/ use, so the pkg builds carry no native
+// addon. Like them it degrades instead of crashing: without node:sqlite, or
+// with a database it must not touch, the Library reports itself unavailable
+// and the rest of SnapCon runs as before.
+//
+// Persistent state follows CLAUDE.md §7:
+//   missing file       a first run: create it
+//   corrupt file       quarantine it (never delete) and restore the newest
+//                      good backup; with no backup, start fresh and say so
+//   failed open        (locked, permissions, a newer SnapCon's database) stay
+//                      unavailable and leave the file exactly as it is
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const SCHEMA = require("./schema");
+const { seedRoleDefaults } = require("./permissions");
+
+// version -> function(db). Each runs inside its own transaction, after a
+// pre-migration snapshot. Version 1 is the initial schema, created directly.
+const MIGRATIONS = {};
+
+const BACKUP_KEEP = 7;
+const SQLITE_CORRUPT = new Set([11, 26]);   // SQLITE_CORRUPT, SQLITE_NOTADB
+
+function loadSqlite() {
+  try { return require("node:sqlite").DatabaseSync; } catch { return null; }
+}
+
+function stamp(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function isCorruption(e) {
+  return !!e && (SQLITE_CORRUPT.has(e.errcode) || /file is not a database|malformed/i.test(e.message || ""));
+}
+
+// Backups are VACUUM INTO copies: consistent while the live database stays in
+// use. Written under a temporary name and renamed, so a crash never leaves a
+// half-written file looking like a good backup. Refuses to back up a database
+// that fails its integrity check, so a damaged file never pushes the last good
+// copies out of rotation. Used on the main thread for pre-migration snapshots
+// (before anything else runs) and from the indexer worker for the nightly one.
+function runBackup({ DatabaseSync, dbPath, backupsDir, reason, keep = BACKUP_KEEP, now = Date.now }) {
+  const t0 = Date.now();
+  fs.mkdirSync(backupsDir, { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    const check = db.prepare("PRAGMA quick_check").all().map(r => Object.values(r)[0]);
+    if (!(check.length === 1 && check[0] === "ok")) {
+      const e = new Error("integrity check failed: " + check.slice(0, 3).join("; "));
+      e.code = "LIBRARY_DB_CORRUPT";
+      throw e;
+    }
+    const name = `library-${stamp(now())}-${reason}.db`;
+    const tmp = path.join(backupsDir, name + ".partial");
+    fs.rmSync(tmp, { force: true });
+    db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
+    fs.renameSync(tmp, path.join(backupsDir, name));
+    if (reason !== "pre-migration") rotateBackups(backupsDir, keep);
+    return { file: name, bytes: fs.statSync(path.join(backupsDir, name)).size, ms: Date.now() - t0 };
+  } finally { db.close(); }
+}
+
+// Keeps the newest `keep` routine backups. Pre-migration snapshots are few and
+// are never rotated away: they are the way back from a failed upgrade.
+function rotateBackups(backupsDir, keep = BACKUP_KEEP) {
+  const routine = listBackups(backupsDir).filter(b => b.reason !== "pre-migration");
+  for (const b of routine.slice(keep)) fs.rmSync(path.join(backupsDir, b.file), { force: true });
+}
+
+function listBackups(backupsDir) {
+  let names = [];
+  try { names = fs.readdirSync(backupsDir); } catch { return []; }
+  return names
+    .map(n => /^library-(\d{8}-\d{6})-([a-z-]+)\.db$/.exec(n))
+    .filter(Boolean)
+    .map(m => ({ file: m[0], stamp: m[1], reason: m[2], bytes: fs.statSync(path.join(backupsDir, m[0])).size }))
+    .sort((a, b) => (a.stamp < b.stamp ? 1 : a.stamp > b.stamp ? -1 : 0));
+}
+
+// `schema` and `migrations` default to the real ones. Tests pass their own
+// to exercise a version upgrade before the first real migration exists.
+// `sqlite` is the DatabaseSync constructor; tests pass null to exercise the
+// "node:sqlite unavailable" path.
+function createLibraryStore({ baseDir, now = Date.now, log = console, schema = SCHEMA, migrations = MIGRATIONS, sqlite = loadSqlite() }) {
+  const { SCHEMA_VERSION, AUTHORED_SQL, DERIVED_SQL, DERIVED_TABLES } = schema;
+  const dir = path.join(baseDir, "library-data");
+  const dbPath = path.join(dir, "library.db");
+  const backupsDir = path.join(dir, "backups");
+  const DatabaseSync = sqlite;
+  const state = { available: false, reason: null, recovery: null, db: null };
+
+  const unavailable = reason => {
+    state.available = false; state.reason = reason;
+    log.warn("[library] unavailable: " + reason);
+    return api;
+  };
+
+  function openAndProbe(file) {
+    const db = new DatabaseSync(file);
+    try {
+      db.exec("PRAGMA busy_timeout = 5000");
+      // Reading the schema touches the header and the schema pages: enough to
+      // catch a file that is not a database, or one whose first pages are bad.
+      db.prepare("SELECT count(*) AS n FROM sqlite_schema").get();
+      db.prepare("PRAGMA user_version").get();
+      return db;
+    } catch (e) { db.close(); throw e; }
+  }
+
+  function quarantine() {
+    const suffix = ".corrupt-" + stamp(now());
+    const moved = [];
+    for (const ext of ["", "-wal", "-shm"]) {
+      const f = dbPath + ext;
+      if (fs.existsSync(f)) { fs.renameSync(f, dbPath + suffix + ext); moved.push(path.basename(dbPath + suffix + ext)); }
+    }
+    return moved;
+  }
+
+  function restoreNewestBackup() {
+    for (const b of listBackups(backupsDir)) {
+      const src = path.join(backupsDir, b.file);
+      try {
+        const probe = new DatabaseSync(src);
+        const ok = probe.prepare("PRAGMA quick_check").all().map(r => Object.values(r)[0]);
+        probe.close();
+        if (ok.length !== 1 || ok[0] !== "ok") continue;
+        fs.copyFileSync(src, dbPath);
+        return b.file;
+      } catch { /* try the next older one */ }
+    }
+    return null;
+  }
+
+  function createFresh(db) {
+    db.exec("BEGIN");
+    try {
+      db.exec(AUTHORED_SQL);
+      db.exec(DERIVED_SQL);
+      seedRoleDefaults(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      db.exec("COMMIT");
+    } catch (e) { db.exec("ROLLBACK"); throw e; }
+  }
+
+  function migrate(db, from) {
+    db.close();
+    runBackup({ DatabaseSync, dbPath, backupsDir, reason: "pre-migration", now });
+    db = openAndProbe(dbPath);
+    for (let v = from + 1; v <= SCHEMA_VERSION; v++) {
+      const step = migrations[v];
+      if (!step) throw new Error(`no migration to schema version ${v}`);
+      db.exec("BEGIN");
+      try { step(db); db.exec(`PRAGMA user_version = ${v}`); db.exec("COMMIT"); }
+      catch (e) { db.exec("ROLLBACK"); throw e; }
+    }
+    return db;
+  }
+
+  function open() {
+    if (!DatabaseSync) return unavailable("node:sqlite is not available on this Node runtime");
+    try { fs.mkdirSync(dir, { recursive: true }); }
+    catch (e) { return unavailable("cannot create library-data: " + e.message); }
+
+    let db;
+    const existed = fs.existsSync(dbPath);
+    try {
+      db = openAndProbe(dbPath);
+    } catch (e) {
+      if (!existed || !isCorruption(e)) return unavailable("cannot open library.db: " + e.message);
+      // Corrupt: keep the evidence, restore the newest good backup.
+      const quarantined = quarantine();
+      const restored = restoreNewestBackup();
+      state.recovery = { at: now(), quarantined, restoredFrom: restored, fresh: !restored, error: e.message };
+      log.error(`[library] library.db was corrupt (${e.message}); quarantined as ${quarantined.join(", ")}; ` +
+        (restored ? "restored " + restored : "no usable backup, starting a new empty library"));
+      try { db = openAndProbe(dbPath); }
+      catch (e2) { return unavailable("cannot open the recovered library.db: " + e2.message); }
+    }
+
+    try {
+      const version = db.prepare("PRAGMA user_version").get().user_version;
+      const tables = db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE type='table'").get().n;
+      if (version > SCHEMA_VERSION) {
+        db.close();
+        return unavailable(`library.db has schema version ${version}, newer than this SnapCon supports (${SCHEMA_VERSION}); it was left untouched`);
+      }
+      if (version === 0 && tables > 0) {
+        db.close();
+        return unavailable("library.db contains tables but no schema version; it was left untouched");
+      }
+      if (version === 0) createFresh(db);
+      else if (version < SCHEMA_VERSION) db = migrate(db, version);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA synchronous = NORMAL");
+      db.exec("PRAGMA foreign_keys = ON");
+      seedRoleDefaults(db);   // new capabilities get their role defaults; revoked ones stay allow=0
+    } catch (e) {
+      try { db.close(); } catch {}
+      return unavailable("cannot prepare library.db: " + e.message);
+    }
+    state.db = db; state.available = true; state.reason = null;
+    return api;
+  }
+
+  // Drop and recreate every derived table in one transaction (§4.6 rule 7).
+  // Foreign-key enforcement is off for the drop only, which is safe because no
+  // authored table references a derived one; turning it on again afterwards
+  // restores it for everything else. Authored tables, including the runtime
+  // status columns of roots, are not touched.
+  function rebuildDerived() {
+    const db = state.db;
+    if (!db) throw new Error("library unavailable");
+    const t0 = Date.now();
+    db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      db.exec("BEGIN");
+      try {
+        for (const t of DERIVED_TABLES) db.exec(`DROP TABLE IF EXISTS ${t}`);
+        db.exec(DERIVED_SQL);
+        db.exec("COMMIT");
+      } catch (e) { db.exec("ROLLBACK"); throw e; }
+    } finally { db.exec("PRAGMA foreign_keys = ON"); }
+    const violations = db.prepare("PRAGMA foreign_key_check").all();
+    if (violations.length) throw new Error("foreign key violations after rebuild: " + JSON.stringify(violations.slice(0, 3)));
+    return { ms: Date.now() - t0 };
+  }
+
+  // ---- roots (Library locations) ----
+  const ROOT_COLS = "id, name, path, grouping, enabled, scan_every_min, full_hash, created_at, created_by, status, last_scan_at, last_ok_at, last_error";
+  const roots = {
+    list: () => state.db.prepare(`SELECT ${ROOT_COLS} FROM roots ORDER BY (id='gcode') DESC, name COLLATE NOCASE`).all().map(r => ({ ...r })),
+    get: id => { const r = state.db.prepare(`SELECT ${ROOT_COLS} FROM roots WHERE id = ?`).get(id); return r ? { ...r } : null; },
+    insert: r => state.db.prepare(`INSERT INTO roots (id, name, path, grouping, enabled, scan_every_min, full_hash, created_at, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(r.id, r.name, r.path, r.grouping, r.enabled ? 1 : 0, r.scan_every_min, r.full_hash || "idle", r.created_at, r.created_by || null),
+    update: (id, f) => {
+      const allowed = ["name", "path", "grouping", "enabled", "scan_every_min"];
+      const keys = Object.keys(f).filter(k => allowed.includes(k));
+      if (!keys.length) return;
+      state.db.prepare(`UPDATE roots SET ${keys.map(k => k + " = ?").join(", ")} WHERE id = ?`)
+        .run(...keys.map(k => (k === "enabled" ? (f[k] ? 1 : 0) : f[k])), id);
+    },
+    setStatus: (id, s) => state.db.prepare("UPDATE roots SET status = ?, last_ok_at = COALESCE(?, last_ok_at), last_error = ? WHERE id = ?")
+      .run(s.status, s.lastOkAt || null, s.error || null, id),
+    // Removing a location drops only its derived rows (files cascade to their
+    // derived children). Decisions, prints and models are authored and stay,
+    // keyed by content, for Re-link (§4.6 rule 6).
+    remove: id => {
+      state.db.exec("BEGIN");
+      try {
+        state.db.prepare("DELETE FROM scan_runs WHERE root_id = ?").run(id);
+        state.db.prepare("DELETE FROM folder_classes WHERE root_id = ?").run(id);
+        state.db.prepare("DELETE FROM files WHERE root_id = ?").run(id);
+        state.db.prepare("DELETE FROM roots WHERE id = ?").run(id);
+        state.db.exec("COMMIT");
+      } catch (e) { state.db.exec("ROLLBACK"); throw e; }
+    },
+  };
+
+  const api = {
+    open, rebuildDerived, roots,
+    dbPath, backupsDir,
+    get available() { return state.available; },
+    get reason() { return state.reason; },
+    get recovery() { return state.recovery; },
+    get db() { return state.db; },
+    schemaVersion: () => (state.db ? state.db.prepare("PRAGMA user_version").get().user_version : null),
+    listBackups: () => listBackups(backupsDir),
+    close: () => { if (state.db) { try { state.db.close(); } catch {} state.db = null; state.available = false; } },
+  };
+  return api;
+}
+
+module.exports = { createLibraryStore, runBackup, rotateBackups, listBackups, MIGRATIONS, BACKUP_KEEP };
