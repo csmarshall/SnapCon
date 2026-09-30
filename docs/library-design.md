@@ -1,7 +1,7 @@
 # Model Library — implementation specification (v3.2, canonical)
 
-**Status:** APPROVED. OK to Dev given 2026-09-30. M0 done; M1 in progress. The owner approves each
-milestone before the next begins.
+**Status:** APPROVED. OK to Dev given 2026-09-30. M0 and M1 done (§21, §22); waiting for the owner's
+approval before M2. The owner approves each milestone before the next begins.
 
 **History:**
 - v1–v3: 2026-09-28.
@@ -1247,3 +1247,64 @@ these are per-file rates, not a 100k-file run):
 - **P4.** Rebuild by drop-and-recreate of the derived tables — §4.6 rule 7, §14.
 - **P5.** Worker entry listed in `pkg.scripts` — §15 M1. macOS/Linux packaged worker +
   `node:sqlite` verification — §15 M8. Neither blocks Windows M1 development.
+
+---
+
+## 22. M1 results (2026-09-30)
+
+**Commits:** 97e3480 (subsystem), 515309c (server + Docker), e0392c2 (Settings > Library),
+ee8c635 (backup failures). Nothing from M2 or later was implemented.
+
+**Implemented vs. specification:**
+- The schema is §5, statement for statement. `library/schema.js` is generated from it, and
+  `test/library/schema.test.js` fails if they differ.
+- `roots.status` never takes the value `scanning` in M1, and `last_scan_at` stays null: there is
+  no indexing yet. In M1, **Rescan re-checks reachability**; M2 makes it index.
+- A location's folder cannot be edited. Remove it and add the new one; decisions are keyed by
+  content, so they survive that.
+
+**Measured and decided during M1:**
+- **Windows holds the first contact with an unreachable host for ~21 s**, and a JS timeout does
+  not release the libuv thread it occupies.
+  - libuv has four such threads, shared by the whole process, worker threads included.
+  - Five unreachable probes at once stalled every file operation in SnapCon for 21 s (a local
+    `readFile` took 20.9 s).
+  - A repeat probe of a host already known to be down fails in 3 ms.
+  - **Decision:** reachability checks are serialised process-wide (one in flight), so the Library
+    can occupy at most one of the four threads. Measured live: while an unreachable add ran,
+    `/api/fleet` answered in 363 ms and the NAS file list in 6 ms.
+- **The worker gives no filesystem isolation** (the thread pool is shared).
+  - Reachability checks therefore stay async on the main thread.
+  - The worker's M1 job is backups: `VACUUM INTO` is synchronous in `node:sqlite`.
+  - M2's worker-side enumeration of network locations must stay at concurrency 1 (§6.1) for the
+    same reason.
+- **A plain open reads only the header and schema.** A full `quick_check` costs 3.75 s at 100k
+  files. It runs once, on the next start, after a backup was refused for failing it; a damaged
+  database is then quarantined and the newest good backup restored.
+- **Rebuild by drop-and-recreate (P4): 456 ms at 100k files**, against 12 s for the M0 `DELETE`
+  cascade. Authored rows intact, no foreign-key violations.
+- **Packaged Windows build** of the real app:
+  - the worker runs as a thread;
+  - `library-data/` is created next to the executable;
+  - a backup ran through the worker in 30 ms;
+  - the database persisted across a restart.
+
+  A dynamic `require` in the fallback path, which pkg could not bundle, was replaced with a static
+  one.
+- **UNC behaviour (live, on the owner's NAS):**
+
+  | Case | Result |
+  |---|---|
+  | Real share | `ok` in 9–11 ms |
+  | Missing folder on a live share | `error`, "folder not found", 3 ms |
+  | Missing share | `offline`, ~5 ms |
+  | Unreachable host | `offline` at the 10 s timeout |
+  | Parent share containing the G-code folder | refused, overlap |
+  | Same folder with different case or a trailing slash | refused, overlap |
+
+**Known limits, not fixed in M1:**
+- A mapped drive letter (for example `Z:`) and the UNC path it maps are not recognised as the
+  same folder: `realpath` does not resolve drive mappings. UNC paths are recommended. A Windows
+  service may not see drive mappings at all.
+- Docker behaviour is verified statically only (Dockerfile `COPY`, compose mount,
+  `docker.test.js`). No Docker engine was available on this machine.
