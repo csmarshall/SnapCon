@@ -10543,6 +10543,7 @@ function generalTabValues(){
     filamentCost:$("setFilamentCost").value, electricityRate:$("setElectricityRate").value,
     allowMapping:$("setAllowMapping").checked, suggestMatching:$("setSuggestMatching").checked,
     skipIdenticalUploads:$("setSkipIdenticalUploads").checked,
+    allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked,
     overwriteDifferentFiles:$("setOverwriteDifferent").checked,
     logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(),
     logsRetentionDays:$("setLogsRetentionDays").value, cameraRetentionDays:$("setCameraRetentionDays").value,
@@ -10560,6 +10561,8 @@ function setGeneralTabValues(v){
   $("setAllowMapping").checked=v.allowMapping;
   $("setSuggestMatching").checked=v.suggestMatching;
   $("setSkipIdenticalUploads").checked=v.skipIdenticalUploads;
+  $("setAllowUploadWhilePrinting").checked=v.allowUploadWhilePrinting;
+  $("setUploadIntoQueue").checked=v.uploadIntoQueue;
   $("setOverwriteDifferent").checked=v.overwriteDifferentFiles;
   $("setLogsFolder").value=v.logsFolder||"";
   $("setCameraFolder").value=v.cameraFolder||"";
@@ -10683,6 +10686,9 @@ async function loadConfigUI(){
     SUGGEST_MATCHING=c.suggestMatching!==false; $("setSuggestMatching").checked=SUGGEST_MATCHING;
     // Absent means on, matching the server's own default.
     $("setSkipIdenticalUploads").checked=c.skipIdenticalUploads!==false;
+    $("setAllowUploadWhilePrinting").checked=c.allowUploadWhilePrinting!==false;
+    // Off unless explicitly turned on — Upload stages a file, it does not schedule a print.
+    $("setUploadIntoQueue").checked=c.uploadIntoQueue===true;
     $("setOverwriteDifferent").checked=c.overwriteDifferentFiles!==false;
     $("setUsersEnabled").checked=!!c.usersEnabled;
     $("bootstrapAdmin").style.display="none";
@@ -12174,7 +12180,7 @@ async function saveConfig(){
   const logsRetentionDays=parseInt($("setLogsRetentionDays").value,10);
   const cameraRetentionDays=parseInt($("setCameraRetentionDays").value,10);
   const gcodeSyncRetentionDays=parseInt($("setGcodeSyncRetentionDays").value,10);
-  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, alternateDisplay:ALT_DISPLAY, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, locale:$("setLocale")?$("setLocale").value:undefined,
+  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, alternateDisplay:ALT_DISPLAY, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked, locale:$("setLocale")?$("setLocale").value:undefined,
     usersEnabled:$("setUsersEnabled").checked||undefined,
     resend:{ apiKey:$("setResendKey").value.trim(), fromAddress:$("setResendFrom").value.trim() },
     otp:{

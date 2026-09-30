@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 58,
+    "version": 59,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -871,7 +871,7 @@
       "elec_search_title": "Busca la tarifa eléctrica residencial promedio de tu zona mediante la base de datos de tarifas de OpenEI y la completa por ti.",
       "per_kwh_suffix": "por kWh. El código postal completa esto desde OpenEI.",
       "sending_prints_title": "Envío de impresiones",
-      "sending_prints_desc": "Asignación de color a cabezal al enviar un archivo a una impresora.",
+      "sending_prints_desc": "Qué ocurre cuando envías un archivo a una impresora.",
       "head_mapping_label": "Asignación de cabezales",
       "head_mapping_desc": "Mostrar la interfaz de asignación de color a cabezal al enviar impresiones",
       "auto_match_label": "Auto-coincidencia de colores",
@@ -879,7 +879,11 @@
       "skip_identical_label": "Omitir la subida si la impresora ya tiene el archivo",
       "skip_identical_desc": "Comprueba el tamaño y luego muestrea la copia en la impresora. Todo lo que no pueda confirmar se sube como siempre.",
       "overwrite_different_label": "Sobrescribir un archivo de la impresora cuando el contenido difiere",
-      "overwrite_different_desc": "Activado, un archivo recortado reemplaza la copia del mismo nombre en la impresora. Desactivado, SnapCon se niega y te pide que lo renombres. Una copia que no puede comprobar siempre se sube."
+      "overwrite_different_desc": "Activado, un archivo recortado reemplaza la copia del mismo nombre en la impresora. Desactivado, SnapCon se niega y te pide que lo renombres. Una copia que no puede comprobar siempre se sube.",
+      "upload_while_printing_label": "Permitir subir mientras una impresora está imprimiendo",
+      "upload_while_printing_desc": "Desactivado, la subida espera a que la impresora esté libre. Enviar un archivo encima del que se está imprimiendo siempre se rechaza.",
+      "upload_into_queue_label": "Subir a la cola",
+      "upload_into_queue_desc": "Añade también el archivo a la cola de una impresora gestionada por cola, para que se imprima por turno. Desactivado, Subir solo deja el archivo en la impresora."
     },
     "browse": {
       "title": "Buscar carpeta",

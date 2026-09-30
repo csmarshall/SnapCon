@@ -1423,6 +1423,37 @@ async function assertNotActiveJobFile(p, name, action = "send") {
   throw e;
 }
 
+// ---- What the Upload / Print buttons do to a busy printer ----
+// Pure, so the whole decision table is testable without a printer.
+//
+// "Upload" used to mean two different things: on an ordinary printer it staged
+// a file for later, while on one belonging to a queue pool the same click
+// created a queue ITEM that would eventually upload AND start a print. Same
+// button, two outcomes, nothing on screen saying which. Upload now always
+// means upload, and scheduling is the separate `uploadIntoQueue` setting —
+// which applies ALWAYS, not only when the printer happened to be mid-print,
+// since a setting that only sometimes does what its label says is the hidden
+// conditional this replaces.
+//
+// Deferring an upload existed to avoid racing a transfer against a running
+// print. The dangerous half of that race — writing over the file being
+// streamed — is refused outright by assertNotActiveJobFile, so what remains is
+// a preference (`allowWhilePrinting`) rather than a rule. Upload-AND-print
+// against a busy printer stays refused either way; that had no server-side
+// guard at all, only a disabled button.
+function uploadDisposition({ start, busy, allowWhilePrinting, uploadIntoQueue, pooled }) {
+  // Printing needs the printer, not just its filesystem.
+  if (start && busy) return { action: "refuse", queue: false, alreadyUploaded: false };
+  // A queue item is only meaningful for an upload; a print starts now.
+  const queue = !start && !!uploadIntoQueue && !!pooled;
+  if (!start && busy && !allowWhilePrinting) {
+    // Deferred: the bytes are not on the printer yet, so an item created here
+    // must NOT claim they are or dispatch would skip the upload entirely.
+    return { action: "defer", queue, alreadyUploaded: false };
+  }
+  return { action: "upload", queue, alreadyUploaded: queue };
+}
+
 // ---- Don't re-send a file the printer already has, byte for byte ----
 // Measured on real hardware: confirming a 65MB job took 309ms and moved 192KB
 // (see connectors/http-utils.js compareRemoteFile). The upload it replaces
@@ -1511,36 +1542,49 @@ app.post("/api/print", requireRegular, async (req, res) => {
   const c = getConnector(p.connector);
   const name = path.basename(fp);
 
-  // Upload-only click (Upload button, not Print) while this printer is
-  // actively busy: queue it instead of racing an upload against whatever's
-  // already printing. When Queue Management is enabled and this printer has
-  // a pool, the new per-printer queue subsumes the old single-slot
-  // mechanism entirely (round-3 issue #7) — otherwise falls back to the
-  // original pendingLoad/queuedFile mechanism, unchanged.
-  if (!start && !(await isPrinterIdle(p))) {
-    if (CFG.queueManagement && CFG.queueManagement.enabled && p.printerPoolId) {
-      const actor = actorFromReq(req);
-      let hash;
-      try { hash = queueStore.computeFileHash(fp); } catch { hash = null; }
-      if (hash) {
-        const result = queueStore.applyIntent(p.id, (state) => ({
-          ...state,
-          queue: [...state.queue, {
-            id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: false,
-            file: { name, sub: "", sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
-            map, prefs, createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
-            queuedBy: actor, retryOfItemId: null, dispatchSnapshot: null
-          }],
-          updatedAt: Date.now()
-        }));
-        if (result.ok) {
-          auditLog.log({ category: "job", event: "queue-item-added", ...actor, printerId: p.id, printerName: p.name, detail: { count: 1, viaLegacyUpload: true } });
-          return res.json({ ok: true, mode: "queued", printer: p.name });
-        }
-      }
-      // Persistence/hash unavailable — fall through to the legacy mechanism
-      // rather than silently dropping the upload the user asked for.
-    }
+  // What this click actually does to a printer that is already busy, and
+  // whether it also schedules a print — see uploadDisposition's own comment.
+  const pooled = !!(CFG.queueManagement && CFG.queueManagement.enabled && p.printerPoolId);
+  const disposition = uploadDisposition({
+    start: !!start,
+    busy: !(await isPrinterIdle(p)),
+    allowWhilePrinting: CFG.allowUploadWhilePrinting !== false,
+    uploadIntoQueue: CFG.uploadIntoQueue === true,
+    pooled,
+  });
+
+  if (disposition.action === "refuse") {
+    return res.status(409).json({ error: `${p.name} is printing — wait for it to finish before starting another job. You can still upload a file to it.` });
+  }
+
+  // Adds the queue item this click asked for. `uploaded` says whether the
+  // bytes are already on the printer, which is what stops dispatch sending
+  // them a second time.
+  const addQueueItem = (uploaded) => {
+    const actor = actorFromReq(req);
+    let hash;
+    try { hash = queueStore.computeFileHash(fp); } catch { return false; }
+    if (!hash) return false;
+    const result = queueStore.applyIntent(p.id, (state) => ({
+      ...state,
+      queue: [...state.queue, {
+        id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: !!uploaded,
+        file: { name, sub: "", sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
+        map, prefs, createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
+        queuedBy: actor, retryOfItemId: null, dispatchSnapshot: null
+      }],
+      updatedAt: Date.now()
+    }));
+    if (!result.ok) return false;
+    auditLog.log({ category: "job", event: "queue-item-added", ...actor, printerId: p.id, printerName: p.name, detail: { count: 1, viaLegacyUpload: true } });
+    return true;
+  };
+
+  // Deferred: hold the file and send it when the printer frees up. The queue
+  // item, if one was asked for, uploads at dispatch because the bytes are not
+  // there yet.
+  if (disposition.action === "defer") {
+    if (disposition.queue && addQueueItem(false)) return res.json({ ok: true, mode: "queued", printer: p.name });
     pendingLoad.set(printer, { file: fp, name, ts: Date.now(), tools, map, prefs, actor: actorFromReq(req) });
     return res.json({ ok: true, mode: "pending", printer: p.name });
   }
@@ -1590,14 +1634,15 @@ app.post("/api/print", requireRegular, async (req, res) => {
         }
       });
       if (!start) {
-        // Upload-only click, printer was idle (the busy case queued via
-        // pendingLoad above, never reaches here) — the file is sitting on
-        // the printer with nothing else loaded or printing, so surface it
-        // the same "ready to print" way uploadNotifiedFile does once a
-        // pending upload finally lands: one click away, not silently just
-        // stored.
+        // The file is on the printer now. Surface it the same "ready to
+        // print" way uploadNotifiedFile does once a deferred upload lands:
+        // one click away, not silently just stored.
         queuedFile.set(printer, { name, status: "ready", ts: Date.now() });
         saveQueuedFiles();
+        // "Upload into queue": the item is added only after the bytes are
+        // actually there, and carries alreadyUploaded so dispatch does not
+        // send the same file a second time.
+        if (disposition.queue) addQueueItem(true);
       }
       job.result = { printer: p.name, started: !!start, mapped: tools.length };
       job.phase = "done"; job.done = true;
@@ -3216,6 +3261,8 @@ function publicCfg(role) {
     allowMapping: CFG.allowMapping !== false,
     suggestMatching: CFG.suggestMatching !== false,
     skipIdenticalUploads: CFG.skipIdenticalUploads !== false,
+    allowUploadWhilePrinting: CFG.allowUploadWhilePrinting !== false,
+    uploadIntoQueue: CFG.uploadIntoQueue === true,
     overwriteDifferentFiles: CFG.overwriteDifferentFiles !== false,
     usersEnabled: !!CFG.usersEnabled,
     configured: PRINTERS.length > 0,
@@ -3665,6 +3712,8 @@ app.post("/api/config", requireAdmin, async (req, res) => {
     allowMapping: (typeof b.allowMapping === "boolean") ? b.allowMapping : (CFG.allowMapping !== false),
     suggestMatching: (typeof b.suggestMatching === "boolean") ? b.suggestMatching : (CFG.suggestMatching !== false),
     skipIdenticalUploads: (typeof b.skipIdenticalUploads === "boolean") ? b.skipIdenticalUploads : (CFG.skipIdenticalUploads !== false),
+    allowUploadWhilePrinting: (typeof b.allowUploadWhilePrinting === "boolean") ? b.allowUploadWhilePrinting : (CFG.allowUploadWhilePrinting !== false),
+    uploadIntoQueue: (typeof b.uploadIntoQueue === "boolean") ? b.uploadIntoQueue : (CFG.uploadIntoQueue === true),
     overwriteDifferentFiles: (typeof b.overwriteDifferentFiles === "boolean") ? b.overwriteDifferentFiles : (CFG.overwriteDifferentFiles !== false),
     usersEnabled: b.usersEnabled ? true : undefined,
     resend: (b.resend && typeof b.resend === "object") ? {

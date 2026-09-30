@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 58,
+    "version": 59,
     "snapconVersion": "0.7.2",
     "updated": "2026-09-12"
   },
@@ -871,7 +871,7 @@
       "elec_search_title": "Looks up your area's average residential electricity rate via the OpenEI utility-rate database and fills it in for you.",
       "per_kwh_suffix": "per kWh. ZIP fills this from OpenEI.",
       "sending_prints_title": "Sending prints",
-      "sending_prints_desc": "Color-to-toolhead assignment when you send a file to a printer.",
+      "sending_prints_desc": "What happens when you send a file to a printer.",
       "head_mapping_label": "Head mapping",
       "head_mapping_desc": "Show color-to-head assignment UI when sending prints",
       "auto_match_label": "Auto-match colors",
@@ -879,7 +879,11 @@
       "skip_identical_label": "Skip uploading a file the printer already has",
       "skip_identical_desc": "Checks size, then samples the copy on the printer. Anything it cannot confirm is uploaded as usual.",
       "overwrite_different_label": "Overwrite a file on the printer when the content differs",
-      "overwrite_different_desc": "On, a re-sliced file replaces the printer's copy of the same name. Off, SnapCon refuses and asks you to rename it. A copy it cannot check is always uploaded."
+      "overwrite_different_desc": "On, a re-sliced file replaces the printer's copy of the same name. Off, SnapCon refuses and asks you to rename it. A copy it cannot check is always uploaded.",
+      "upload_while_printing_label": "Allow uploading while a printer is printing",
+      "upload_while_printing_desc": "Off, an upload waits until the printer is free. Sending a file over the one being printed is always refused.",
+      "upload_into_queue_label": "Upload into queue",
+      "upload_into_queue_desc": "Also add the file to a queue-managed printer's queue, so it prints in turn. Off, Upload only puts the file on the printer."
     },
     "browse": {
       "title": "Browse for folder",
