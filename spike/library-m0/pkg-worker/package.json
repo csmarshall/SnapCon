@@ -1,0 +1,10 @@
+{
+  "name": "snapcon-library-m0-pkg-worker",
+  "private": true,
+  "description": "M0 spike: worker_threads + node:sqlite inside a pkg build. Not part of the app.",
+  "main": "main.js",
+  "bin": "main.js",
+  "pkg": {
+    "scripts": ["worker.js"]
+  }
+}
