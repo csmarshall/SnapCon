@@ -1308,3 +1308,62 @@ ee8c635 (backup failures). Nothing from M2 or later was implemented.
   service may not see drive mappings at all.
 - Docker behaviour is verified statically only (Dockerfile `COPY`, compose mount,
   `docker.test.js`). No Docker engine was available on this machine.
+
+## 23. Prerequisite: network-filesystem resilience (2026-10-02, before M2)
+
+**Requirement (owner):** a dead or slow NAS may make NAS-backed features unavailable, but it must
+never make the SnapCon server itself unavailable or freeze unrelated local, API or UI work.
+
+**Finding.** The problem was not the Library's; it was the G-code folder's, everywhere in
+`server.js`. Measured on Windows, Node 22.23.1, packaged app, G-code folder on an unreachable share:
+- about 50 synchronous fs calls on the G-code folder ran on the main thread; each one that touched
+  the dead share froze the whole server for ~21 s, at any thread-pool size;
+- the file browser's 15 s `/api/files` poll alone produced 40 of 160 samples over 1 s, max 21 s;
+- async calls are no cure: libuv's four threads are process-wide, so four hung calls starve every
+  file operation; a larger pool only moves the cliff, and `UV_THREADPOOL_SIZE` cannot be set from
+  JS. The relaunch approach was rejected.
+
+**Design (`netfs/`).** Shared by the G-code folder, the sync folders, the firmware folder and the
+Library — one availability concept, not competing ones.
+- Synchronous fs runs inside dedicated **worker threads**, in lanes: interactive 2, background 1,
+  probe 1. A hung SMB call blocks one worker of one lane — never the main thread, never libuv's
+  pool. A background scan cannot take interactive capacity.
+- **Timeouts** start when a worker takes the job. Waiting for a worker is bounded separately and
+  never counts against the storage.
+- **Availability breaker**, per registered root or UNC share: `online`, `offline`, `checking`,
+  with last success, last failure and the last error. A network error code or a timeout marks it
+  offline. While offline, operations fail at once with `NAS_UNREACHABLE` (HTTP 503
+  `gcode_folder_unreachable`), and jobs already queued for it fail immediately. One probe at a
+  time on the probe lane re-checks it; any success marks it online. No permanent stale-offline
+  state.
+- **The breaker is an optimisation, never proof that a file exists.** Every route still checks
+  every file on every use: containment, lstat/symlink rules, the forced pre-dispatch hash, and
+  exclusive-create on upload are unchanged.
+
+**What changed in behaviour.**
+- G-code-folder routes answer 503 with a clear message while the share is down, instead of
+  hanging.
+- Queue dispatch claims nothing while the folder is known to be down. An outage discovered by
+  the forced identity check puts the item back at the front, unverified
+  (`QueueEngine.onDispatchDeferred`), instead of a false "file missing".
+- A local read that fails mid-upload tears the request down, so a printer never receives a
+  short file that looks complete.
+- Sync runs to a network destination go one at a time and stop when the destination goes down.
+- Startup creates network folders asynchronously.
+
+**Measured after (same packaged build, same unreachable share):**
+- 196 samples over 100 s: max 85 ms, none over 1 s (before: max 21 s, 40 of 160 over 1 s).
+- Once the outage is known, `/api/files`, `/api/map`, thumbnails and search answer 503 in about
+  2 ms. The single request that discovers the outage waits up to the 10 s operation timeout.
+
+**Consequences for M2 (supersedes the related lines in §22):**
+- Library reachability checks now run through netfs (probe lane), not async on the main thread.
+- M2's enumeration and reads of network locations go through netfs's **background** lane, one
+  operation at a time. It shares the breaker: an offline location stops the scan, and nothing is
+  purged.
+
+**Remaining bounded exposure, deliberately not converted:**
+- The sync download's write stream and the U1 firmware deploy's image reads use `fs.promises`.
+  Each is one at a time, so at most one libuv thread can hang.
+- A mapped drive letter is recognised as network storage only when it is a registered root; the
+  G-code folder always is.
