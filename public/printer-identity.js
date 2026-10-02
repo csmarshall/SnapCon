@@ -201,6 +201,34 @@
     return { status: "unknown", confident: false };
   }
 
+  // Families whose name a FOLDER looks like (the Library's folder
+  // classification). Derived from the labels above, never a separate list: the
+  // folder name, with spaces and punctuation removed, must equal a run of
+  // consecutive words of a label's model part (the label without its brand),
+  // and contain both a letter and a digit — "U1", "AD5X", "5M PRO", "V3 Plus",
+  // "V3Plus", "i7", "K1". "5M" alone looks like both Adventurer 5M families.
+  // A folder name is NEVER evidence of which printer a file is for; this only
+  // labels folders for navigation and to notice a folder that disagrees with
+  // its files.
+  function familiesLikeName(name) {
+    const compact = String(name == null ? "" : name).toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (compact.length < 2 || !/[a-z]/.test(compact) || !/\d/.test(compact)) return [];
+    const hits = [];
+    for (const f of FAMILIES) {
+      const lower = f.label.toLowerCase(), brand = f.brand.toLowerCase();
+      const model = lower.startsWith(brand) ? lower.slice(brand.length) : lower;
+      const words = model.split(/[\s\-_]+/).filter(Boolean);
+      let found = false;
+      for (let i = 0; i < words.length && !found; i++) {
+        for (let j = i; j < words.length && !found; j++) {
+          if (words.slice(i, j + 1).join("") === compact) found = true;
+        }
+      }
+      if (found) hits.push(f.key);
+    }
+    return hits;
+  }
+
   return { FAMILIES, BAMBU_MODEL_CODES, identifyFile, identifyPrinter, compare,
-           familiesIn, familyOf, isGenericModel, brandFromText };
+           familiesIn, familyOf, isGenericModel, brandFromText, familiesLikeName };
 });
