@@ -35,6 +35,11 @@ const { checkReachable, netfsFsp } = require("./library/locations");
 // goes through netfs: it runs in dedicated worker threads, so a dead NAS can
 // fail those calls but can never freeze the server or starve local file work.
 const netfs = require("./netfs").getNetFs();
+// Uploads in progress: to a printer, a firmware image, or into the G-code
+// folder. The Library's indexer pauses its reads while any is running
+// (docs/library-design.md §6.1), so a scan never competes with them.
+let UPLOADS_ACTIVE = 0;
+async function whileUploading(fn) { UPLOADS_ACTIVE++; try { return await fn(); } finally { UPLOADS_ACTIVE--; } }
 const { registerLibraryRoutes } = require("./library/routes");
 const { createSyncEngine } = require("./sync/SyncEngine");
 const { loadConfigFile } = require("./configLoader");
@@ -460,6 +465,7 @@ const library = createLibraryService({
   baseDir: BASE_DIR,
   getGcodeFolder: () => FOLDER,
   checkFn: (p, o) => checkReachable(p, { ...o, fsp: netfsFsp(netfs) }),
+  netfs, uploadsActive: () => UPLOADS_ACTIVE > 0,
   audit: (event, actor, detail) => auditLog.log({ category: "library", event, ...actor, detail }),
 });
 registerLibraryRoutes(app, { library, requireAuth, actorFromReq });
@@ -850,7 +856,7 @@ async function runFirmwareDeploy(id, relRaw, actor, verifyMode) {
     // the printer's own archive of the file, falling back to windowed
     // sampling on firmware without that endpoint. "none" is the one value a
     // request can set, and it means exactly what it says.
-    const r = await u1Firmware.updateFromFile(p, now.file, {
+    const r = await whileUploading(() => u1Firmware.updateFromFile(p, now.file, {
       ...(verifyMode ? { verify: verifyMode } : {}),
       onStep: sInfo => {
         if (sInfo.step === "device" && sInfo.info) fwSet(id, { before: sInfo.info });
@@ -872,7 +878,7 @@ async function runFirmwareDeploy(id, relRaw, actor, verifyMode) {
         const busy = await firmwareDeployBlockedBy(p);
         if (busy) throw new Error(p.name + " started printing during the upload — nothing was flashed");
       },
-    });
+    }));
 
     // Three distinct endings, kept distinct. A flash that started and took the
     // printer offline to write the image is a SUCCESS the user should see as
@@ -1288,7 +1294,7 @@ app.post("/api/files/upload", requireRegular, rawGcodeBody, async (req, res) => 
     if (!(await fileExists(dir))) return res.status(400).json({ error: "Invalid folder" });
     // Exclusive create in one step: it fails with EEXIST rather than
     // overwrite, even if the file appeared after a separate existence check.
-    await netfs.writeFileExclusive(target, req.body);
+    await whileUploading(() => netfs.writeFileExclusive(target, req.body));
     res.json({ ok: true, name });
   } catch (e) {
     if (replyIfNasDown(res, e)) return;
@@ -1688,7 +1694,7 @@ app.post("/api/print", requireRegular, async (req, res) => {
         job.skippedUpload = true;
         console.log(`[print] ${p.name}: "${name}" already on the printer, upload skipped`);
       } else {
-        await c.uploadFile(p, fp, name, job);             // 1) upload (with progress)
+        await whileUploading(() => c.uploadFile(p, fp, name, job));   // 1) upload (with progress)
         console.log(`[print] ${p.name}: upload resolved for "${name}" (start=${start})`);
       }
       // 2) toolhead mapping + print-preference macros (connector-optional) —
@@ -2179,7 +2185,7 @@ async function uploadNotifiedFile(idx, pl) {
     // receive the deferred file. "Looks idle" is a sampled observation, so
     // re-check against the running job immediately before writing.
     await assertNotActiveJobFile(p, pl.name);
-    await c.uploadFile(p, pl.file, pl.name, { sent: 0, total: 0 });
+    await whileUploading(() => c.uploadFile(p, pl.file, pl.name, { sent: 0, total: 0 }));
     // Only ever set when this came from the Upload-button queue (not the
     // --load CLI hook, which has no color-mapping concept) — apply the same
     // head mapping an immediate upload would have gotten, now that the
@@ -2302,7 +2308,7 @@ async function attemptQueueDispatch(printerId) {
       // is not allowed to place — so it goes down the same path as any other
       // dispatch error rather than silently starting the wrong file.
       if (plan.action === "refuse") throw new Error(plan.reason);
-      if (plan.action !== "skip") await c.uploadFile(p, fp, name, { sent: 0, total: 0 });
+      if (plan.action !== "skip") await whileUploading(() => c.uploadFile(p, fp, name, { sent: 0, total: 0 }));
     }
     const tools = Object.keys(item.map || {}).map(Number).sort((a, b) => a - b);
     await withStartSequence(p, async () => {

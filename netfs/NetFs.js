@@ -30,10 +30,7 @@ const crypto = require("crypto");
 const { Worker } = require("node:worker_threads");
 
 const WORKER_FILE = path.join(__dirname, "netfs-worker.js");
-// Errors that mean "the storage did not answer", not "the file is wrong".
-// UNKNOWN is what Windows returns for an unreachable or missing SMB share.
-const NETWORK_CODES = new Set(["UNKNOWN", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ENETDOWN",
-  "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ENOTCONN", "EPIPE", "EIO", "EBADNETPATH", "ENONET"]);
+const { NETWORK_CODES } = require("./codes");
 
 class NasUnreachableError extends Error {
   constructor(root, reason) {
@@ -265,8 +262,9 @@ function createNetFs({
     exists: (p, o) => submit("exists", [p], opts(p, o)),
     readdir: (p, o) => submit("readdir", [p], opts(p, o)),
     realpath: (p, o) => submit("realpath", [p], opts(p, o)),
+    quickFp: (p, o) => submit("quickFp", [p], opts(p, o)),
     openable: (p, o) => submit("openable", [p], opts(p, o)),
-    listDir: (p, filter, o) => submit("listDir", [p, { filter: filter ? filter.source : null }], opts(p, o)),
+    listDir: (p, filter, o = {}) => { const { keepErrors, ...rest } = o; return submit("listDir", [p, { filter: filter ? filter.source : null, keepErrors: !!keepErrors }], opts(p, rest)); },
     read: (p, pos, len, o) => submit("read", [p, pos, len], opts(p, o)),
     readFile: (p, maxBytes, o) => submit("readFile", [p, maxBytes], opts(p, o)),
     writeFileExclusive: (p, data, o) => submit("writeFileExclusive", [p, data], opts(p, { timeoutMs: 120000, ...o })),

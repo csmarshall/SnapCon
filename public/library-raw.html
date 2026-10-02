@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library index — raw view</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  /* The M2 raw diagnostic view: plain and functional (library-design.md §13.1). */
+  body.raw { margin: 0; padding: 20px 24px 48px; background: var(--chassis); color: var(--ink); font-family: var(--sans); }
+  .raw h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .raw h2 { font-size: 14px; font-weight: 600; margin: 28px 0 10px; }
+  .raw .sub { color: var(--ink-faint); font-size: 12px; }
+  .raw .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
+  .raw .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-dim); }
+  .raw select, .raw input[type=search] { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; }
+  .raw input[type=search] { width: 260px; }
+  .raw button { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  .raw button:hover { border-color: var(--ink-faint); }
+  .raw .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .raw .card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+  .raw .card h3 { font-size: 12px; font-weight: 600; color: var(--ink-dim); margin: 0 0 6px; }
+  .raw .card .kv { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); padding: 1px 0; }
+  .raw .card .kv span:first-child { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .raw table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+  .raw th { text-align: left; color: var(--ink-faint); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--chassis); }
+  .raw td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .raw td.file { overflow: hidden; }
+  .raw .name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .raw .path { display: block; color: var(--ink-faint); font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .raw img.thumb { width: 44px; height: 44px; object-fit: contain; background: var(--panel); border-radius: 4px; }
+  .raw .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); white-space: nowrap; }
+  .raw .applied { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .raw .suggested { color: var(--signal); border-color: color-mix(in srgb, var(--signal) 45%, transparent); }
+  .raw .recorded, .raw .unknown { color: var(--ink-dim); }
+  .raw .decision { color: var(--violet-soft); border-color: color-mix(in srgb, var(--violet-soft) 45%, transparent); }
+  .raw .missing { color: var(--bad); }
+  .raw .warn { color: var(--signal); }
+  .raw .folders { font-family: var(--mono); font-size: 11px; line-height: 1.6; }
+  .raw .folders .cls { color: var(--ink-faint); }
+  .raw details summary { cursor: pointer; color: var(--busy); }
+  .raw .ev { margin: 6px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 11px; }
+  .raw .ev li { padding: 2px 0; border-top: 1px dashed var(--line-soft); }
+  .raw .ev .k { color: var(--ink-dim); }
+  .raw .why { color: var(--ink-dim); margin-top: 4px; }
+  .raw .empty { color: var(--ink-faint); padding: 24px 8px; }
+  .raw .err { color: var(--bad); }
+</style>
+</head>
+<body class="raw">
+  <h1>Library index — raw view</h1>
+  <div class="sub" id="meta">Loading…</div>
+
+  <div class="bar">
+    <label class="field" for="f-root">Location
+      <select id="f-root"><option value="">All locations</option></select>
+    </label>
+    <label class="field" for="f-show">Show
+      <select id="f-show">
+        <option value="all">All files</option>
+        <option value="sliced">Sliced files only</option>
+        <option value="notapplied">Printer not applied (suggested, recorded or unknown)</option>
+        <option value="unknown">Unknown printer</option>
+        <option value="disagrees">Folder disagrees with file</option>
+        <option value="expanded">Read beyond the initial window</option>
+        <option value="moved">Moved</option>
+        <option value="missing">Missing or unreadable</option>
+      </select>
+    </label>
+    <label class="field" for="f-q">Path contains
+      <input id="f-q" type="search" placeholder="e.g. HollowLog">
+    </label>
+    <button id="reload" type="button">Reload</button>
+    <button id="export" type="button">Export JSON</button>
+  </div>
+
+  <div class="cards" id="summary"></div>
+
+  <h2 id="files-h">Files</h2>
+  <table>
+    <colgroup><col style="width:56px"><col style="width:28%"><col style="width:17%"><col style="width:23%"><col style="width:20%"><col style="width:12%"></colgroup>
+    <thead><tr><th></th><th>File</th><th>Printer</th><th>Confidence · evidence</th><th>Folders</th><th>Status</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <h2>Folders</h2>
+  <table>
+    <colgroup><col style="width:40%"><col style="width:18%"><col style="width:42%"></colgroup>
+    <thead><tr><th>Folder</th><th>Class</th><th>Method · evidence</th></tr></thead>
+    <tbody id="folders"></tbody>
+  </table>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const stem = n => String(n || "").replace(/\.[^./\\]+$/, "");
+const fmtBytes = b => b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
+let DATA = null;
+
+async function load() {
+  $("meta").textContent = "Loading…";
+  const p = new URLSearchParams();
+  if ($("f-root").value) p.set("root", $("f-root").value);
+  const res = await fetch("/api/library/diagnostics/raw?" + p);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { $("meta").innerHTML = `<span class="err">${esc(body.error || ("HTTP " + res.status))}</span>`; return; }
+  DATA = body;
+  const sel = $("f-root"), cur = sel.value;
+  sel.innerHTML = '<option value="">All locations</option>' + DATA.roots.map(r => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join("");
+  sel.value = cur;
+  const scanned = DATA.roots.map(r => `${r.name}: ${r.status}${r.last_scan_at ? ", scanned " + new Date(r.last_scan_at).toLocaleString() : ", not scanned yet"}`).join(" · ");
+  $("meta").textContent = `${DATA.summary.files} files indexed · ${scanned}`;
+  render();
+}
+
+function card(title, obj) {
+  const rows = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
+  return `<div class="card"><h3>${esc(title)}</h3>${rows.length ? rows.map(([k, v]) => `<div class="kv"><span title="${esc(k)}">${esc(k)}</span><span>${esc(v)}</span></div>`).join("") : '<div class="sub">None</div>'}</div>`;
+}
+function listCard(title, items, fmt) {
+  return `<div class="card"><h3>${esc(title)} (${items.length})</h3>${items.length ? items.slice(0, 12).map(x => `<div class="kv"><span title="${esc(x.root + ":" + x.path)}">${esc(stem(x.path.split("/").pop()))}</span><span>${esc(fmt(x))}</span></div>`).join("") + (items.length > 12 ? `<div class="sub">…and ${items.length - 12} more</div>` : "") : '<div class="sub">None</div>'}</div>`;
+}
+
+function filtered() {
+  const show = $("f-show").value, q = $("f-q").value.trim().toLowerCase();
+  return DATA.files.filter(f => {
+    if (q && !(f.root + ":" + f.path).toLowerCase().includes(q)) return false;
+    switch (show) {
+      case "sliced": return f.role === "sliced";
+      case "notapplied": return f.printer && f.printer.state !== "applied" && f.printer.state !== "decision";
+      case "unknown": return f.printer && f.printer.state === "unknown";
+      case "disagrees": return !!f.folderDisagrees;
+      case "expanded": return f.window && ((f.window.grew && f.window.grew.length) || f.window.streamed);
+      case "moved": return f.moved && f.moved.length;
+      case "missing": return f.state !== "present";
+      default: return true;
+    }
+  });
+}
+
+function evidenceList(ev) {
+  if (!ev || !ev.length) return "";
+  return `<ul class="ev">${ev.map(e => `<li><span class="k">${esc(e.signal)}</span> = ${esc(e.value)}${e.family ? " → " + esc(e.family) : ""} <span class="k">[${esc(e.group || "")}${e.strength ? ", " + esc(e.strength) : ""}${e.generic ? ", generic" : ""}]</span>${e.excerpt ? `<br><span class="k">${esc(e.excerpt)}</span>` : ""}</li>`).join("")}</ul>`;
+}
+
+function render() {
+  const s = DATA.summary;
+  $("summary").innerHTML = [
+    card("Files by location", s.byRoot), card("Files by role", s.byRole), card("Files by state", s.byState),
+    card("Printer family (sliced)", s.printer.byFamily), card("Confidence / state", s.printer.byConfidenceState),
+    card("Folder classes", s.folderClasses),
+    listCard("Unknown printer", s.printer.unknown, () => "unknown"),
+    listCard("Folder disagrees with file", s.folderDisagrees, x => `${x.folder} ≠ ${x.fileFamily}`),
+    listCard("Read beyond the initial window", s.windowExpansions, x => x.streamed ? "streamed" : (x.grew || []).join(", ")),
+    listCard("Errors", s.errors, x => x.error || "unreadable"),
+    `<div class="card"><h3>Hashing</h3><div class="kv"><span>Full hash</span><span>${s.fullHashed} of ${s.files}</span></div><div class="kv"><span>With thumbnail</span><span>${s.withThumbnail}</span></div></div>`,
+  ].join("");
+
+  const rows = filtered();
+  $("files-h").textContent = `Files (${rows.length})`;
+  $("rows").innerHTML = rows.length ? rows.map(f => {
+    const p = f.printer;
+    const st = p ? (p.state === "decision" ? "decision" : p.state) : null;
+    const printerCell = p ? `${esc(p.label || p.family || "Unknown")}${p.family && p.label ? `<span class="path">${esc(p.family)}</span>` : ""}` : `<span class="sub">${f.role === "sliced" ? "Not read" : "—"}</span>`;
+    const conf = p ? `<span class="pill ${esc(st)}">${esc(p.confidence || "—")} · ${esc(st)}</span>${p.method ? ` <span class="sub">${esc(p.method)}</span>` : ""}
+        ${p.missing ? `<div class="why">${esc(p.missing)}</div>` : ""}
+        ${p.evidence && p.evidence.length ? `<details><summary>Evidence (${p.evidence.length})</summary>${evidenceList(p.evidence)}</details>` : ""}
+        ${f.otherPrinterClaims && f.otherPrinterClaims.length ? `<div class="why">Also: ${esc(f.otherPrinterClaims.map(c => c.family + " " + c.state).join(", "))}</div>` : ""}` : "";
+    const folders = f.folders.length ? f.folders.map(c => `${esc(c.path.split("/").pop())} <span class="cls">${esc(c.class)}${c.families ? " → " + esc(c.families.join("/")) : ""}</span>`).join("<br>") : '<span class="sub">(location root)</span>';
+    const status = [
+      `<span class="pill ${f.state === "present" ? "" : "missing"}">${esc(f.state)}</span>`,
+      f.folderDisagrees ? `<div class="warn">Folder "${esc(f.folderDisagrees.folder)}" disagrees</div>` : "",
+      f.moved && f.moved.length ? `<div class="sub">Moved from ${esc(f.moved[0].from)}</div>` : "",
+      `<div class="sub">${fmtBytes(f.size)}${f.fullHash ? " · hashed" : ""}</div>`,
+      f.window && (f.window.streamed || (f.window.grew && f.window.grew.length)) ? `<div class="sub">${f.window.streamed ? "streamed" : esc(f.window.grew.join(", "))}</div>` : "",
+      f.error ? `<div class="err">${esc(f.error)}</div>` : "",
+    ].join("");
+    return `<tr>
+      <td>${f.thumb ? `<img class="thumb" loading="lazy" alt="" src="/api/library/thumbs/${esc(f.thumb)}">` : ""}</td>
+      <td class="file"><span class="name" title="${esc(f.name)}">${esc(stem(f.name))}</span><span class="path" title="${esc(f.root + ":" + f.path)}">${esc(f.root)}:${esc(f.path)}</span>
+        ${f.slicer ? `<span class="path">${esc(f.slicer)}${f.objects && f.objects.length ? " · " + f.objects.length + " object entries" : ""}${f.copies ? " · " + f.copies + "×" : ""}</span>` : ""}
+        ${f.profile ? `<details><summary>Profile</summary><ul class="ev">${Object.entries(f.profile).filter(([, v]) => v).map(([k, v]) => `<li><span class="k">${esc(k)}</span> = ${esc(v)}</li>`).join("")}${(f.objects || []).map(o => `<li><span class="k">object (${esc(o.origin)})</span> ${esc(o.raw)} ×${o.copies}${o.generic ? " <span class=\"k\">generic</span>" : ""}</li>`).join("")}</ul></details>` : ""}
+      </td>
+      <td>${printerCell}</td>
+      <td>${conf}</td>
+      <td class="folders">${folders}</td>
+      <td>${status}</td></tr>`;
+  }).join("") : '<tr><td colspan="6" class="empty">No files match.</td></tr>';
+
+  $("folders").innerHTML = DATA.folders.length ? DATA.folders.map(c => {
+    const e = c.evidence[0] || {};
+    const detail = e.families ? "families: " + e.families.join(", ") : e.also_at ? "also at: " + e.also_at.join(", ") : e.rule || "";
+    return `<tr><td class="folders">${esc(c.root_id)}:${esc(c.rel_path)}</td><td><span class="pill">${esc(c.class)}</span></td><td class="folders">${esc(c.method)}<br><span class="cls">${esc(detail)}</span></td></tr>`;
+  }).join("") : '<tr><td colspan="3" class="empty">No folders classified yet.</td></tr>';
+}
+
+$("reload").addEventListener("click", load);
+$("f-root").addEventListener("change", load);
+$("f-show").addEventListener("change", () => DATA && render());
+$("f-q").addEventListener("input", () => DATA && render());
+$("export").addEventListener("click", () => {
+  if (!DATA) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(DATA, null, 2)], { type: "application/json" }));
+  a.download = "library-raw-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+load();
+</script>
+</body>
+</html>

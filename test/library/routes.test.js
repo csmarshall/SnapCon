@@ -39,7 +39,7 @@ async function server(t, { broken = false } = {}) {
   };
   const close = async () => { srv.closeAllConnections(); await new Promise(r => srv.close(r)); await library.stop(); };
   t.after(close);
-  return { call, base };
+  return { call, base, url };
 }
 
 test("signed-out callers get 401 everywhere", async t => {
@@ -102,4 +102,31 @@ test("an unavailable Library answers 503 with a reason, and its status says why"
   const st = await s.call("view", "GET", "/api/library/status");
   assert.equal(st.body.available, false);
   assert.match(st.body.reason, /cannot open/);
+});
+
+test("M2: the raw diagnostic view and scan statistics are admin-only; thumbnails need library.view", async t => {
+  const s = await server(t);
+  fs.writeFileSync(path.join(s.base, "gcode", "a.gcode"), require("./helpers/gcode").gcodeFile({ printerModel: "Snapmaker U1" }));
+  assert.equal((await s.call("admin", "POST", "/api/library/roots/gcode/rescan")).status, 200);
+  let raw;
+  for (let i = 0; i < 200; i++) {
+    raw = await s.call("admin", "GET", "/api/library/diagnostics/raw");
+    if (raw.body.files && raw.body.files.length && raw.body.files[0].thumb) break;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  assert.equal(raw.status, 200);
+  assert.equal(raw.body.files[0].printer.family, "snapmaker-u1");
+  for (const who of ["view", "regular"]) {
+    assert.equal((await s.call(who, "GET", "/api/library/diagnostics/raw")).status, 403, who);
+    assert.equal((await s.call(who, "GET", "/api/library/diagnostics/scans")).status, 403, who);
+    assert.equal((await s.call(who, "POST", "/api/library/rebuild")).status, 403, who);
+  }
+  assert.equal((await s.call("admin", "GET", "/api/library/diagnostics/scans")).status, 200);
+  const key = raw.body.files[0].thumb;
+  const img = await fetch(s.url + "/api/library/thumbs/" + key, { headers: { "x-as": "view" } });
+  assert.equal(img.status, 200);
+  assert.equal(img.headers.get("content-type"), "image/png");
+  assert.equal((await fetch(s.url + "/api/library/thumbs/..%2F..%2Flibrary.db", { headers: { "x-as": "view" } })).status, 404, "only a well-formed key is looked up");
+  assert.equal((await s.call("view", "GET", "/api/library/thumbs/e" + "0".repeat(31))).status, 404);
+  assert.equal((await s.call(null, "GET", "/api/library/thumbs/" + key)).status, 401);
 });

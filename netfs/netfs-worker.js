@@ -13,6 +13,8 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { NETWORK_CODES } = require("./codes");
 const { isMainThread, parentPort } = require("node:worker_threads");
 
 const statOf = st => ({ size: st.size, mtimeMs: st.mtimeMs, isFile: st.isFile(), isDirectory: st.isDirectory(), isSymbolicLink: st.isSymbolicLink() });
@@ -23,19 +25,46 @@ const ops = {
   // false only for "not there"; any other failure (an unreachable share) throws.
   exists: p => { try { fs.statSync(p); return true; } catch (e) { if (e.code === "ENOENT" || e.code === "ENOTDIR") return false; throw e; } },
   realpath: p => fs.realpathSync.native(p),
+  // The Library's quick fingerprint (docs/library-design.md §4.5, M0): the size
+  // and three 64 KB windows — head, middle, tail — in one round trip. Changes
+  // anywhere a slicer writes (header, body, config) change it; it is not
+  // proof of identity, which is what the full hash is for.
+  quickFp: p => {
+    const fd = fs.openSync(p, "r");
+    try {
+      const st = fs.fstatSync(fd);
+      const W = 64 * 1024, h = crypto.createHash("sha256").update(String(st.size) + ":");
+      const starts = [...new Set([0, Math.max(0, Math.floor(st.size / 2) - W / 2), Math.max(0, st.size - W)])];
+      let bytes = 0;
+      for (const s of starts) {
+        const buf = Buffer.allocUnsafe(Math.min(W, st.size - s));
+        const n = fs.readSync(fd, buf, 0, buf.length, s);
+        h.update(buf.subarray(0, n)); bytes += n;
+      }
+      return { size: st.size, mtimeMs: st.mtimeMs, fp: h.digest("hex").slice(0, 32), bytes };
+    } finally { fs.closeSync(fd); }
+  },
   // Can the directory be opened for listing? Without reading it all.
   openable: p => { const d = fs.opendirSync(p); d.closeSync(); return true; },
   firmwareInspect: (p, o) => require("../connectors/firmwareImage").inspectFirmwareImage(p, o),
   readdir: p => fs.readdirSync(p, { withFileTypes: true }).map(e => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
   // A directory listing plus each entry's stat, in one round trip (the file browser).
-  listDir: (p, { filter } = {}) => {
+  // A file whose stat fails because it vanished is left out. A stat that
+  // fails because the share stopped answering fails the listing, rather than
+  // returning a list that looks as if the file were deleted. Any other stat
+  // failure (EACCES, EBUSY) leaves the file out too, unless keepErrors asks for
+  // it to be listed with its error code — the Library needs to know it exists.
+  listDir: (p, { filter, keepErrors = false } = {}) => {
     const re = filter ? new RegExp(filter, "i") : null;
     const out = [];
     for (const e of fs.readdirSync(p, { withFileTypes: true })) {
       if (e.isDirectory()) { out.push({ name: e.name, isDirectory: true }); continue; }
       if (!e.isFile() || (re && !re.test(e.name))) continue;
       try { const st = fs.statSync(path.join(p, e.name)); out.push({ name: e.name, isFile: true, size: st.size, mtimeMs: st.mtimeMs }); }
-      catch { /* vanished between readdir and stat */ }
+      catch (err) {
+        if (NETWORK_CODES.has(err.code)) throw err;
+        if (keepErrors && err.code !== "ENOENT" && err.code !== "ENOTDIR") out.push({ name: e.name, isFile: true, statError: err.code || "error" });
+      }
     }
     return out;
   },

@@ -39,6 +39,27 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
     send(res, () => library.rescan(req.params.id)));
   app.post("/api/library/backup", requireAuth, need("library.backup"), (req, res) =>
     send(res, () => library.backupNow("manual")));
+  app.post("/api/library/rebuild", requireAuth, need("library.sources.manage"), (req, res) =>
+    send(res, () => library.rebuildDerived()));
+
+  // M2 checkpoint: the raw diagnostic view and the last scans' statistics.
+  // Admin only (library.diagnostics): it shows every path in every location.
+  app.get("/api/library/diagnostics/raw", requireAuth, need("library.diagnostics"), (req, res) =>
+    send(res, () => library.diagnosticsRaw({
+      root: req.query.root ? String(req.query.root) : null,
+      q: req.query.q ? String(req.query.q) : null,
+      limit: Math.max(1, Math.min(20000, parseInt(req.query.limit, 10) || 5000)),
+    })));
+  app.get("/api/library/diagnostics/scans", requireAuth, need("library.diagnostics"), (req, res) =>
+    send(res, () => library.scanReport()));
+
+  // Thumbnails are content-addressed, so a key never changes what it names.
+  app.get("/api/library/thumbs/:key", requireAuth, need("library.view"), (req, res) => {
+    const t = library.thumbFile(req.params.key);
+    if (!t) return res.status(404).json({ error: "No such thumbnail", code: "not_found" });
+    res.set("Cache-Control", "private, max-age=31536000, immutable");
+    res.type(t.mime).sendFile(t.file, err => { if (err && !res.headersSent) res.status(404).json({ error: "No such thumbnail", code: "not_found" }); });
+  });
 }
 
 module.exports = { registerLibraryRoutes };

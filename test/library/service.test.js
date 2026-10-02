@@ -17,7 +17,9 @@ function make(opts = {}) {
   let clock = 1_000_000;
   const svc = createLibraryService({
     baseDir: base, getGcodeFolder: () => opts.gcode || gcode, log: quiet, now: () => clock,
-    checkTimeoutMs: 2000, workerOptions: { log: quiet, ...(opts.workerOptions || {}) }, ...opts.svc,
+    // Indexing off: these tests pin reachability states, which a background
+    // scan would change under them. The indexer has its own tests.
+    checkTimeoutMs: 2000, indexing: false, workerOptions: { log: quiet, ...(opts.workerOptions || {}) }, ...opts.svc,
   });
   svc.start();
   return { svc, base, gcode, advance: ms => (clock += ms) };
@@ -30,7 +32,7 @@ test("the G-code folder is always a location, grouping individual files, and can
   assert.equal(g.isGcodeFolder, true);
   assert.equal(g.grouping, "files", "D8");
   assert.equal(path.resolve(g.path).toLowerCase(), path.resolve(gcode).toLowerCase());
-  assert.throws(() => svc.removeRoot(GCODE_ROOT), { code: "gcode_fixed" });
+  await assert.rejects(svc.removeRoot(GCODE_ROOT), { code: "gcode_fixed" });
   assert.throws(() => svc.updateRoot(GCODE_ROOT, { grouping: "folders" }), { code: "gcode_grouping_fixed" });
   await svc.stop();
 });
@@ -76,7 +78,7 @@ test("removing a location drops only its derived rows; decisions and prints stay
     VALUES (?, 'a.stl', 'a.stl', 'stl', 'source', 1, 1, 'fp', 'q:fp', 1, 1)`).run(r.id);
   db.prepare("INSERT INTO decisions (subject_type, subject_key, relation, created_at) VALUES ('file', 'q:fp', 'hidden', 1)").run();
   db.prepare("INSERT INTO prints (content_key, printer_id, remote_name, source, link_method, link_confidence) VALUES ('q:fp', 'p', 'a.gcode', 'library', 'content_fp', 'high')").run();
-  svc.removeRoot(r.id, {});
+  await svc.removeRoot(r.id, {});
   assert.equal(db.prepare("SELECT count(*) AS n FROM files").get().n, 0);
   assert.equal(db.prepare("SELECT count(*) AS n FROM decisions").get().n, 1);
   assert.equal(db.prepare("SELECT count(*) AS n FROM prints").get().n, 1);
