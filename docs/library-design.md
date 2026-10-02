@@ -1367,3 +1367,82 @@ Library — one availability concept, not competing ones.
   Each is one at a time, so at most one libuv thread can hang.
 - A mapped drive letter is recognised as network storage only when it is a registered root; the
   G-code folder always is.
+
+## 24. M2 results (2026-10-02)
+
+**Commits:** 2e436ec (G-code extraction, folder classification), 9c672e1 (indexer, raw view,
+thumbnails). Nothing from M3 or later was implemented. Prerequisite: §23 (cd006bc).
+
+**Implemented vs. specification:**
+- Pipeline §6.1 steps 1–6 and the `targets_printer` part of step 7. Grouping (`member_of`),
+  Review Items, Models, `model_stats`/`model_families` and FTS are M4 and later; nothing writes
+  them yet.
+- File access is on the main thread through netfs's background lane; parsing and every database
+  write are in the Library worker (§23 superseded the M1 note that the worker gives no
+  filesystem isolation — the worker does no file access at all).
+- 3MF files are indexed as files (role, fingerprint, hash) but not opened: that is M3.
+- `duplicate_of` Claims are not written yet; identical files are visible in the raw view by
+  their shared content key.
+- Thumbnails: embedded PNG/JPEG, content-addressed, orphans removed after each complete scan.
+  The 1 GB least-recently-used cap and `last_used_at` updates are not implemented (the real
+  library uses 7.9 MB).
+- The raw diagnostic view (`/library-raw.html`, admin, `library.diagnostics`) is the M2
+  checkpoint tool; the full Diagnostics of §13.1 is M4.
+
+**Real library, first scan (owner's NAS, 3 locations, 299 files, 28.8 GB):**
+
+| Location | Files | Scan | Read |
+|---|---|---|---|
+| G-code folder | 60 | 8.0 s | 56 MB |
+| U1 Files | 67 | 7.9 s | 50 MB |
+| V3 PLUS | 172 | 22.4 s | 163 MB |
+
+- Per file: window read p50 19–57 ms (max 261), parse p50 12–17 ms (max 36), write p50
+  16–20 ms, quick fingerprint p50 32–39 ms. No file needed more than the initial window; nothing
+  was streamed.
+- Rescan of unchanged files: listing only, 0 bytes read.
+- Full hash: ~28.8 GB at the 16 MB/s budget (~14–15 MB/s achieved), resumed by itself after a
+  hard kill and after yielding to scans.
+- Responsiveness during the scan (sampled every 250 ms): library status p95 19 ms, max 85 ms;
+  static files max 34 ms; file browser max 142 ms. `/api/fleet`'s ~3.5 s stalls are printer
+  polling and identical to the pre-M2 baseline (202 vs 208 of ~915 samples).
+- Upload pause, live: during an upload into the G-code folder the indexer reported itself
+  paused; ~3 MB in flight completed, then nothing until the upload ended.
+- DB 1.9 MB (+ WAL), 262 thumbnails 7.9 MB. Queries: a location's manifest 0.5 ms, Claims of
+  one key 0.1 ms, variants by family 0.2 ms, the whole raw view 35 ms.
+- Packaged Windows build: same results, worker as a thread, thumbnails next to the exe.
+
+**Printer identity on the real files (276 G-code):**
+- 272 high / applied, 3 medium / suggested (`5M PRO/skelly`, `5M PRO/boat` — byte-identical —
+  and `K1C/K1C.gcode`: generic `printer_model`, family from the settings fields), 1 unknown
+  (`[CP] TinyTREX`: "Creality Ender-3 V3 KE", no such family in the resolver).
+- `K1C/HollowLog` → Ender-3 V3 Plus, high, applied (printer_model and settings agree).
+- `5M PRO/skelly` → Adventurer 5M Pro, medium, suggested.
+- Folder disagreements: none raised. `K1C` is classified `unknown` because the resolver has no
+  K1C family, so HollowLog's folder/file disagreement is not visible — a resolver question for
+  the owner, not something a folder list should paper over.
+
+**Folder classes (42):** 6 printer-family-like, 16 designer, 1 format, 19 unknown. Near-miss
+spellings ("MatMires Make", "Cinderwing 3D") stay unknown: that is M4 candidate discovery.
+
+**Found and fixed during M2** (each with a regression test that fails without the fix):
+- A halt (Rebuild, Remove location) did not stop the idle hash that followed a stopped scan.
+- Orphan-thumbnail cleanup was quadratic without an index on `files.thumb_key` (108 s at 100k
+  files); now only this scan's candidates are checked, in one pass.
+- One unreadable file ended the full hash every tick; an unreadable folder failed the whole
+  location; a file that could not be fingerprinted or stat'ed could be marked missing.
+- Whole-window reads up to 6 MB in one operation could time out on a slow link and mark the
+  shared share unreachable; reads are now at most 1 MB.
+- Re-keying missed `ck#plate` object keys, Claim-key references and review-item subject keys,
+  and a Decision held on a quick key was lost for the copy hashed first (now resolved through
+  `content_aliases`).
+- Removing a location deleted its rows on the main thread in one transaction; now batched in the
+  worker.
+- The first scan waited for the next 15 s tick; the idle hash did not resume after a restart;
+  Creality thumbnail block forms were not recognised.
+
+**Real data worth knowing for M4:** five byte-identical pairs (e.g. `5M PRO/skelly` =
+`5M PRO/boat`, `U1/Hippocampus` = `U1/Cinderwin 3D/Hippocampus (Unicorn)`).
+
+**Known limits:** a location's first scan reads every file (~1 MB each for G-code); main-thread
+writes (location status) wait on the worker's write lock for at most one short transaction.
