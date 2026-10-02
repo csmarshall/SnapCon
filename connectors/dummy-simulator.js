@@ -8,7 +8,7 @@
 // server resets every simulated printer back to blank/idle, same as if it
 // had never printed. This is an accepted limitation for a test-only
 // connector, not something worth the complexity of persisting.
-const fs = require("fs");
+const netfs = require("../netfs").getNetFs();
 
 const STATE = new Map();
 
@@ -85,7 +85,7 @@ exports.probe = probe;
 // call does). The actual lifecycle reset happens in startPrintFile below.
 async function uploadFile(p, fp, name, job) {
   let size = 0;
-  try { size = fs.statSync(fp).size; } catch {}
+  try { size = (await netfs.stat(fp)).size; } catch {}
   if (job) { job.total = size; job.sent = size; }
   entryFor(p.id).filename = name;
 }

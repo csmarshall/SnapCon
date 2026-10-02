@@ -8,7 +8,7 @@
 // flashforge-api-docs) and confirmed working against a real Adventurer 5M
 // Pro. Fields marked "assumed" below are still just documented, not yet
 // exercised on real hardware — worth double-checking if something looks off.
-const fs = require("fs");
+const netfs = require("../netfs").getNetFs();
 const http = require("http");
 const net = require("net");
 const { Transform } = require("stream");
@@ -394,12 +394,12 @@ async function getFileMetadata(p, file) {
 // Upload: unlike Moonraker's plain multipart POST, FlashForge's /uploadGcode
 // puts auth + print options in HEADERS (not form fields) alongside a
 // multipart body carrying just the file bytes.
-function uploadFile(p, fp, name, job) {
+async function uploadFile(p, fp, name, job) {
+  const fileSize = (await netfs.stat(fp)).size;   // the job file may be on a NAS — see http-utils
   return new Promise((resolve, reject) => {
     const boundary = "----snapcon" + Math.random().toString(16).slice(2);
     const pre = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="gcodeFile"; filename="${name}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
     const post = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const fileSize = fs.statSync(fp).size;
     job.total = pre.length + fileSize + post.length;
     job.sent = 0;
     const u = new URL(baseUrl(p) + "/uploadGcode");
@@ -421,9 +421,11 @@ function uploadFile(p, fp, name, job) {
     });
     req.on("error", reject);
     req.write(pre); job.sent += pre.length;
-    const fileStream = fs.createReadStream(fp);
+    const fileStream = netfs.createReadStream(fp);
     const counter = new Transform({ transform(chunk, _e, cb) { job.sent += chunk.length; cb(null, chunk); } });
-    fileStream.on("error", reject);
+    // A failed local read aborts the request: never a short body the printer
+    // could take as a whole file.
+    fileStream.on("error", e => { req.destroy(e); reject(e); });
     counter.on("error", reject);
     counter.on("data", chunk => { if (!req.write(chunk)) { counter.pause(); req.once("drain", () => counter.resume()); } });
     counter.on("end", () => { req.write(post); job.sent += post.length; req.end(); });

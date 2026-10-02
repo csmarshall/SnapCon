@@ -113,6 +113,18 @@ function onFileVerificationFailed(state, itemId, kind, detail) {
   return attentionState(state, kind === "missing" ? "file-missing" : "file-changed", detail);
 }
 
+// The file could not be checked at all because its storage is unreachable
+// (the G-code folder's NAS) — not missing, not changed: unknown. Nothing has
+// been sent to the printer yet, so the claim is simply undone and the item
+// goes back to the front of the queue to be verified afresh when the folder
+// answers again. Never a "file-missing" attention for a NAS blip.
+function onDispatchDeferred(state, itemId) {
+  if (state.queueState !== "dispatching" || !state.currentItem || state.currentItem.id !== itemId) {
+    throw new Error("onDispatchDeferred: no matching dispatching item");
+  }
+  return { ...state, queueState: "idle", queue: [{ ...state.currentItem, status: "queued" }, ...state.queue], currentItem: null, updatedAt: Date.now() };
+}
+
 // ---- Print outcome (Category B) ----
 function onProbeComplete(state) {
   if (state.queueState !== "printing" || !state.currentItem) throw new Error("onProbeComplete: not printing");
@@ -426,7 +438,7 @@ module.exports = {
   QUEUE_STATES, ATTENTION_REASONS, RESOLUTIONS_BY_REASON, NEVER_PRINTED_REASONS, MAX_RECENT_HISTORY,
   newQueueItemId, pushHistory,
   claimTransition,
-  onDispatchSuccess, onDispatchFailure, onFileVerificationFailed,
+  onDispatchSuccess, onDispatchFailure, onFileVerificationFailed, onDispatchDeferred,
   onProbeComplete, onProbeFailedOrCancelled,
   onBedClearStarted, onBedClearSuccess, onBedClearFailure,
   resolveAttention, acceptFileChange, onPoolReassigned,

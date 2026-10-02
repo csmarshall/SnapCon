@@ -25,6 +25,7 @@ COPY audit ./audit
 COPY sync ./sync
 COPY queue ./queue
 COPY library ./library
+COPY netfs ./netfs
 COPY public ./public
 # Bundled canonical locale originals (en.json + the shipped sample) — read
 # via fs, not require(), so docker.test.js's require()-graph check can't

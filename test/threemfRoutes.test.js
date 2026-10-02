@@ -70,13 +70,13 @@ test("/api/map reads a Bambu .3mf through threemf, not as text", () => {
   const route = serverSrc.slice(serverSrc.indexOf('app.get("/api/map"'), serverSrc.indexOf('app.get("/api/local-thumbnail"'));
   assert.match(route, /threemf/);
   assert.match(route, /isBambu/, "only a Bambu .3mf takes this path");
-  assert.match(route, /plateGcode/);
+  assert.match(route, /plateGcode/i);   // netfs.threemfPlateGcode: threemf.plateGcode run in a netfs worker
   assert.match(route, /parseGcodeMap/, "the same parser still produces the result");
 });
 
 test("/api/local-thumbnail serves the plate picture out of a Bambu .3mf", () => {
   const route = serverSrc.slice(serverSrc.indexOf('app.get("/api/local-thumbnail"'), serverSrc.indexOf("const JOBS = new Map()"));
-  assert.match(route, /plateThumbnail/);
+  assert.match(route, /plateThumbnail/i);   // netfs.threemfPlateThumbnail
   assert.match(route, /isBambu/);
 });
 

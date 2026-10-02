@@ -30,8 +30,25 @@ function sanitizeFolderName(name) {
   return s.slice(0, 100);
 }
 
-function createSyncEngine({ baseDir, getConnector }) {
+// File access for the destination folder, which may be a NAS share. server.js
+// passes netfs; the default is plain fs.promises (tests).
+const defaultFileIO = {
+  stat: async p => { const st = await fs.promises.stat(p); return { size: st.size, isFile: st.isFile() }; },
+  mkdir: (p, o) => fs.promises.mkdir(p, o),
+  isNetworkPath: () => false,
+  availability: () => ({ status: "online" }),
+  noteError: () => {},
+};
+
+function createSyncEngine({ baseDir, getConnector, fileIO = defaultFileIO }) {
   const store = createSyncStore({ baseDir });
+  // Runs whose destination is a network share go one at a time, across all
+  // printers: the download itself still writes through fs.promises (libuv's
+  // pool of four threads, shared with every other async file call in the
+  // process), and a share that stops answering holds one of those threads per
+  // write in flight for ~21 s on Windows. One run at a time caps that at one.
+  let networkChain = Promise.resolve();
+  const destinationDown = dir => fileIO.availability(dir).status !== "online";
   const statuses = new Map(); // "printerId|root" -> status object
   const locks = new Set();    // "printerId|root" currently running
 
@@ -71,8 +88,8 @@ function createSyncEngine({ baseDir, getConnector }) {
     for (const entry of entries) {
       if (!entry.remoteModified || entry.remoteModified >= cutoffSec) continue;
       try {
-        const st = await fs.promises.stat(entry.localPath);
-        if (!st.isFile()) continue;
+        const st = await fileIO.stat(entry.localPath);
+        if (!st.isFile) continue;
         if (entry.remoteSize && st.size !== entry.remoteSize) continue;
       } catch {
         continue; // can't verify the local copy exists — never delete the source
@@ -102,19 +119,30 @@ function createSyncEngine({ baseDir, getConnector }) {
       downloaded: 0, skipped: 0, failed: 0,
       currentFile: null, lastError: null, deletedFromSource: 0
     });
+    let releaseNetwork = null;
     try {
+      if (fileIO.isNetworkPath(destRootFolder)) {
+        const prev = networkChain;
+        networkChain = new Promise(r => { releaseNetwork = r; });
+        // Shown as "listing" (the UI's own first phase) while it waits its turn.
+        await prev;
+      }
+      if (destinationDown(destRootFolder)) throw new Error("The sync folder " + destRootFolder + " is unreachable — try again once it answers");
       const c = getConnector(p.connector);
       if (!c.querySyncFiles) throw new Error("This printer's connector doesn't support file sync");
       const http = require("../connectors/http-utils");
       const base = http.baseUrl(p);
       const remoteFiles = await c.querySyncFiles(base, root);
       const destDir = path.join(destRootFolder, sanitizeFolderName(p.name));
-      await fs.promises.mkdir(destDir, { recursive: true });
+      await fileIO.mkdir(destDir, { recursive: true });
       setStatus(p.id, root, { phase: "downloading", total: remoteFiles.length });
 
       let downloaded = 0, skipped = 0, failed = 0;
       for (let i = 0; i < remoteFiles.length; i++) {
         const f = remoteFiles[i];
+        // The share went away mid-run: stop rather than fail every remaining
+        // file one hung write at a time. Nothing recorded as synced is lost.
+        if (destinationDown(destDir)) throw new Error("The sync folder " + destRootFolder + " stopped answering");
         setStatus(p.id, root, { currentFile: f.path, completed: i });
         const localPath = path.join(destDir, ...f.path.split("/"));
 
@@ -122,9 +150,13 @@ function createSyncEngine({ baseDir, getConnector }) {
         let alreadyValid = false;
         if (existing && existing.status === "downloaded" && existing.localPath) {
           try {
-            const st = await fs.promises.stat(existing.localPath);
-            if (st.isFile() && (!f.size || st.size === f.size)) alreadyValid = true;
-          } catch { /* local copy missing — re-download below */ }
+            const st = await fileIO.stat(existing.localPath);
+            if (st.isFile && (!f.size || st.size === f.size)) alreadyValid = true;
+          } catch (e) {
+            // Unreachable is not missing: a re-download would only hang too.
+            if (e && e.code === "NAS_UNREACHABLE") throw e;
+            /* local copy missing — re-download below */
+          }
         }
 
         if (alreadyValid) {
@@ -133,8 +165,9 @@ function createSyncEngine({ baseDir, getConnector }) {
           continue;
         }
         try {
-          await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
-          await c.downloadSyncFile(base, root, f.path, localPath, f.size);
+          await fileIO.mkdir(path.dirname(localPath), { recursive: true });
+          try { await c.downloadSyncFile(base, root, f.path, localPath, f.size); }
+          catch (e) { fileIO.noteError(localPath, e); throw e; }
           store.recordSynced({
             printerId: p.id, root, remotePath: f.path,
             remoteSize: f.size, remoteModified: f.modified,
@@ -169,6 +202,7 @@ function createSyncEngine({ baseDir, getConnector }) {
       throw e;
     } finally {
       locks.delete(k);
+      if (releaseNetwork) releaseNetwork();
     }
   }
 

@@ -86,4 +86,18 @@ async function checkReachable(absPath, { timeoutMs = 10000, fsp = fs.promises } 
   }
 }
 
-module.exports = { normalizeLocation, comparisonKey, overlaps, checkReachable, withTimeout };
+// checkReachable's fsp, backed by netfs: the calls run in netfs's probe lane,
+// so a location on a dead share holds a netfs worker, never the main thread or
+// libuv's pool, and its failure feeds the same availability state the G-code
+// folder uses. netfs applies its own timeout; withTimeout above stays as the
+// outer bound.
+function netfsFsp(netfs, lane = "probe") {
+  const o = { lane };
+  return {
+    stat: async p => { const st = await netfs.stat(p, o); return { ...st, isDirectory: () => st.isDirectory, isFile: () => st.isFile }; },
+    opendir: async p => { await netfs.openable(p, o); return { close: async () => {} }; },
+    realpath: p => netfs.realpath(p, o),
+  };
+}
+
+module.exports = { normalizeLocation, comparisonKey, overlaps, checkReachable, withTimeout, netfsFsp };

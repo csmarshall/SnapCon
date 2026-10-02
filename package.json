@@ -32,7 +32,8 @@
     ],
     "outputPath": "dist",
     "scripts": [
-      "library/indexer-worker.js"
+      "library/indexer-worker.js",
+      "netfs/netfs-worker.js"
     ]
   }
 }

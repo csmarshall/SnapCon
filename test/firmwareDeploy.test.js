@@ -25,7 +25,7 @@ const ROOT = path.join(os.tmpdir(), "snapcon-fwdeploy-test", "firmware");
 const serverSrc = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const appSrc = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
 const resolverSrc = (() => {
-  const i = serverSrc.indexOf("function resolveFirmwareFile(relRaw) {");
+  const i = serverSrc.indexOf("async function resolveFirmwareFile(relRaw) {");
   assert.ok(i > 0, "the shared resolver must exist");
   return serverSrc.slice(i, serverSrc.indexOf("async function firmwareDeployBlockedBy", i));
 })();
@@ -104,13 +104,15 @@ test("the jail is anchored on the configured folder resolved against BASE_DIR", 
 test("symlinks are not followed out of the jail, matching the listing route", () => {
   // pathSafety.js is lexical by its own documentation and does not resolve
   // symlinks, so the route uses lstat rather than pretending otherwise.
-  assert.match(resolverSrc, /fs\.lstatSync\(file\)\.isFile\(\)/);
+  assert.match(resolverSrc, /\(await netfs\.lstat\(file\)\)\.isFile/);
   const jail = fs.readFileSync(path.join(__dirname, "..", "pathSafety.js"), "utf8");
   assert.match(jail, /does not resolve symlinks/);
 });
 
 test("a missing file is a 404, not a flash attempt", () => {
-  assert.match(resolverSrc, /catch \{ return \{ status: 404, error: "Firmware file not found" \}; \}/);
+  assert.match(resolverSrc, /return \{ status: 404, error: "Firmware file not found" \};/);
+  // an unreachable share is a 503, never a "not found" that reads as final
+  assert.match(resolverSrc, /if \(e && e\.code === "NAS_UNREACHABLE"\) return \{ status: 503/);
   assert.match(routeSrc, /res\.status\(resolved\.status\)/);
 });
 
@@ -439,8 +441,8 @@ test("the firmware file is re-resolved inside the job, against the CURRENT confi
   // Between the request and the job the admin can change the firmware folder,
   // and the file can be deleted, moved, or swapped for a symlink. The check
   // that counts is the one taken against what will actually be read.
-  assert.match(serverSrc, /function resolveFirmwareFile\(relRaw\) \{/);
-  assert.match(jobSrc, /const now = resolveFirmwareFile\(relRaw\);/);
+  assert.match(serverSrc, /async function resolveFirmwareFile\(relRaw\) \{/);
+  assert.match(jobSrc, /const now = await resolveFirmwareFile\(relRaw\);/);
   assert.match(jobSrc, /if \(now\.error\) throw new Error\(now\.error\);/);
   // the module is handed the RE-resolved path, never the request-time one
   assert.match(jobSrc, /u1Firmware\.updateFromFile\(p, now\.file,/);
@@ -450,11 +452,11 @@ test("the firmware file is re-resolved inside the job, against the CURRENT confi
 });
 
 test("the re-resolver repeats the jail, lstat and absolute-path checks", () => {
-  const fn = serverSrc.slice(serverSrc.indexOf("function resolveFirmwareFile(relRaw) {"),
+  const fn = serverSrc.slice(serverSrc.indexOf("async function resolveFirmwareFile(relRaw) {"),
                              serverSrc.indexOf("async function firmwareDeployBlockedBy"));
   assert.match(fn, /path\.isAbsolute\(relRaw\)/);
   assert.match(fn, /resolveWithinFolder\(relRaw, root\)/);
-  assert.match(fn, /fs\.lstatSync\(file\)\.isFile\(\)/);
+  assert.match(fn, /\(await netfs\.lstat\(file\)\)\.isFile/);
   assert.match(fn, /path\.resolve\(BASE_DIR, configured\)/);
   // reads CFG at call time rather than closing over a resolved value
   assert.match(fn, /String\(CFG\.firmwareFolder \|\| ""\)\.trim\(\)/);
@@ -777,8 +779,9 @@ test("the inspect route answers JSON on every path, including a failure", () => 
   // HTML error page, the client cannot tell that apart from an old server.
   const route = serverSrc.slice(serverSrc.indexOf('app.get("/api/firmware-inspect"'),
                                 serverSrc.indexOf('app.post("/api/firmware-deploy"'));
-  assert.match(route, /try \{ info = firmwareImage\.inspectFirmwareImage\(resolved\.file\); \}/);
-  assert.match(route, /catch \(e\) \{ return res\.status\(500\)\.json\(\{ error:/);
+  assert.match(route, /try \{ info = await netfs\.firmwareInspect\(resolved\.file\); \}/);
+  assert.match(route, /return res\.status\(500\)\.json\(\{ error:/);
+  assert.match(route, /if \(e && e\.code === "NAS_UNREACHABLE"\) return res\.status\(503\)\.json\(/);
   assert.match(route, /if \(resolved\.error\) return res\.status\(resolved\.status\)\.json\(/);
 });
 

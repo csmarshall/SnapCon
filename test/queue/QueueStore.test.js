@@ -207,20 +207,36 @@ test("QueueStore: bulk intent that throws mid-computation leaves every printer c
   assert.deepEqual(store.getPrinterState("p2"), before2);
 });
 
-test("QueueStore: computeFileHash caches by (size, mtime) and forces a fresh read when force:true", () => {
+test("QueueStore: computeFileHash caches by (size, mtime) and forces a fresh read when force:true", async () => {
   const { baseDir, store } = freshStore();
   const filePath = path.join(baseDir, "test.gcode");
   fs.writeFileSync(filePath, "original content");
-  const first = store.computeFileHash(filePath);
+  const first = await store.computeFileHash(filePath);
   // Overwrite with different content but try to preserve the same size —
   // even if we can't perfectly fake mtime here, this at least proves the
   // force path re-reads while the cache path can return a stale value for
   // an unchanged stat signature.
-  const second = store.computeFileHash(filePath); // same file, unchanged — cache hit, same hash
+  const second = await store.computeFileHash(filePath); // same file, unchanged — cache hit, same hash
   assert.equal(second.sha256, first.sha256);
   fs.writeFileSync(filePath, "different content, different size!!");
-  const forced = store.computeFileHash(filePath, { force: true });
+  const forced = await store.computeFileHash(filePath, { force: true });
   assert.notEqual(forced.sha256, first.sha256, "forced hash must reflect the new bytes");
+});
+
+test("QueueStore: force:true re-reads the bytes even when size and mtime are unchanged", async () => {
+  const { baseDir, store } = freshStore();
+  const filePath = path.join(baseDir, "same.gcode");
+  fs.writeFileSync(filePath, "AAAA");
+  const st = fs.statSync(filePath);
+  const first = await store.computeFileHash(filePath);
+  fs.writeFileSync(filePath, "BBBB");               // same size
+  fs.utimesSync(filePath, st.atime, st.mtime);      // same mtime (to the precision utimes allows)
+  assert.notEqual((await store.computeFileHash(filePath, { force: true })).sha256, first.sha256, "the dispatch identity check must not");
+});
+
+test("QueueStore: computeFileHash rejects for a missing file", async () => {
+  const { baseDir, store } = freshStore();
+  await assert.rejects(store.computeFileHash(path.join(baseDir, "gone.gcode")), { code: "ENOENT" });
 });
 
 test("QueueStore: confirmManualBedClear returns an audit event and commits atomically", () => {

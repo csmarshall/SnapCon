@@ -98,11 +98,13 @@ test("an empty path is the root, not a jail bypass", () => {
 // ---------------------------------------------------------------------------
 
 test("a nonexistent path is a 404, not a crash or a partial listing", () => {
-  assert.match(routeSrc, /catch \{ return res\.status\(404\)\.json\(\{ error: "Path not found" \}\); \}/);
+  assert.match(routeSrc, /return res\.status\(404\)\.json\(\{ error: "Path not found" \}\);/);
+  // ...and an unreachable share is said to be one, not passed off as missing.
+  assert.match(routeSrc, /if \(e && e\.code === "NAS_UNREACHABLE"\) return res\.status\(503\)/);
 });
 
 test("a file cannot be treated as a directory", () => {
-  assert.match(routeSrc, /if \(!fs\.lstatSync\(dir\)\.isDirectory\(\)\) return res\.status\(400\)\.json\(\{ error: "Not a folder" \}\);/);
+  assert.match(routeSrc, /if \(!\(await netfs\.lstat\(dir\)\)\.isDirectory\) return res\.status\(400\)\.json\(\{ error: "Not a folder" \}\);/);
 });
 
 test("symlinks are neither listed nor navigable — and no claim is made beyond that", () => {
@@ -111,9 +113,11 @@ test("symlinks are neither listed nor navigable — and no claim is made beyond 
   // lstat on the directory being opened (a symlinked dir fails isDirectory),
   // and Dirent.isDirectory()/isFile() both being false for a symlink entry,
   // which drops it from the listing.
-  assert.match(routeSrc, /fs\.lstatSync\(dir\)/, "lstat, not stat, on the directory being opened");
-  assert.match(routeSrc, /if \(e\.isDirectory\(\)\)/);
-  assert.match(routeSrc, /else if \(e\.isFile\(\)\)/);
+  // (netfs's lstat and listDir; their symlink behaviour is tested for real in
+  // test/netfs/netfs.test.js.)
+  assert.match(routeSrc, /netfs\.lstat\(dir\)/, "lstat, not stat, on the directory being opened");
+  assert.match(routeSrc, /if \(e\.isDirectory\)/);
+  assert.match(routeSrc, /else if \(e\.isFile\)/);
   const jail = fs.readFileSync(path.join(__dirname, "..", "pathSafety.js"), "utf8");
   assert.match(jail, /does not resolve symlinks/, "the jail still documents its own limit");
 });
@@ -123,7 +127,7 @@ test("no extension filter is applied — every regular file is listed", () => {
   // has the connector in hand. Guards against someone quietly inventing a
   // firmware file format here.
   assert.equal(/\\\.(bin|img|zip)/.test(routeSrc), false);
-  assert.match(routeSrc, /size: st\.size, mtime: st\.mtimeMs/);
+  assert.match(routeSrc, /size: e\.size, mtime: e\.mtimeMs/);
 });
 
 test("responses carry relative, forward-slashed paths only", () => {

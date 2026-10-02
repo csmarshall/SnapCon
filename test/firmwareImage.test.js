@@ -254,7 +254,7 @@ test("a hard failure stops the request; a warning travels with it", () => {
                                serverSrc.indexOf('app.get("/api/firmware-status"'));
   // Inspected once, before the per-printer loop — a bad image is not something
   // to discover on printer four of six.
-  const inspectIdx = route.indexOf("firmwareImage.inspectFirmwareImage(");
+  const inspectIdx = route.indexOf("netfs.firmwareInspect(");
   const loopIdx = route.indexOf("for (const ref of wanted)");
   assert.ok(inspectIdx > 0 && inspectIdx < loopIdx, "the image is judged before any printer is");
   assert.match(route, /if \(image\.hardFail\.length\) return res\.status\(400\)/);

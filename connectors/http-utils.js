@@ -7,6 +7,10 @@ const http = require("http");
 const path = require("path");
 const { Transform, Readable } = require("stream");
 const { parseGcodeMap, normHex } = require("../parser");
+// Local job files are read through netfs: the G-code folder is often a NAS,
+// and a synchronous read of an unreachable share froze the whole server for
+// ~21 s on Windows. netfs reads in worker threads with per-chunk timeouts.
+const netfs = require("../netfs").getNetFs();
 
 const baseUrl = p => String(p.url).replace(/\/+$/, "");
 
@@ -89,12 +93,12 @@ const sendGcode = (p, script, ms) => moonrakerPost(p, "/printer/gcode/script?scr
 
 // Stream a file to the printer as multipart/form-data, reporting bytes sent so
 // the UI can show a real upload progress bar. Resolves on the printer's 2xx.
-function uploadWithProgress(base, fp, name, job) {
+async function uploadWithProgress(base, fp, name, job) {
+  const fileSize = (await netfs.stat(fp)).size;
   return new Promise((resolve, reject) => {
     const boundary = "----snapcon" + Math.random().toString(16).slice(2);
     const pre = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
     const post = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const fileSize = fs.statSync(fp).size;
     job.total = pre.length + fileSize + post.length;
     job.sent = 0;
     const u = new URL(base + "/server/files/upload");
@@ -107,9 +111,12 @@ function uploadWithProgress(base, fp, name, job) {
     });
     req.on("error", reject);
     req.write(pre); job.sent += pre.length;
-    const fileStream = fs.createReadStream(fp);
+    const fileStream = netfs.createReadStream(fp);
     const counter = new Transform({ transform(chunk, _e, cb) { job.sent += chunk.length; cb(null, chunk); } });
-    fileStream.on("error", reject);
+    // A local read that fails mid-upload (the NAS went away) aborts the
+    // request too: the printer must see a broken upload, never a complete one
+    // with the tail missing — Content-Length makes the short body invalid.
+    fileStream.on("error", e => { req.destroy(e); reject(e); });
     counter.on("error", reject);
     counter.on("data", chunk => { if (!req.write(chunk)) { counter.pause(); req.once("drain", () => counter.resume()); } });
     counter.on("end", () => { req.write(post); job.sent += post.length; req.end(); });
@@ -187,7 +194,7 @@ const baseNameOf = s => String(s).replace(/\\/g, "/").split("/").pop();
 
 async function compareRemoteFile(p, name, localPath) {
   // Throws if the local file is gone — a caller must not read that as a match.
-  const localSize = fs.statSync(localPath).size;
+  const localSize = (await netfs.stat(localPath)).size;
 
   const wanted = baseNameOf(name);
   // The printer's copy may sit in a subfolder while uploads land at the root,
@@ -205,28 +212,22 @@ async function compareRemoteFile(p, name, localPath) {
   const win = Math.min(IDENTITY_WINDOW, localSize);
   const starts = [...new Set([0, Math.max(0, Math.floor(localSize / 2) - Math.floor(win / 2)), Math.max(0, localSize - win)])];
 
-  const fd = fs.openSync(localPath, "r");
-  try {
-    for (const start of starts) {
-      const len = Math.min(win, localSize - start);
-      if (len <= 0) continue;
-      let res;
-      try { res = await fetchTimeout(url, 10000, { headers: { Range: `bytes=${start}-${start + len - 1}` } }); }
-      catch { return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size, unverified: true }; }
-      // 206 is the only answer that proves the range was honoured; a 200 would
-      // be the whole file and must not be compared against one window.
-      if (!res.ok || res.status !== 206) {
-        return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size, unverified: true };
-      }
-      const remoteChunk = Buffer.from(await res.arrayBuffer());
-      const localChunk = Buffer.alloc(len);
-      fs.readSync(fd, localChunk, 0, len, start);
-      if (remoteChunk.length !== len || !remoteChunk.equals(localChunk)) {
-        return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size };
-      }
+  for (const start of starts) {
+    const len = Math.min(win, localSize - start);
+    if (len <= 0) continue;
+    let res;
+    try { res = await fetchTimeout(url, 10000, { headers: { Range: `bytes=${start}-${start + len - 1}` } }); }
+    catch { return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size, unverified: true }; }
+    // 206 is the only answer that proves the range was honoured; a 200 would
+    // be the whole file and must not be compared against one window.
+    if (!res.ok || res.status !== 206) {
+      return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size, unverified: true };
     }
-  } finally {
-    fs.closeSync(fd);
+    const remoteChunk = Buffer.from(await res.arrayBuffer());
+    const localChunk = await netfs.read(localPath, start, len);
+    if (remoteChunk.length !== len || !remoteChunk.equals(localChunk)) {
+      return { present: true, sameSize: true, identical: false, localSize, remoteSize: remote.size };
+    }
   }
   return { present: true, sameSize: true, identical: true, localSize, remoteSize: remote.size };
 }

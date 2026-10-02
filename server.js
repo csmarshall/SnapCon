@@ -30,6 +30,11 @@ const firmwareImage = require("./connectors/firmwareImage");
 const { createRemoteAccessService } = require("./remote-access/RemoteAccessService");
 const { createAuditLog } = require("./audit/AuditLog");
 const { createLibraryService } = require("./library/LibraryService");
+const { checkReachable, netfsFsp } = require("./library/locations");
+// Every filesystem call that can touch the G-code folder (often a NAS share)
+// goes through netfs: it runs in dedicated worker threads, so a dead NAS can
+// fail those calls but can never freeze the server or starve local file work.
+const netfs = require("./netfs").getNetFs();
 const { registerLibraryRoutes } = require("./library/routes");
 const { createSyncEngine } = require("./sync/SyncEngine");
 const { loadConfigFile } = require("./configLoader");
@@ -101,14 +106,24 @@ function loadConfig() {
   CONFIG_LOAD_QUARANTINE_PATH = result.quarantinePath;
   FOLDER = path.resolve(BASE_DIR, CFG.gcodeFolder || "./gcode");
   PRINTERS = Array.isArray(CFG.printers) ? CFG.printers : [];
-  try { fs.mkdirSync(FOLDER, { recursive: true }); } catch {}
+  // The G-code folder is its own availability root (netfs/NetFs.js): known
+  // unreachable, its routes answer 503 at once instead of each hanging.
+  netfs.registerRoot("gcode", FOLDER);
+  ensureFolder(FOLDER);
   // Logs/Camera Folder are opt-in (no default, unlike gcodeFolder) — only
   // create them once the user has actually pointed at a path. Best-effort:
   // a bad path here shouldn't block the rest of config from loading, same
   // as the gcodeFolder mkdir above.
-  if (CFG.logsFolder) { try { fs.mkdirSync(path.resolve(BASE_DIR, CFG.logsFolder), { recursive: true }); } catch {} }
-  if (CFG.cameraFolder) { try { fs.mkdirSync(path.resolve(BASE_DIR, CFG.cameraFolder), { recursive: true }); } catch {} }
-  if (CFG.gcodeSyncFolder) { try { fs.mkdirSync(path.resolve(BASE_DIR, CFG.gcodeSyncFolder), { recursive: true }); } catch {} }
+  if (CFG.logsFolder) ensureFolder(path.resolve(BASE_DIR, CFG.logsFolder));
+  if (CFG.cameraFolder) ensureFolder(path.resolve(BASE_DIR, CFG.cameraFolder));
+  if (CFG.gcodeSyncFolder) ensureFolder(path.resolve(BASE_DIR, CFG.gcodeSyncFolder));
+}
+// Best-effort create. A network folder is created asynchronously through
+// netfs: startup must never wait on a NAS (an unreachable one used to delay
+// it ~21 s). A local folder is created at once, as before.
+function ensureFolder(p) {
+  if (netfs.isNetworkPath(p)) { netfs.mkdir(p, { recursive: true }, { timeoutMs: 30000 }).catch(() => {}); return; }
+  try { fs.mkdirSync(p, { recursive: true }); } catch {}
 }
 loadConfig();
 const PORT = CFG.port || 4545;
@@ -277,7 +292,7 @@ function ensurePrinterPoolSchema() {
   if (changed && !CONFIG_LOAD_FAILED) { try { fs.writeFileSync(CONFIG_PATH, JSON.stringify(CFG, null, 2)); } catch {} }
 }
 ensurePrinterPoolSchema();
-const queueStore = createQueueStore({ baseDir: BASE_DIR });
+const queueStore = createQueueStore({ baseDir: BASE_DIR, fileIO: { stat: p => netfs.stat(p), hashFile: p => netfs.hashFile(p) } });
 queueStore.load();
 
 // Users for the optional User Access Management feature. No file exists until
@@ -417,7 +432,11 @@ auditLog.prune(CFG.auditRetentionDays);
 
 // Logs/Camera sync — the only module the routes below talk to for it. Same
 // "one entry point" shape as remoteAccess/auditLog above.
-const syncEngine = createSyncEngine({ baseDir: BASE_DIR, getConnector });
+const syncEngine = createSyncEngine({ baseDir: BASE_DIR, getConnector, fileIO: {
+  stat: p => netfs.stat(p), mkdir: (p, o) => netfs.mkdir(p, o),
+  isNetworkPath: p => netfs.isNetworkPath(p), availability: p => netfs.availability(p),
+  noteError: (p, e) => netfs.noteError(p, e),
+} });
 
 // Never attributes an action to the implicit admin (usersEnabled:false) —
 // there's no real account behind it, just the historical "everyone's an
@@ -440,6 +459,7 @@ function actorFromReq(req) {
 const library = createLibraryService({
   baseDir: BASE_DIR,
   getGcodeFolder: () => FOLDER,
+  checkFn: (p, o) => checkReachable(p, { ...o, fsp: netfsFsp(netfs) }),
   audit: (event, actor, detail) => auditLog.log({ category: "library", event, ...actor, detail }),
 });
 registerLibraryRoutes(app, { library, requireAuth, actorFromReq });
@@ -477,6 +497,26 @@ function safePath(sub) {
   return resolveWithinFolder(sub, FOLDER);
 }
 
+// The extensions the file browser lists as printable files.
+const SLICED_FILE_RE = /\.(gcode|gco|g|gx|3mf)$/i;
+
+// A request that needed the G-code folder while it is unreachable gets a
+// clear 503 instead of a hang or a misleading "not found". Returns true when
+// it answered. Any other error is the caller's to report.
+function replyIfNasDown(res, e) {
+  if (!e || e.code !== "NAS_UNREACHABLE") return false;
+  res.status(503).json({
+    error: "The G-code folder is unreachable" + (e.reason ? " (" + e.reason + ")" : "") + ". SnapCon keeps checking and will use it again as soon as it answers.",
+    code: "gcode_folder_unreachable",
+  });
+  return true;
+}
+
+// Does this file exist? Through netfs, so an unreachable share is an error
+// (NAS_UNREACHABLE), never a quiet "no". Checked on every use: the breaker
+// only short-circuits a known outage, it never stands in for this check.
+const fileExists = fp => netfs.exists(fp);
+
 
 app.get("/api/printers", requireAuth, (req, res) => {
   const out = [];
@@ -484,35 +524,35 @@ app.get("/api/printers", requireAuth, (req, res) => {
   res.json(out);
 });
 
-app.get("/api/files", requireAuth, (req, res) => {
+app.get("/api/files", requireAuth, async (req, res) => {
   const sub = req.query.sub || "";
   const dir = sub ? safePath(sub) : FOLDER;
   if (!dir) return res.status(400).json({ error: "Invalid path" });
   try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    const folders = entries.filter(e => e.isDirectory()).map(e => e.name).sort();
-    const files = entries
-      // .gx/.3mf are FlashForge's slicer output (.3mf specifically for
-      // multi-material/IFS jobs on the AD5X) — without these, a FlashForge
-      // user's sliced files never show up here at all.
-      .filter(e => e.isFile() && /\.(gcode|gco|g|gx|3mf)$/i.test(e.name))
-      .map(e => {
-        const fp = path.join(dir, e.name);
-        const st = fs.statSync(fp);
-        const row = { name: e.name, size: st.size, mtime: st.mtimeMs };
-        // A .3mf tells the library nothing by its name: the same extension
-        // covers a printable sliced plate and a project that was never sliced.
-        // Read once per listing, cached on size+mtime, so the row can say which
-        // it is instead of letting someone send a file no printer can start.
-        if (/\.3mf$/i.test(e.name)) {
-          const info = threemfInfoCached(fp, st);
-          if (info.isBambu) { row.kind = "bambu-3mf"; row.sliced = info.sliced; }
-        }
-        return row;
-      })
-      .sort((a, b) => b.mtime - a.mtime);
+    // One netfs round trip: the directory plus a stat of each listed file.
+    // .gx/.3mf are FlashForge's slicer output (.3mf specifically for
+    // multi-material/IFS jobs on the AD5X) — without these, a FlashForge
+    // user's sliced files never show up here at all.
+    const entries = await netfs.listDir(dir, SLICED_FILE_RE);
+    const folders = entries.filter(e => e.isDirectory).map(e => e.name).sort();
+    const files = [];
+    for (const e of entries.filter(x => x.isFile)) {
+      const fp = path.join(dir, e.name);
+      const row = { name: e.name, size: e.size, mtime: e.mtimeMs };
+      // A .3mf tells the library nothing by its name: the same extension
+      // covers a printable sliced plate and a project that was never sliced.
+      // Read once per listing, cached on size+mtime, so the row can say which
+      // it is instead of letting someone send a file no printer can start.
+      if (/\.3mf$/i.test(e.name)) {
+        const info = await threemfInfoCached(fp, e);
+        if (info.isBambu) { row.kind = "bambu-3mf"; row.sliced = info.sliced; }
+      }
+      files.push(row);
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
     res.json({ folder: dir, sub, folders, files });
   } catch (e) {
+    if (replyIfNasDown(res, e)) return;
     res.status(500).json({ error: "Cannot read folder — " + e.message });
   }
 });
@@ -530,27 +570,28 @@ app.get("/api/files", requireAuth, (req, res) => {
 // an entry per file forever.
 const THREEMF_CACHE = new Map();
 const THREEMF_CACHE_MAX = 2000;
-function threemfInfoCached(fp, stat) {
+async function threemfInfoCached(fp, stat) {
   const key = fp + "|" + stat.size + "|" + stat.mtimeMs;
   const hit = THREEMF_CACHE.get(key);
   if (hit) return hit;
-  const info = threemf.read(fp);
+  const info = await netfs.threemfRead(fp);   // threemf.read, run in a netfs worker
   if (THREEMF_CACHE.size >= THREEMF_CACHE_MAX) THREEMF_CACHE.clear();
   THREEMF_CACHE.set(key, info);
   return info;
 }
 
-app.get("/api/check-folder", requireAdmin, (req, res) => {
+// The typed path may be a network share that is down: checked through netfs so
+// that costs this request at most its timeout, never the server.
+app.get("/api/check-folder", requireAdmin, async (req, res) => {
   const raw = String(req.query.path || "").trim();
   if (!raw) return res.json({ ok: false, error: "Enter a path" });
   const resolved = path.resolve(BASE_DIR, raw);
   try {
-    if (!fs.statSync(resolved).isDirectory()) return res.json({ ok: false, error: "Not a folder" });
-    const count = fs.readdirSync(resolved, { withFileTypes: true })
-      .filter(e => e.isFile() && /\.(gcode|gco|g|gx|3mf)$/i.test(e.name)).length;
+    if (!(await netfs.stat(resolved)).isDirectory) return res.json({ ok: false, error: "Not a folder" });
+    const count = (await netfs.readdir(resolved)).filter(e => e.isFile && SLICED_FILE_RE.test(e.name)).length;
     res.json({ ok: true, resolved, count });
-  } catch {
-    res.json({ ok: false, error: "Path not found" });
+  } catch (e) {
+    res.json({ ok: false, error: e.code === "NAS_UNREACHABLE" ? "Unreachable — the share did not answer" : "Path not found" });
   }
 });
 
@@ -573,7 +614,7 @@ app.get("/api/check-folder", requireAdmin, (req, res) => {
 // No extension filter: which files a given connector accepts is a question for
 // Deploy, which has the connector in hand and must revalidate whatever it is
 // given anyway. Listing everything avoids inventing a firmware file format.
-app.get("/api/firmware-files", requireAdmin, (req, res) => {
+app.get("/api/firmware-files", requireAdmin, async (req, res) => {
   const configured = String(CFG.firmwareFolder || "").trim();
   // A CODE, not prose, unlike every other error here: this is the one case
   // the picker explains rather than echoes ("set a firmware folder in Settings
@@ -589,23 +630,24 @@ app.get("/api/firmware-files", requireAdmin, (req, res) => {
   // unchanged regardless of the OS separator, exactly like CURRENT_SUB does
   // for the gcode file manager.
   const rel = p => path.relative(root, p).split(path.sep).join("/");
+  // Through netfs: the firmware folder can be a share like the G-code folder.
   let entries;
   try {
-    if (!fs.lstatSync(dir).isDirectory()) return res.status(400).json({ error: "Not a folder" });
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch { return res.status(404).json({ error: "Path not found" }); }
+    if (!(await netfs.lstat(dir)).isDirectory) return res.status(400).json({ error: "Not a folder" });
+    entries = await netfs.listDir(dir);
+  } catch (e) {
+    if (e && e.code === "NAS_UNREACHABLE") return res.status(503).json({ error: e.message });
+    return res.status(404).json({ error: "Path not found" });
+  }
   const dirs = [], files = [];
   for (const e of entries) {
-    // isDirectory()/isFile() are both false for a symlink here, so symlinks
-    // fall out of the listing entirely — see the jail note above.
+    // isDirectory/isFile are both false for a symlink here (the worker reads
+    // dirents, never following them), so symlinks fall out of the listing
+    // entirely — see the jail note above. A file that vanished between
+    // readdir and stat is already omitted.
     const full = path.join(dir, e.name);
-    if (e.isDirectory()) dirs.push({ name: e.name, path: rel(full) });
-    else if (e.isFile()) {
-      try {
-        const st = fs.statSync(full);
-        files.push({ name: e.name, path: rel(full), size: st.size, mtime: st.mtimeMs });
-      } catch { /* vanished between readdir and stat — just omit it */ }
-    }
+    if (e.isDirectory) dirs.push({ name: e.name, path: rel(full) });
+    else if (e.isFile) files.push({ name: e.name, path: rel(full), size: e.size, mtime: e.mtimeMs });
   }
   const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
   dirs.sort(byName); files.sort(byName);
@@ -738,7 +780,7 @@ setInterval(() => {
 // deleted, moved, or replaced with a symlink pointing somewhere else. The
 // check that matters is the one taken against the state that will actually be
 // used, so it is one function rather than a validated value carried forward.
-function resolveFirmwareFile(relRaw) {
+async function resolveFirmwareFile(relRaw) {
   const configured = String(CFG.firmwareFolder || "").trim();
   if (!configured) return { status: 400, error: "No firmware folder is configured" };
   // Absolute paths are refused outright rather than merely failing the jail
@@ -749,8 +791,11 @@ function resolveFirmwareFile(relRaw) {
   const file = resolveWithinFolder(relRaw, root);
   if (!file) return { status: 400, error: "Invalid path" };
   // lstat, not stat: a symlink is not followed out of the jail here either.
-  try { if (!fs.lstatSync(file).isFile()) return { status: 400, error: "Not a file" }; }
-  catch { return { status: 404, error: "Firmware file not found" }; }
+  try { if (!(await netfs.lstat(file)).isFile) return { status: 400, error: "Not a file" }; }
+  catch (e) {
+    if (e && e.code === "NAS_UNREACHABLE") return { status: 503, error: e.message };
+    return { status: 404, error: "Firmware file not found" };
+  }
   return { file };
 }
 
@@ -798,7 +843,7 @@ async function runFirmwareDeploy(id, relRaw, actor, verifyMode) {
     // printer was idle a moment ago" is not what makes flashing safe.
     const stillBlocked = await firmwareDeployBlockedBy(p);
     if (stillBlocked) throw new Error(stillBlocked);
-    const now = resolveFirmwareFile(relRaw);
+    const now = await resolveFirmwareFile(relRaw);
     if (now.error) throw new Error(now.error);
 
     // With no mode the connector picks its own default: a CRC-32 taken from
@@ -894,15 +939,18 @@ async function drainFirmwareQueue() {
 
 // Inspect a firmware file without deploying it — what the confirmation dialog
 // shows before anything is committed.
-app.get("/api/firmware-inspect", requireAdmin, (req, res) => {
-  const resolved = resolveFirmwareFile(String(req.query.path || ""));
+app.get("/api/firmware-inspect", requireAdmin, async (req, res) => {
+  const resolved = await resolveFirmwareFile(String(req.query.path || ""));
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
   // Belt and braces with the module's own guarding: this route must always
   // answer JSON, because a caller that gets an HTML error page back cannot
   // tell "this file is unreadable" from "this SnapCon has no such route".
   let info;
-  try { info = firmwareImage.inspectFirmwareImage(resolved.file); }
-  catch (e) { return res.status(500).json({ error: "The firmware file could not be checked: " + e.message }); }
+  try { info = await netfs.firmwareInspect(resolved.file); }
+  catch (e) {
+    if (e && e.code === "NAS_UNREACHABLE") return res.status(503).json({ error: e.message });
+    return res.status(500).json({ error: "The firmware file could not be checked: " + e.message });
+  }
   res.json({
     file: info.file, size: info.size, container: info.container, chip: info.chip,
     chipOk: info.chipOk, headerConsistent: info.headerConsistent,
@@ -927,14 +975,16 @@ app.post("/api/firmware-deploy", requireAdmin, async (req, res) => {
   const wanted = Array.isArray(b.printers) ? b.printers : (b.printer !== undefined ? [b.printer] : []);
   if (!wanted.length) return res.status(400).json({ error: "No printers selected" });
 
-  const resolved = resolveFirmwareFile(relRaw);
+  const resolved = await resolveFirmwareFile(relRaw);
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
   // Pre-flight on the image itself. Only facts readable from the bytes are
   // fatal (container, chip, internally impossible offsets); a filename/model
   // mismatch is a warning carried to the caller, never a claim of proven
   // compatibility — see connectors/firmwareImage.js.
-  const image = firmwareImage.inspectFirmwareImage(resolved.file);
+  let image;
+  try { image = await netfs.firmwareInspect(resolved.file); }
+  catch (e) { return res.status(e && e.code === "NAS_UNREACHABLE" ? 503 : 500).json({ error: "The firmware file could not be checked: " + e.message }); }
   if (image.hardFail.length) return res.status(400).json({ error: image.hardFail.join("; ") });
   const targetBuild = firmwareImage.firmwareBuildId(image);
 
@@ -1147,101 +1197,110 @@ app.get("/api/firmware-deploy-status", requireAdmin, (req, res) => {
 // /api/files uses — `relSub` is the "/"-joined relative path the client
 // already speaks (CURRENT_SUB), built independently of the OS path separator
 // so it round-trips straight back into safePath()/loadFiles() unchanged.
-function walkFilesRecursive(dir, relSub, q, results, limit) {
-  if (results.length >= limit) return;
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) {
-    if (results.length >= limit) return;
-    if (e.name.startsWith(".")) continue; // skip .thumbs and other hidden dirs
-    const fp = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      walkFilesRecursive(fp, relSub ? relSub + "/" + e.name : e.name, q, results, limit);
-    } else if (e.isFile() && /\.(gcode|gco|g|gx|3mf)$/i.test(e.name) && e.name.toLowerCase().includes(q)) {
-      const st = fs.statSync(fp);
-      results.push({ name: e.name, sub: relSub, size: st.size, mtime: st.mtimeMs });
-    }
-  }
-}
-
-app.get("/api/files/search", requireAuth, (req, res) => {
+// File search walks the whole G-code folder; done in a netfs worker so a large
+// or slow share costs this request, not the server. Hidden folders (.thumbs)
+// are skipped, as before.
+app.get("/api/files/search", requireAuth, async (req, res) => {
   const q = String(req.query.q || "").trim().toLowerCase();
   if (!q) return res.json({ files: [] });
-  const results = [];
-  walkFilesRecursive(FOLDER, "", q, results, 300);
-  results.sort((a, b) => b.mtime - a.mtime);
-  res.json({ files: results });
+  try {
+    const results = await netfs.walk(FOLDER, { query: q, filter: SLICED_FILE_RE, limit: 300 });
+    results.sort((a, b) => b.mtime - a.mtime);
+    res.json({ files: results });
+  } catch (e) {
+    if (replyIfNasDown(res, e)) return;
+    res.json({ files: [] });
+  }
 });
 
-app.post("/api/files/mkdir", requireRegular, (req, res) => {
+app.post("/api/files/mkdir", requireRegular, async (req, res) => {
   const { sub, name } = req.body || {};
   const dir = sub ? safePath(sub) : FOLDER;
-  if (!dir || !fs.existsSync(dir)) return res.status(400).json({ error: "Invalid folder" });
-  const clean = String(name || "").trim();
-  if (!clean || /[\\/]/.test(clean) || clean === "." || clean === "..") {
-    return res.status(400).json({ error: "Invalid folder name" });
+  try {
+    if (!dir || !(await fileExists(dir))) return res.status(400).json({ error: "Invalid folder" });
+    const clean = String(name || "").trim();
+    if (!clean || /[\\/]/.test(clean) || clean === "." || clean === "..") {
+      return res.status(400).json({ error: "Invalid folder name" });
+    }
+    const target = path.join(dir, clean);
+    if (!isPathWithinFolder(target, FOLDER)) return res.status(400).json({ error: "Invalid folder name" });
+    if (await fileExists(target)) return res.status(409).json({ error: "Already exists" });
+    await netfs.mkdir(target);
+    res.json({ ok: true });
+  } catch (e) {
+    if (replyIfNasDown(res, e)) return;
+    res.status(500).json({ error: e.message });
   }
-  const target = path.join(dir, clean);
-  if (!isPathWithinFolder(target, FOLDER)) return res.status(400).json({ error: "Invalid folder name" });
-  if (fs.existsSync(target)) return res.status(409).json({ error: "Already exists" });
-  try { fs.mkdirSync(target); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Move one or more files (each identified by its own {sub, name}, since a
 // multi-select drag can span several source folders at once) into targetSub.
-app.post("/api/files/move", requireRegular, (req, res) => {
+app.post("/api/files/move", requireRegular, async (req, res) => {
   const { files, targetSub } = req.body || {};
   if (!Array.isArray(files) || !files.length) return res.status(400).json({ error: "No files given" });
   const targetDir = targetSub ? safePath(targetSub) : FOLDER;
-  if (!targetDir || !fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
-    return res.status(400).json({ error: "Invalid target folder" });
-  }
-  const results = files.map(f => {
-    const name = String((f || {}).name || "");
-    const rel = (f.sub ? f.sub + "/" : "") + name;
-    const srcPath = safePath(rel);
-    if (!name || !srcPath || !fs.existsSync(srcPath) || !fs.statSync(srcPath).isFile()) {
-      return { name, ok: false, error: "Not found" };
+  try {
+    if (!targetDir || !(await fileExists(targetDir)) || !(await netfs.stat(targetDir)).isDirectory) {
+      return res.status(400).json({ error: "Invalid target folder" });
     }
-    const destPath = path.join(targetDir, name);
-    if (path.dirname(srcPath) === targetDir) return { name, ok: false, error: "Already there" };
-    if (fs.existsSync(destPath)) return { name, ok: false, error: "Already exists in target" };
-    try { fs.renameSync(srcPath, destPath); return { name, ok: true }; }
-    catch (e) { return { name, ok: false, error: e.message }; }
-  });
-  res.json({ results });
+    const results = [];
+    for (const f of files) {
+      const name = String((f || {}).name || "");
+      const rel = ((f || {}).sub ? f.sub + "/" : "") + name;
+      const srcPath = safePath(rel);
+      if (!name || !srcPath || !(await fileExists(srcPath)) || !(await netfs.stat(srcPath)).isFile) {
+        results.push({ name, ok: false, error: "Not found" }); continue;
+      }
+      const destPath = path.join(targetDir, name);
+      if (path.dirname(srcPath) === targetDir) { results.push({ name, ok: false, error: "Already there" }); continue; }
+      if (await fileExists(destPath)) { results.push({ name, ok: false, error: "Already exists in target" }); continue; }
+      try { await netfs.rename(srcPath, destPath); results.push({ name, ok: true }); }
+      catch (e) { if (e.code === "NAS_UNREACHABLE") throw e; results.push({ name, ok: false, error: e.message }); }
+    }
+    res.json({ results });
+  } catch (e) {
+    if (replyIfNasDown(res, e)) return;
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Local-PC → gcode-folder upload (the reverse direction of /api/print's
 // printer upload): one file per request, raw bytes, name/sub in the query
 // string — mirrors /api/notify-load's existing raw-body convention instead
 // of pulling in a multipart-parsing dependency for a single call site.
-app.post("/api/files/upload", requireRegular, rawGcodeBody, (req, res) => {
+app.post("/api/files/upload", requireRegular, rawGcodeBody, async (req, res) => {
   const sub = String(req.query.sub || "");
   const dir = sub ? safePath(sub) : FOLDER;
-  if (!dir || !fs.existsSync(dir)) return res.status(400).json({ error: "Invalid folder" });
   const name = path.basename(String(req.query.name || "").trim());
   // Same CRLF/quote check as /api/printfile and /api/exclude — this name is
   // later reused verbatim as the on-printer filename passed to
   // startPrintFile()/excludeObject(), which build a literal gcode script
   // line around it (see connectors/http-utils.js). An embedded quote or
   // newline there injects a second gcode/macro command into the printer.
-  if (!name || /["\r\n]/.test(name) || !/\.(gcode|gco|g|gx|3mf)$/i.test(name)) {
+  if (!name || /["\r\n]/.test(name) || !SLICED_FILE_RE.test(name)) {
     return res.status(400).json({ error: "Only sliced files (.gcode/.gco/.g/.gx/.3mf) can be uploaded here" });
   }
+  if (!dir) return res.status(400).json({ error: "Invalid folder" });
   const target = path.join(dir, name);
   if (!isPathWithinFolder(target, FOLDER)) return res.status(400).json({ error: "Invalid file name" });
-  if (fs.existsSync(target)) return res.status(409).json({ error: "Already exists" });
   if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "Empty upload" });
-  try { fs.writeFileSync(target, req.body); res.json({ ok: true, name }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    if (!(await fileExists(dir))) return res.status(400).json({ error: "Invalid folder" });
+    // Exclusive create in one step: it fails with EEXIST rather than
+    // overwrite, even if the file appeared after a separate existence check.
+    await netfs.writeFileExclusive(target, req.body);
+    res.json({ ok: true, name });
+  } catch (e) {
+    if (replyIfNasDown(res, e)) return;
+    if (e.code === "EEXIST") return res.status(409).json({ error: "Already exists" });
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get("/api/map", requireAuth, async (req, res) => {
   const fp = safePath(req.query.file);
-  if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: "File not found" });
   try {
+    if (!fp || !(await fileExists(fp))) return res.status(404).json({ error: "File not found" });
     // A Bambu .3mf is a zip: its sliced gcode — with the ordinary header
     // comments this parser already reads — is one entry inside it. Read as
     // text it produced "no colours" and nothing else, silently, which left the
@@ -1249,13 +1308,13 @@ app.get("/api/map", requireAuth, async (req, res) => {
     //
     // Only a Bambu .3mf takes this path: .3mf is also FlashForge's AD5X format
     // and those files keep the behaviour they have always had.
-    const info = /\.3mf$/i.test(fp) ? threemf.read(fp) : null;
+    const info = /\.3mf$/i.test(fp) ? await netfs.threemfRead(fp) : null;
     if (info && info.isBambu) {
       if (!info.sliced) {
         return res.json({ ...parseGcodeMap("", { scanBody: false }), notSliced: true, printerModel: info.printerModel });
       }
       const plate = Math.max(1, parseInt(req.query.plate, 10) || info.plates[0] || 1);
-      const result = parseGcodeMap(threemf.plateGcode(fp, plate), { scanBody: false });
+      const result = parseGcodeMap(await netfs.threemfPlateGcode(fp, plate), { scanBody: false });
       return res.json({
         ...result,
         printerModel: result.printerModel || info.printerModel,
@@ -1273,43 +1332,36 @@ app.get("/api/map", requireAuth, async (req, res) => {
     // the body scan entirely. Fall back to the whole file only if the colour
     // config isn't found in the tail.
     const TAIL = 3 * 1024 * 1024;
-    const size = fs.statSync(fp).size;
-    let text;
-    if (size > TAIL) {
-      const fd = fs.openSync(fp, "r");
-      try {
-        const buf = Buffer.alloc(TAIL);
-        fs.readSync(fd, buf, 0, TAIL, size - TAIL);
-        text = buf.toString("utf8");
-      } finally { fs.closeSync(fd); }
-    } else {
-      text = fs.readFileSync(fp, "utf8");
-    }
+    const size = (await netfs.stat(fp)).size;
+    const text = (size > TAIL ? await netfs.read(fp, size - TAIL, TAIL) : await netfs.readFile(fp)).toString("utf8");
     let result = parseGcodeMap(text, { scanBody: false });
     if (result.noColors && size > TAIL) {
       // Colours weren't in the tail — fall back to a full parse (rare). Stream
       // it line-by-line: these files can be 200MB+, never hold one in memory.
-      const rl = readline.createInterface({ input: fs.createReadStream(fp, { encoding: "utf8" }), crlfDelay: Infinity });
+      const input = netfs.createReadStream(fp);
+      input.setEncoding("utf8");   // a character split across two chunks is decoded whole
+      const rl = readline.createInterface({ input, crlfDelay: Infinity });
       result = await parseGcodeMapLines(rl, { scanBody: true });
     }
     res.json(result);
   } catch (e) {
+    if (replyIfNasDown(res, e)) return;
     res.status(500).json({ error: e.message });
   }
 });
 
 // ---- Local gcode thumbnail (base64 PNG/JPG embedded by Orca in the header) ----
-app.get("/api/local-thumbnail", requireAuth, (req, res) => {
+app.get("/api/local-thumbnail", requireAuth, async (req, res) => {
   const fp = safePath(req.query.file);
-  if (!fp || !fs.existsSync(fp)) return res.status(404).send("Not found");
   try {
+    if (!fp || !(await fileExists(fp))) return res.status(404).send("Not found");
     // A Bambu .3mf keeps its preview as a real PNG inside the archive rather
     // than base64 in a gcode comment.
     if (/\.3mf$/i.test(fp)) {
-      const info = threemf.read(fp);
+      const info = await netfs.threemfRead(fp);
       if (info.isBambu) {
         const plate = Math.max(1, parseInt(req.query.plate, 10) || info.plates[0] || 1);
-        const png = threemf.plateThumbnail(fp, plate);
+        const png = await netfs.threemfPlateThumbnail(fp, plate);
         if (!png) return res.status(404).send("No thumbnail");
         res.set("Content-Type", "image/png");
         res.set("Cache-Control", "public, max-age=3600");
@@ -1317,15 +1369,7 @@ app.get("/api/local-thumbnail", requireAuth, (req, res) => {
       }
     }
     const HEAD = 2 * 1024 * 1024;
-    const size = fs.statSync(fp).size;
-    let text;
-    if (size > HEAD) {
-      const fd = fs.openSync(fp, "r");
-      try { const buf = Buffer.alloc(HEAD); fs.readSync(fd, buf, 0, HEAD, 0); text = buf.toString("latin1"); }
-      finally { fs.closeSync(fd); }
-    } else {
-      text = fs.readFileSync(fp, "latin1");
-    }
+    const text = (await netfs.read(fp, 0, HEAD)).toString("latin1");   // the whole file when it is smaller
     // Collect every "thumbnail begin WxH" position — pick the largest, then extract data up to its end marker
     const beginRe = /; thumbnail(?:_(\w+))? begin (\d+)x(\d+)/gi;
     const candidates = [];
@@ -1351,7 +1395,10 @@ app.get("/api/local-thumbnail", requireAuth, (req, res) => {
     res.set("Content-Type", ct);
     res.set("Cache-Control", "public, max-age=3600");
     res.send(buf);
-  } catch (e) { res.status(500).send(e.message); }
+  } catch (e) {
+    if (e && e.code === "NAS_UNREACHABLE") return res.status(503).send("G-code folder unreachable");
+    res.status(500).send(e.message);
+  }
 });
 
 const JOBS = new Map();   // jobId -> { phase, sent, total, done, error, result, ts }
@@ -1537,7 +1584,9 @@ app.post("/api/print", requireRegular, async (req, res) => {
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer" });
   if (p.maintenanceMode) return res.status(409).json({ error: p.name + " is in maintenance mode — take it off maintenance before printing." });
   const fp = safePath(file);
-  if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: "File not found" });
+  if (!fp) return res.status(404).json({ error: "File not found" });
+  try { if (!(await fileExists(fp))) return res.status(404).json({ error: "File not found" }); }
+  catch (e) { if (replyIfNasDown(res, e)) return; return res.status(500).json({ error: e.message }); }
   // Before anything is uploaded: a file this printer could never start is
   // refused here rather than after a multi-megabyte transfer.
   const typeRefusal = fileTypeRefusal(getCapabilities(p.connector, p), path.basename(fp), p.name);
@@ -1588,10 +1637,10 @@ app.post("/api/print", requireRegular, async (req, res) => {
   // Adds the queue item this click asked for. `uploaded` says whether the
   // bytes are already on the printer, which is what stops dispatch sending
   // them a second time.
-  const addQueueItem = (uploaded) => {
+  const addQueueItem = async (uploaded) => {
     const actor = actorFromReq(req);
     let hash;
-    try { hash = queueStore.computeFileHash(fp); } catch { return false; }
+    try { hash = await queueStore.computeFileHash(fp); } catch { return false; }
     if (!hash) return false;
     const result = queueStore.applyIntent(p.id, (state) => ({
       ...state,
@@ -1612,7 +1661,7 @@ app.post("/api/print", requireRegular, async (req, res) => {
   // item, if one was asked for, uploads at dispatch because the bytes are not
   // there yet.
   if (disposition.action === "defer") {
-    if (disposition.queue && addQueueItem(false)) return res.json({ ok: true, mode: "queued", printer: p.name });
+    if (disposition.queue && await addQueueItem(false)) return res.json({ ok: true, mode: "queued", printer: p.name });
     pendingLoad.set(printer, { file: fp, name, ts: Date.now(), tools, map, prefs, actor: actorFromReq(req) });
     return res.json({ ok: true, mode: "pending", printer: p.name });
   }
@@ -1670,7 +1719,7 @@ app.post("/api/print", requireRegular, async (req, res) => {
         // "Upload into queue": the item is added only after the bytes are
         // actually there, and carries alreadyUploaded so dispatch does not
         // send the same file a second time.
-        if (disposition.queue) addQueueItem(true);
+        if (disposition.queue) await addQueueItem(true);
       }
       job.result = { printer: p.name, started: !!start, mapped: tools.length };
       job.phase = "done"; job.done = true;
@@ -2160,6 +2209,9 @@ setInterval(async () => {
   for (const [idx, pl] of [...pendingLoad]) {
     const p = PRINTERS[idx];
     if (!p) { pendingLoad.delete(idx); continue; }
+    // A deferred file on a share that is down stays deferred rather than
+    // failing; the upload itself still fails cleanly if the share drops mid-way.
+    if (netfs.availability(pl.file).status !== "online") continue;
     if (await isPrinterIdle(p)) {
       pendingLoad.delete(idx);
       uploadNotifiedFile(idx, pl);
@@ -2195,6 +2247,11 @@ async function attemptQueueDispatch(printerId) {
   const idx = PRINTERS.indexOf(p);
   if (pendingLoad.has(idx)) return;
   if (!(await isPrinterIdle(p))) return;
+  // While the G-code folder is known to be unreachable nothing is claimed:
+  // the items wait in order and dispatch resumes on the first tick after the
+  // folder answers again. Only a shortcut — the forced check below still
+  // decides, because "online" is not proof the file is there.
+  if (netfs.availability(FOLDER).status !== "online") return;
 
   const claim = queueStore.claimNextForDispatch(printerId);
   if (!claim.claimed) return;
@@ -2208,10 +2265,10 @@ async function attemptQueueDispatch(printerId) {
   // exists for.
   let verified = false;
   try {
-    if (!fp || !fs.existsSync(fp)) {
+    if (!fp || !(await fileExists(fp))) {
       queueStore.applyObserved(printerId, QueueEngine.onFileVerificationFailed, item.id, "missing", { code: "file-missing", message: "File no longer exists: " + item.file.name });
     } else {
-      const hash = queueStore.computeFileHash(fp, { force: true });
+      const hash = await queueStore.computeFileHash(fp, { force: true });
       if (hash.sha256 !== item.file.sha256) {
         queueStore.applyObserved(printerId, QueueEngine.onFileVerificationFailed, item.id, "changed", { code: "file-changed", message: "File content changed since it was queued: " + item.file.name });
       } else {
@@ -2219,6 +2276,13 @@ async function attemptQueueDispatch(printerId) {
       }
     }
   } catch (e) {
+    // Unreachable storage says nothing about the file: nothing has been sent
+    // yet, so the item goes back to the front of the queue unverified.
+    if (e && e.code === "NAS_UNREACHABLE") {
+      console.log(`[queue] ${p.name}: "${item.file.name}" not dispatched — the G-code folder is unreachable; it stays first in the queue`);
+      queueStore.applyObserved(printerId, QueueEngine.onDispatchDeferred, item.id);
+      return;
+    }
     queueStore.applyObserved(printerId, QueueEngine.onFileVerificationFailed, item.id, "missing", { code: "file-check-error", message: e.message });
   }
   if (!verified) return;
@@ -2440,7 +2504,12 @@ app.post("/api/notify-load", rawGcodeBody, async (req, res) => {
   if (!printer) return res.status(400).json({ error: "printer required" });
   if (outputname && /["\r\n/\\]/.test(outputname)) return res.status(400).json({ error: "Bad output name" });
   const absFile = path.resolve(file);
-  if (!fs.existsSync(absFile) || !fs.statSync(absFile).isFile()) return res.status(404).json({ error: "File not found: " + absFile });
+  // The slicer's output path can be a share too, so this goes through netfs.
+  try { if (!(await netfs.stat(absFile)).isFile) return res.status(404).json({ error: "File not found: " + absFile }); }
+  catch (e) {
+    if (e && e.code === "NAS_UNREACHABLE") return res.status(503).json({ error: e.message, code: "gcode_folder_unreachable" });
+    return res.status(404).json({ error: "File not found: " + absFile });
+  }
   const idx = findPrinterIndex(printer);
   if (idx === -1) return res.status(400).json({ error: "Unknown printer: " + printer });
   const p = PRINTERS[idx];
@@ -3048,21 +3117,23 @@ app.get("/api/sync-status", requireAdmin, (req, res) => {
 });
 
 // ---- Filesystem browser (for folder picker) ----
-app.get("/api/browse", requireAdmin, (req, res) => {
+// Every call goes through netfs: the path is whatever the admin typed, often a
+// share, and a disconnected mapped drive letter hangs exactly like one.
+app.get("/api/browse", requireAdmin, async (req, res) => {
   const isWin = process.platform === "win32";
 
-  // Windows-only: list available drives
+  // Windows-only: list available drives. On the background lane with a short
+  // timeout, so a dead mapped drive costs this list one entry, not the file
+  // browser its capacity.
   if (req.query.drives === "1") {
-    const drives = [];
-    for (let c = 65; c <= 90; c++) {
-      const d = String.fromCharCode(c) + ":\\";
-      try { fs.accessSync(d); drives.push(d); } catch {}
-    }
-    return res.json({ drives });
+    const letters = [];
+    for (let c = 65; c <= 90; c++) letters.push(String.fromCharCode(c) + ":\\");
+    const found = await Promise.all(letters.map(d => netfs.exists(d, { lane: "background", timeoutMs: 3000 }).catch(() => false)));
+    return res.json({ drives: letters.filter((d, i) => found[i]) });
   }
 
   let p = req.query.path ? path.resolve(req.query.path) : os.homedir();
-  try { if (!fs.statSync(p).isDirectory()) p = path.dirname(p); }
+  try { if (!(await netfs.stat(p)).isDirectory) p = path.dirname(p); }
   catch { p = os.homedir(); }
 
   const up = path.dirname(p);
@@ -3070,8 +3141,8 @@ app.get("/api/browse", requireAdmin, (req, res) => {
 
   let entries = [];
   try {
-    entries = fs.readdirSync(p, { withFileTypes: true })
-      .filter(e => { try { return e.isDirectory(); } catch { return false; } })
+    entries = (await netfs.readdir(p))
+      .filter(e => e.isDirectory)
       .map(e => ({ name: e.name, path: path.join(p, e.name) }))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
   } catch {}
@@ -4499,7 +4570,7 @@ app.get("/api/queue/:printerId", requireAuth, (req, res) => {
   res.json({ printerId: p.id, printerPoolId: p.printerPoolId || null, ...redactQueueStateForResponse(queueStore.getPrinterState(p.id)) });
 });
 
-app.post("/api/queue/:printerId/items", requireRegular, (req, res) => {
+app.post("/api/queue/:printerId/items", requireRegular, async (req, res) => {
   const p = printerById(req.params.printerId);
   if (!p) return res.status(400).json({ error: "Unknown printer", code: "unknown_printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer", code: "no_printer_access" });
@@ -4515,9 +4586,15 @@ app.post("/api/queue/:printerId/items", requireRegular, (req, res) => {
     const sub = String((f || {}).sub || "");
     const qty = Math.max(1, Math.min(50, parseInt(f.quantity, 10) || 1));
     const fp = safePath(sub ? sub + "/" + name : name);
-    if (!name || !fp || !fs.existsSync(fp)) return res.status(400).json({ error: "File not found: " + name });
+    if (!name || !fp) return res.status(400).json({ error: "File not found: " + name });
     let hash;
-    try { hash = queueStore.computeFileHash(fp); } catch { return res.status(400).json({ error: "Could not read file: " + name }); }
+    try {
+      if (!(await fileExists(fp))) return res.status(400).json({ error: "File not found: " + name });
+      hash = await queueStore.computeFileHash(fp);
+    } catch (e) {
+      if (replyIfNasDown(res, e)) return;
+      return res.status(400).json({ error: "Could not read file: " + name });
+    }
     for (let i = 0; i < qty; i++) {
       items.push({
         id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: false,
@@ -4709,7 +4786,7 @@ app.post("/api/queue/:printerId/resolve", requireRegular, async (req, res) => {
 // file-changed's dedicated accept path — forces a fresh, uncached hash
 // (round-4 issue #7) rather than trusting anything cached, since this IS
 // the moment identity itself is being decided.
-app.post("/api/queue/:printerId/accept-file-change", requireRegular, (req, res) => {
+app.post("/api/queue/:printerId/accept-file-change", requireRegular, async (req, res) => {
   const p = printerById(req.params.printerId);
   if (!p) return res.status(400).json({ error: "Unknown printer", code: "unknown_printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer", code: "no_printer_access" });
@@ -4717,11 +4794,22 @@ app.post("/api/queue/:printerId/accept-file-change", requireRegular, (req, res) 
   if (qs.attentionReason !== "file-changed" || !qs.currentItem) return res.status(409).json({ error: "Nothing to accept right now" });
   const item = qs.currentItem;
   const fp = safePath((item.file.sub ? item.file.sub + "/" : "") + item.file.name);
-  if (!fp || !fs.existsSync(fp)) return res.status(400).json({ error: "File no longer exists" });
+  if (!fp) return res.status(400).json({ error: "File no longer exists" });
   let hash;
-  try { hash = queueStore.computeFileHash(fp, { force: true }); } catch (e) { return res.status(400).json({ error: e.message }); }
+  try {
+    if (!(await fileExists(fp))) return res.status(400).json({ error: "File no longer exists" });
+    hash = await queueStore.computeFileHash(fp, { force: true });
+  } catch (e) {
+    if (replyIfNasDown(res, e)) return;
+    return res.status(400).json({ error: e.message });
+  }
   const actor = actorFromReq(req);
-  const result = queueStore.applyIntent(p.id, QueueEngine.acceptFileChange, { sizeBytes: hash.sizeBytes, sha256: hash.sha256, actor });
+  // The hash took a while: accept only if the item it describes is still the
+  // one waiting on this decision.
+  const result = queueStore.applyIntent(p.id, (state, args) => {
+    if (!state.currentItem || state.currentItem.id !== item.id) throw new Error("The queue changed while the file was being checked");
+    return QueueEngine.acceptFileChange(state, args);
+  }, { sizeBytes: hash.sizeBytes, sha256: hash.sha256, actor });
   if (!result.ok) return res.status(400).json({ error: "Could not accept the file change" });
   auditLog.log({ category: "job", event: "queue-file-change-accepted", ...actor, printerId: p.id, printerName: p.name, detail: { file: item.file.name } });
   attemptQueueDispatch(p.id).catch(e => console.error("[queue] post-accept dispatch error:", e.message));
@@ -4729,7 +4817,7 @@ app.post("/api/queue/:printerId/accept-file-change", requireRegular, (req, res) 
 });
 
 // ---- Bulk "Send to Queue" (file-manager multiselect → Printer Pool) ----
-app.post("/api/queue/send", requireRegular, (req, res) => {
+app.post("/api/queue/send", requireRegular, async (req, res) => {
   const b = req.body || {};
   const files = Array.isArray(b.files) ? b.files : [];
   const poolId = b.poolId;
@@ -4749,9 +4837,15 @@ app.post("/api/queue/send", requireRegular, (req, res) => {
     const sub = String((f || {}).sub || "");
     const qty = Math.max(1, Math.min(50, parseInt(f.quantity, 10) || 1));
     const fp = safePath(sub ? sub + "/" + name : name);
-    if (!name || !fp || !fs.existsSync(fp)) return res.status(400).json({ error: "File not found: " + name });
+    if (!name || !fp) return res.status(400).json({ error: "File not found: " + name });
     let hash;
-    try { hash = queueStore.computeFileHash(fp); } catch { return res.status(400).json({ error: "Could not read file: " + name }); }
+    try {
+      if (!(await fileExists(fp))) return res.status(400).json({ error: "File not found: " + name });
+      hash = await queueStore.computeFileHash(fp);
+    } catch (e) {
+      if (replyIfNasDown(res, e)) return;
+      return res.status(400).json({ error: "Could not read file: " + name });
+    }
     resolved.push({ name, sub, qty, sizeBytes: hash.sizeBytes, sha256: hash.sha256, map: f.map || {}, prefs: f.prefs || {} });
   }
 

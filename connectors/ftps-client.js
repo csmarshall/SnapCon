@@ -14,7 +14,8 @@
 // require_ssl_reuse) insists. The caller supplies the socket factories, so the
 // certificate policy (Bambu CA + serial as CN) lives in the connector.
 const { EventEmitter } = require("events");
-const fsStatSize = (p) => require("fs").statSync(p).size;
+// The local file is read through netfs: it may sit on a NAS (see http-utils).
+const netfs = require("../netfs").getNetFs();
 
 class FtpsClient extends EventEmitter {
   constructor({ connectControl, connectData, timeoutMs = 15000 }) {
@@ -103,7 +104,7 @@ class FtpsClient extends EventEmitter {
   // printer's screen.
   async store(localPath, name, job = {}) {
     if (/[\r\n]/.test(name)) throw new Error("refusing a file name containing a line break");
-    const total = fsStatSize(localPath);
+    const total = (await netfs.stat(localPath)).size;
     job.total = total;
     job.sent = 0;
     const port = await this._pasv();
@@ -118,7 +119,7 @@ class FtpsClient extends EventEmitter {
         if (timer.unref) timer.unref();
       };
       arm();
-      const file = require("fs").createReadStream(localPath);
+      const file = netfs.createReadStream(localPath);
       let finished = false;
       file.on("data", (chunk) => { job.sent += chunk.length; arm(); });
       file.on("error", (e) => { clearTimeout(timer); data.destroy(); reject(e); });

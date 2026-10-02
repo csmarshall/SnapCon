@@ -43,7 +43,18 @@ function defaultPrinterState() {
 // issue #3 — treated as global, not per-printer, since one shared file means
 // one write failure risks every printer's durability, not just whichever
 // triggered it first).
-function createQueueStore({ baseDir, degradedRetryMs = 15000 }) {
+// The default file access for computeFileHash: fs.promises, streamed.
+const defaultFileIO = {
+  async stat(p) { return fs.promises.stat(p); },
+  hashFile(p) {
+    return new Promise((resolve, reject) => {
+      const h = crypto.createHash("sha256");
+      fs.createReadStream(p).on("error", reject).on("data", c => h.update(c)).on("end", () => resolve({ sha256: h.digest("hex") }));
+    });
+  },
+};
+
+function createQueueStore({ baseDir, degradedRetryMs = 15000, fileIO = defaultFileIO }) {
   const dataDir = path.join(baseDir, "data");
   const PRIMARY_PATH = path.join(dataDir, "queue-data.json");
   const BAK_PATH = PRIMARY_PATH + ".bak";
@@ -283,17 +294,21 @@ function createQueueStore({ baseDir, degradedRetryMs = 15000 }) {
   // `force` bypasses the cache for the moments identity itself is actually
   // in question (resolving file-changed, accepting a replacement, retrying
   // a previously-failed job). ----
+  // Asynchronous, and the file is streamed: it often lives on a NAS, where a
+  // synchronous read on the main thread froze the whole server for ~21 s per
+  // call with the share unreachable (measured on Windows), and a whole-file
+  // read of a large job blocked it for the length of the read even when
+  // healthy. server.js passes netfs (worker threads); the default streams.
   const FILE_HASH_CACHE = new Map(); // absPath -> { size, mtimeMs, sha256 }
-  function computeFileHash(absPath, { force = false } = {}) {
-    const st = fs.statSync(absPath); // throws (ENOENT etc.) if missing — caller handles
+  async function computeFileHash(absPath, { force = false } = {}) {
+    const st = await fileIO.stat(absPath); // rejects (ENOENT etc.) if missing — caller handles
     if (!force) {
       const cached = FILE_HASH_CACHE.get(absPath);
       if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
         return { sizeBytes: cached.size, sha256: cached.sha256 };
       }
     }
-    const buf = fs.readFileSync(absPath);
-    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+    const { sha256 } = await fileIO.hashFile(absPath);
     FILE_HASH_CACHE.set(absPath, { size: st.size, mtimeMs: st.mtimeMs, sha256 });
     return { sizeBytes: st.size, sha256 };
   }
