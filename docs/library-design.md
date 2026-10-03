@@ -282,23 +282,59 @@ Authored rows refer only to **stable keys**:
 - When the full hash arrives later, authored rows keyed on the quick key are **re-keyed in
   place**. `content_aliases` resolves either form meanwhile.
 
+**Durable identity cache (added in M4, §26).** Once a file is hashed, its authored rows are keyed
+by `sha256`. A derived rebuild drops `files.sha256` and `content_aliases`, so without help every
+rediscovered file would carry a quick key until the idle re-hash (hours on a NAS), and nothing
+authored would match it. `identity_cache` keeps the bridge:
+- **Meaning:** "the last time SnapCon fully hashed content with this fingerprint and size, the
+  verified key was X". It is a reconciliation cache, **not** authored truth and **not** proof.
+- **Written** by every full hash (`setHash`); seeded from the existing hashes by migration 2.
+- **Used** when a scan meets new or changed content: if the (fingerprint, size) maps to
+  **exactly one** verified key, the file takes that key, and its MD5, at once. `files.sha256`
+  stays NULL, so the file is still hashed in the background. Diagnostics shows such a file as
+  "restored from identity cache (unverified)".
+- **Ambiguous:** a fingerprint that maps to two or more verified keys (a real collision, while a
+  file still holds each) restores nothing. The file keeps its quick key until its own hash
+  decides, and Diagnostics lists the fingerprint.
+- **Verification:** when the file's own hash arrives:
+  - it **matches**: the entry is confirmed; nothing moves;
+  - it **differs**: the cache was wrong (stale, or a collision). The file takes its verified key
+    and its own derived Claims go with it. Authored rows **stay on the old key** — an identity is
+    never transferred — and grouping raises *File changed* (same location) or *Decision no
+    longer matches* for them. The stale entry is dropped.
+- **Never overrides** a contradictory verified hash, and never makes a key "verified":
+  `duplicate_of` is `exact` only when every copy was verified by its own hash.
+- **While identity is pending** (files known only by a quick key whose hash is still to come),
+  grouping does not raise *File changed*, *Decision no longer matches* or *Empty model* for
+  Decisions and Models on verified keys: absence proves nothing until the hash is in.
+
 **Honest limitation:**
 - A file that is **both moved and modified while unavailable** has a new location and new
   content, so nothing stable links it to its Decisions.
 - SnapCon **does not guess**. The Decision is kept, and after a completed scan of that root a
   *Decision no longer matches* Review Item is raised, with Re-link / Discard.
 
-### 4.6 Authored / derived boundary (audited)
+### 4.6 Authored / identity cache / derived boundary (audited)
 
-| Authored — survives any rebuild | Derived — dropped and rebuilt freely |
-|---|---|
-| `roots` (configuration columns) | `roots` runtime status columns, `scan_runs` |
-| `models`, `model_anchors` | `files`, `content_aliases`, `file_objects`, `file_titles`, `folder_classes` |
-| `decisions` | `projects`, `plates`, `variants` |
-| `review_items` | `claims` |
-| `tags`, `model_tags`, `collections`, `collection_models` | `model_stats`, `model_families` |
-| `prints` | `thumbs`, `model_fts` |
-| `permission_grants` | |
+Three kinds of data, each with its own lifetime:
+
+| Authored — survives any rebuild | Identity cache — survives a normal rebuild | Derived — dropped and rebuilt freely |
+|---|---|---|
+| `roots` (configuration columns) | `identity_cache` | `roots` runtime status columns, `scan_runs` |
+| `models`, `model_anchors` | | `files`, `content_aliases`, `file_objects`, `file_titles`, `folder_classes` |
+| `decisions` | | `projects`, `plates`, `variants` |
+| `review_items` | | `claims` |
+| `tags`, `model_tags`, `collections`, `collection_models` | | `model_stats`, `model_families` |
+| `prints` | | `thumbs`, `model_fts` |
+| `permission_grants` | | |
+
+- **Authored durable data:** what people decided and what happened.
+- **Durable identity / reconciliation cache:** what full hashes verified about content (§4.5).
+  Nobody's decision, and never proof: it lets rediscovered files find their stable content keys
+  before the re-hash. A normal derived rebuild keeps it. Only the explicit **identity reset**
+  (`resetIdentityCache()`, no Phase 1 UI) empties it, to rebuild identity from full hashes
+  alone; that never touches authored rows, which re-attach as files are hashed again.
+- **Rebuildable derived index:** what the indexer recomputes from the files.
 
 **Rules:**
 1. **Authored → derived:** never by row id, and **no foreign keys**. Only content keys, plate
@@ -332,8 +368,9 @@ Authored rows refer only to **stable keys**:
      `files_container` index.
    - Foreign-key enforcement is switched off for the drop only. That is safe because no
      authored table references a derived one (rule 1).
-   - The authored tables and the runtime status columns of `roots` are not touched.
-   - A test proves every authored row survives.
+   - The authored tables, the runtime status columns of `roots` and the identity cache are not
+     touched.
+   - A test proves every authored row survives; another that the identity cache does.
 
 ---
 
@@ -932,7 +969,10 @@ and components. The File Browser is unchanged.
   - A corrupt DB is quarantined and the newest backup restored, never recreated silently.
   - A missing DB is a first run.
 - **Rebuild:** "Rebuild index" drops and recreates the derived tables in one transaction (§4.6
-  rule 7, P4), then rescans. It never touches authored tables.
+  rule 7, P4), then rescans. It never touches authored tables or the identity cache, so Models
+  and Decisions re-attach as soon as the rescan finds their files (§4.5), before any re-hash.
+- **Identity reset** (deeper, no Phase 1 UI): empties `identity_cache`. Content identity is then
+  rebuilt from full hashes only; authored rows re-attach as files are re-hashed.
 - **Search:** FTS5 over names, designers, tags, collections, file and object names, project
   titles and notes. SQL filters with facets and server-side paging. "Fits my idle printers" is
   applied client-side.
@@ -1525,3 +1565,118 @@ lowers a Claim. Live: four folder disagreements, all in `K1C/` (three V3 Plus fi
   scoring by "appears under unrelated titles" (§4.4 rule 7) will matter.
 - Consolidate `connectors/zip-reader.js` (the Bambu FTPS reader) onto `library/zipReader.js` as a
   separate, connector-tested change.
+
+## 26. M4 results (2026-10-03)
+
+**Commits:** 9f867b4 (grouping into Models, grouping Diagnostics; grouping rule v2), 3cd3016 (an
+edge lists only the groups that count), 819a099 (the durable identity cache, schema 2).
+Nothing from M5 was implemented.
+
+**Implemented vs. specification:**
+- §4.4 policy exactly: identity Evidence (MakerWorld design id, `plate_md5`, a resolved
+  `source_file`) or two independent groups at medium groups automatically; one group is a
+  `same_model_as` suggestion with what is missing; weak or generic Evidence is recorded only. A
+  conflict (different object sets, different design ids) is recorded and never acted on.
+- §6.3 titles: every transformation is stored (`file_titles`): extension, tags, material/time,
+  print stats, colours, temperature, copy count, plate, designer, filament, format words. Exact
+  multi-word titles are medium; an exact one-word title of four or more characters is medium
+  (Beardie, TinyTREX); generic titles are weak; containment is weak; under four characters is
+  nothing.
+- §4.4 rule 7 generic names: a fixed list, each entry with its reason (Assembly, Body, Plate,
+  3DBenchy, …), plus "common": a name used under three or more unrelated title groups. Titles
+  that differ only in spacing, word order or containment are related, so a model's own colourways
+  do not make its part names common. Diagnostics shows every term ignored and why.
+- Folders: a shared designer folder is weak; a folders-mode model folder is medium location
+  Evidence (rule v2, below); a printer-family folder is never grouping or printer Evidence.
+- Lineage Claims from M3 are not counted twice: `sliced_from`/`source_of` by object names are the
+  object-name Evidence, compared once.
+- Determinism: content-key nodes, candidate blocks, union-find over edges in a fixed order; a test
+  proves three scan orders give identical Models and Claims.
+- Decisions are hard constraints: a confirmed file joins its Model (it never takes the Model from
+  the files anchored there), a separated file never counts towards that Model, `distinct_from`
+  suppresses the suggestion and blocks the merge. Models are re-found through `model_anchors`.
+- Review Items of the M4 kinds, synchronised by subject key: dismissed and resolved items stay
+  so; cleared conditions auto-close. `file_changed` (a Decision's file changed in place) and
+  `decision_unmatched` (moved and changed while unseen) wait until every location is indexed and
+  the identities involved are verified.
+- Diagnostics (admin only, `library.diagnostics`): `/library-diagnostics.html` and
+  `/api/library/diagnostics/grouping` — Models with Files, Projects, Plates, Variants, printers,
+  Claims, Decisions and Evidence; suggestions with both sides and what is missing; protected and
+  ambiguous cases; duplicates; unresolved sources; other Review Items; content identity. Filters:
+  location, confidence, method, review type and status, text. `?export=1` is a stable export with
+  the grouping and title rule versions and no run timestamps.
+
+**Rule evolution during the checkpoint (evidence that it tested the architecture):**
+1. *Folder grouping merged different animals (rule v1 → v2).* v1 followed §4.4/§7 as written: in
+   a folders-mode location a top-level folder was a model folder, structural Evidence that grouped
+   on its own. The owner's U1 Files location is organised by **designer**, so `Cinderwin/` became
+   one Model of Butterfly Dragon, Crystal Dragon ×2 and Crystal Wing Dragon, and `Zou/` one of
+   Axolotl, Bearded Dragon and Sea Turtle. v2 makes the folder **medium location Evidence**: it
+   corroborates one other independent group and never groups alone. Before/after (dry runs on a
+   copy of the live index): v1 255 Models, 20 multi-file (53 files), `member_of` by model folder
+   7; v2 258, 20 (50), 0 by folder alone.
+2. *Over-protection by the "common name" rule.* Counting distinct titles made a model's own
+   colourways (TinyTREX, Tiny T-REX, Kitty Flexi / Flexi Kitty) count as unrelated, so their part
+   names became generic. Counting unrelated **title groups** restored them: 258 → 253 Models,
+   20 → 23 multi-file (58 files); each restored group was checked by hand (object names + title).
+3. *A rebuild lost every identity (schema 2).* The first live rebuild test (example 9) failed:
+   once hashed, authored rows are keyed by `sha256`, but a rebuild drops `files.sha256` and
+   `content_aliases`, so the rescanned files carried quick keys until the idle re-hash. Grouping
+   created a new Model for every file (507 Models, 254 *Empty model* items), raised a false
+   *File changed*, and Decision #1 stopped applying. The unit test had re-inserted the same keys
+   and missed it. Correction: the durable identity cache (§4.5, §4.6), a third kind of data
+   between authored and derived. The 254 debris Models were removed only after each passed every
+   check (no files, anchors, Decisions, authored customisation, tags, collections, prints or
+   acted-on Review Items); 562 Review Items produced solely by the failure were removed after
+   the repaired state proved each invalid (an empty Model that has files again, a quick key no
+   file holds). Backups were taken before (pre-migration and manual).
+4. Smaller fixes found by the checkpoint's tests: the worker never actually ran grouping; a
+   partial index during a rebuild could erase a Model's anchors; a suggestion listed weak groups
+   as if they counted.
+
+**Real library (3 locations, 299 files, 293 model files):**
+
+| | Before rebuild | Right after rescan (no re-hash) | After full re-hash |
+|---|---|---|---|
+| Models with files (+ empty) | 252 (+1) | 252 (+1) | 252 (+1) |
+| Multi-file / one-file Models | 27 / 225 | 27 / 225 | 27 / 225 |
+| Files grouped automatically / by Decision / standalone | 59 / 1 / 233 | 59 / 1 / 233 | 59 / 1 / 233 |
+| `member_of` (high) | object_names+title 56, object_names+model_folder 2 | same | same |
+| Suggestions | 30 (object names 18, title 9, model folder 3) | same | same |
+| Ambiguous files / protected generic cases | 21 / 8 | same | same |
+| Duplicates | 5 (sha256, exact) | 5 (quick_fp, high: unverified) | 5 (sha256, exact) |
+| Unresolved source paths | 63 | 63 | 63 |
+| Open Review Items | ambiguous 29, suggested 30, duplicate 5, folder disagrees 3, unknown printer 2, empty model 1 | identical | identical |
+| Content identity | 299 verified | 7 verified, 292 restored (unverified) | 299 verified, 0 contradicted |
+
+- The same Models with the same members and uuids in all three states; no Model created again.
+- Non-model files: 6 (images and documents). Multi-file counts are by file location (a duplicate
+  pair is one content node); the grouping report counts 23 multi-node clusters with 58 files.
+- The one empty Model is Beardie @ 160's former one-file Model, emptied by Decision #1.
+- Rescan after the rebuild: 30 s; the full re-hash on the NAS: 33 min.
+
+**The nine examples:**
+1. Correct automatic group: Skeleton T-Rex, 4 files in 3 locations — object names
+   (Body_Curved …) + title "skeleton t-rex" (designer, copy count, temperature, stats removed).
+2. Multi-printer Model: Beardie, AD5X + SPARKX i7 ×4, each Variant with its own printer.
+3. `Assembly` not merged: 24 files in 24 Models, plus three "Assembly_PLA_…" titles; reason
+   "default name for a multi-part object".
+4. Benchy protected: `3DBenchy_PLA_51m47s.gcode` and the Bambu 3DBenchy 3MF stay apart.
+5. Medium suggestion: Grinch ↔ Flexy Grinch @ 98 (object names only; missing "e.g. the same
+   title"). Beardie ↔ Beardie @ 160 (title only) was the other, until Decision #1 settled it.
+6. Duplicate pair: `5M PRO/boat_pla_14m3s` = `5M PRO/skelly`, byte-identical; recorded, nothing
+   hidden.
+7. HollowLog: the `K1C` folder says K1C, the file says Ender-3 V3 Plus — informational only.
+8. 3MF lineage: `5x Grinch … .gcode` sliced_from `5x Flexy Grinch @ 98.3mf` (object names,
+   medium, suggested) — the only lineage in the real library.
+9. Decision #1 (Beardie @ 160 member_of Beardie `a6ab47d7…`) survived a full rebuild: applied
+   immediately after the rescan through the restored identity, and after the verified re-hash.
+
+**Tests:** grouping (21), identity cache (12, including the service end to end), store
+(migration 2, rebuild keeps the cache, reset keeps authored rows), schema (three kinds of table),
+routes (admin only, export). Each regression test was checked to fail without its fix.
+
+**Open for later milestones:**
+- `connectors/zip-reader.js` (the Bambu FTPS reader) should be consolidated onto
+  `library/zipReader.js` as a separate, connector-tested change.
+- The Diagnostics page is read-only; Review Item actions arrive with M5/M6.
