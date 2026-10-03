@@ -64,6 +64,8 @@
         <option value="disagrees">Folder disagrees with file</option>
         <option value="expanded">Read beyond the initial window</option>
         <option value="moved">Moved</option>
+        <option value="threemf">3MF projects</option>
+        <option value="lineage">With lineage Claims</option>
         <option value="missing">Missing or unreadable</option>
       </select>
     </label>
@@ -133,10 +135,40 @@ function filtered() {
       case "disagrees": return !!f.folderDisagrees;
       case "expanded": return f.window && ((f.window.grew && f.window.grew.length) || f.window.streamed);
       case "moved": return f.moved && f.moved.length;
+      case "threemf": return !!f.threemf;
+      case "lineage": return f.lineage && f.lineage.length;
       case "missing": return f.state !== "present";
       default: return true;
     }
   });
+}
+
+// A 3MF: what the file says (Project, Plates) and what was inferred (per-plate
+// printer Claims, lineage), kept visibly apart.
+function threemfBlock(x) {
+  const ids = Object.entries(x.externalIds || {}).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(", ");
+  const facts = [
+    ["Flavour", `${x.flavour} (${x.flavourMethod || "?"})`], ["Producer", [x.producer, x.producerVersion].filter(Boolean).join(" ")],
+    ["Title", x.title], ["Designer", x.designer], ["Licence", x.license], ["External ids", ids], ["Profile title", x.profileTitle], ["Profile user", x.profileUserName],
+    ["Printer profile", [x.printerProfile.printer_model, x.printerProfile.printer_settings_id, x.printerProfile.print_settings_id].filter(Boolean).join(" · ")],
+    ["Set up for", x.configuredPrinter ? (x.configuredPrinter.label || (x.configuredPrinter.printerModel + " (no known family)")) + " — the project's own settings, not a Claim" : null],
+    ["Filaments", x.filaments ? (x.filaments.types || []).map((t, i) => t + " " + ((x.filaments.colours || [])[i] || "")).join(", ") : null],
+    ["Source files", (x.sourceFiles || []).join(" | ")], ["Read", x.read ? `${fmtBytes(x.read.bytes)} of ${fmtBytes(x.read.of)} in ${x.read.reads} reads` : null],
+    ["Archive", `${x.entryCount} entries${x.zip64 ? ", zip64" : ""}`],
+  ].filter(([, v]) => v);
+  const plates = x.plates.map(p => `<li><span class="k">plate ${p.plate}${p.name ? " “" + esc(p.name) + "”" : ""}</span> ${p.printable ? "printable" : "not printable"}` +
+    `${p.objects.length ? " · objects: " + esc([...new Set(p.objects)].slice(0, 6).join(", ")) : ""}` +
+    `${p.variant ? ` · printer: ${esc(p.variant.printer.label || p.variant.printer.family || "unknown")} (${esc(p.variant.printer.confidence || "-")} · ${esc(p.variant.printer.state)})` +
+      `${p.variant.printer.evidence ? evidenceList(p.variant.printer.evidence) : ""}` +
+      `${p.variant.filaments && p.variant.filaments.length ? " · filaments: " + esc(p.variant.filaments.map(fl => [fl.type, fl.color, fl.usedG != null ? fl.usedG + " g" : ""].filter(Boolean).join(" ")).join(", ")) : ""}` : ""}</li>`).join("");
+  const entries = (x.entries || []).map(e => `<li>${e.thumb ? `<img class="thumb" loading="lazy" alt="" src="/api/library/thumbs/${esc(e.thumb)}">` : ""} ${esc(e.entry)} <span class="k">${esc(e.role)}, ${fmtBytes(e.size)}</span></li>`).join("");
+  return `<details><summary>3MF project</summary><ul class="ev">${facts.map(([k, v]) => `<li><span class="k">${esc(k)}</span> ${esc(v)}</li>`).join("")}</ul>` +
+    `<ul class="ev">${plates}</ul>${entries ? `<div class="why">Inside the project</div><ul class="ev">${entries}</ul>` : ""}` +
+    `${(x.problems || []).length ? `<div class="warn">${esc(x.problems.map(p => p.entry + ": " + (p.error || p.note)).join("; "))}</div>` : ""}</details>`;
+}
+function lineageBlock(list) {
+  if (!list || !list.length) return "";
+  return `<details><summary>Lineage (${list.length})</summary><ul class="ev">${list.map(l => `<li><span class="k">${esc(l.relation)} ${l.direction === "out" ? "→" : "←"}</span> ${esc((l.other || []).join(", ") || "?")} <span class="pill ${esc(l.state)}">${esc(l.confidence)} · ${esc(l.state)}</span> <span class="k">${esc(l.method)}</span>${evidenceList(l.evidence)}</li>`).join("")}</ul></details>`;
 }
 
 function evidenceList(ev) {
@@ -154,6 +186,9 @@ function render() {
     listCard("Folder disagrees with file", s.folderDisagrees, x => `${x.folder} ≠ ${x.fileFamily}`),
     listCard("Read beyond the initial window", s.windowExpansions, x => x.streamed ? "streamed" : (x.grew || []).join(", ")),
     listCard("Errors", s.errors, x => x.error || "unreadable"),
+    s.threemf ? `<div class="card"><h3>3MF</h3><div class="kv"><span>Files</span><span>${s.threemf.files}</span></div><div class="kv"><span>Printable</span><span>${s.threemf.printable}</span></div><div class="kv"><span>Plates (printable)</span><span>${s.threemf.plates} (${s.threemf.printablePlates})</span></div><div class="kv"><span>MakerWorld ids</span><span>${s.threemf.withMakerWorldIds}</span></div><div class="kv"><span>Entry files</span><span>${s.threemf.entryFiles}</span></div><div class="kv"><span>Read / size</span><span>${fmtBytes(s.threemf.bytesRead)} / ${fmtBytes(s.threemf.bytesTotal)}</span></div></div>` : "",
+    s.threemf ? card("3MF flavours", s.threemf.byFlavour) : "",
+    card("Lineage Claims", s.lineage),
     `<div class="card"><h3>Hashing</h3><div class="kv"><span>Full hash</span><span>${s.fullHashed} of ${s.files}</span></div><div class="kv"><span>With thumbnail</span><span>${s.withThumbnail}</span></div></div>`,
   ].join("");
 
@@ -180,6 +215,7 @@ function render() {
       <td>${f.thumb ? `<img class="thumb" loading="lazy" alt="" src="/api/library/thumbs/${esc(f.thumb)}">` : ""}</td>
       <td class="file"><span class="name" title="${esc(f.name)}">${esc(stem(f.name))}</span><span class="path" title="${esc(f.root + ":" + f.path)}">${esc(f.root)}:${esc(f.path)}</span>
         ${f.slicer ? `<span class="path">${esc(f.slicer)}${f.objects && f.objects.length ? " · " + f.objects.length + " object entries" : ""}${f.copies ? " · " + f.copies + "×" : ""}</span>` : ""}
+        ${f.threemf ? threemfBlock(f.threemf) : ""}${lineageBlock(f.lineage)}
         ${f.profile ? `<details><summary>Profile</summary><ul class="ev">${Object.entries(f.profile).filter(([, v]) => v).map(([k, v]) => `<li><span class="k">${esc(k)}</span> = ${esc(v)}</li>`).join("")}${(f.objects || []).map(o => `<li><span class="k">object (${esc(o.origin)})</span> ${esc(o.raw)} ×${o.copies}${o.generic ? " <span class=\"k\">generic</span>" : ""}</li>`).join("")}</ul></details>` : ""}
       </td>
       <td>${printerCell}</td>

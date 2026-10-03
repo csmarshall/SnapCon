@@ -16,6 +16,7 @@ const { isMainThread, parentPort, threadId } = require("node:worker_threads");
 const { runBackup } = require("./LibraryStore");
 const indexStore = require("./indexStore");
 const gcodeExtract = require("./gcodeExtract");
+const threemfExtract = require("./threemfExtract");
 
 const dbs = new Map();   // dbPath -> connection, opened on first use
 function dbFor(dbPath) {
@@ -42,15 +43,24 @@ const handlers = {
   "index.begin": ({ dbPath, rootId, now }) => indexStore.beginScan(dbFor(dbPath), { rootId, now }),
   // A file read through the adaptive window (head/tail) or already extracted
   // by the streamed fallback (extract); or neither, for a file M2 does not read.
-  "index.file": ({ dbPath, thumbsDir, now, file, head, tail, wholeFile, extract }) => {
-    let ex = extract || null;
+  // A 3MF arrives as its directory and the raw (compressed) entries the
+  // scanner chose; inflating, CRC checks and parsing happen here.
+  "index.file": ({ dbPath, thumbsDir, now, file, head, tail, wholeFile, extract, threemf }) => {
+    let ex = extract || null, x3 = null;
     const t0 = Date.now();
     if (!ex && head) ex = gcodeExtract.extractFromWindow(asBuffer(head), asBuffer(tail), { wholeFile });
     if (ex && ex.thumbnail && ex.thumbnail.data && !Buffer.isBuffer(ex.thumbnail.data)) ex.thumbnail.data = asBuffer(ex.thumbnail.data);
+    if (threemf) {
+      const raw = {};
+      for (const [name, r] of Object.entries(threemf.raw)) raw[name] = { ...r, comp: asBuffer(r.comp) };
+      x3 = threemfExtract.extract3mf({ directory: threemf.directory, raw, zip64: threemf.zip64 });
+    }
     const parseMs = Date.now() - t0;
-    const r = indexStore.writeFile(dbFor(dbPath), { ...file, extract: ex }, { now, thumbsDir });
-    return { ...r, parseMs, objects: ex ? ex.objects.length : 0 };
+    const r = indexStore.writeFile(dbFor(dbPath), { ...file, extract: ex, threemf: x3 }, { now, thumbsDir });
+    return { ...r, parseMs, objects: ex ? ex.objects.length : x3 ? x3.objects.length : 0, plates: x3 ? x3.plates.length : null, problems: x3 ? x3.problems : null };
   },
+  // Lineage between files (source_of, sliced_from), from what is indexed.
+  "index.lineage": ({ dbPath, now }) => indexStore.lineage(dbFor(dbPath), { now }),
   // The streamed fallback (§6.2: no config block within 3 MB of the end): the
   // main thread reads the file in chunks and the parsing happens here, line by
   // line, so a 200 MB file never costs the server's thread anything but I/O.

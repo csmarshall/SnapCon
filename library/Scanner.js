@@ -18,7 +18,9 @@
 const path = require("path");
 const crypto = require("crypto");
 const gcodeExtract = require("./gcodeExtract");
-const { GCODE_META_VERSION } = require("./indexStore");
+const { GCODE_META_VERSION, THREEMF_META_VERSION } = require("./indexStore");
+const { openZipAsync } = require("./zipReader");
+const { wantedEntries } = require("./threemfExtract");
 
 const LANE = "background";
 const DEFAULT_BUDGET = 16 * 1024 * 1024;   // bytes per second, reads of every kind
@@ -46,6 +48,10 @@ function roleOf(name) {
 }
 const extOf = name => path.extname(name).slice(1).toLowerCase();
 const wantsGcode = name => GCODE_TEXT.has(extOf(name)) && !/\.gcode\.3mf$/i.test(name);
+const is3mf = name => extOf(name) === "3mf";
+// The extraction version a file of this kind is read under; 0 = not read at all.
+const metaVersionFor = name => (wantsGcode(name) ? GCODE_META_VERSION : is3mf(name) ? THREEMF_META_VERSION : 0);
+const needsReading = (name, row) => metaVersionFor(name) > 0 && (!row || row.meta_version < metaVersionFor(name));
 
 class ScanStopped extends Error { constructor(why) { super("scan stopped: " + why); this.code = "SCAN_STOPPED"; this.why = why; } }
 
@@ -197,14 +203,40 @@ function createScanner({
         ctx.stats.errors++; ctx.stats.errorList.push({ rel: f.rel, error: e.message });
         payload = { file: { ...base, metaVersion: 0, error: e.message } };
       }
+    } else if (is3mf(f.name) && f.size > 0) {
+      // A 3MF: its directory, then only the small entries that hold metadata
+      // (settings, plate info, pictures) — never the mesh. Inflating and
+      // parsing happen in the worker.
+      const bytes0 = ctx.stats.bytesRead, reads0 = ctx.stats.readOps;
+      try {
+        ctx.stats.current = f.rel;
+        const zip = await openZipAsync((pos, len) => read(abs, pos, len, ctx), f.size);
+        const directory = [...zip.entries.values()].filter(e => !e.dir).map(e => ({ name: e.name, rawSize: e.rawSize, compSize: e.compSize, method: e.method, crc: e.crc }));
+        const raw = {};
+        for (const w of wantedEntries(directory)) {
+          try { raw[w.name] = await zip.readRaw(w.name, w); }
+          catch (e) { if (e.code === "NAS_UNREACHABLE" || e.code === "SCAN_STOPPED" || e.code === "NETFS_BUSY") throw e; /* the extractor reports what it lacks */ }
+        }
+        const readInfo = { bytes: ctx.stats.bytesRead - bytes0, reads: ctx.stats.readOps - reads0, ms: ctx.fileReadMs, of: f.size };
+        payload = { file: { ...base, metaVersion: THREEMF_META_VERSION, window: readInfo }, threemf: { directory, raw, zip64: zip.zip64 } };
+        ctx.stats.readMs.push(ctx.fileReadMs);
+        ctx.stats.extracted++; ctx.stats.threemf++;
+        ctx.stats.threemfBytes.push({ rel: f.rel, ...readInfo });
+      } catch (e) {
+        if (e.code === "NAS_UNREACHABLE" || e.code === "SCAN_STOPPED" || e.code === "NETFS_BUSY") throw e;
+        if (e.code === "ENOENT") { ctx.stats.vanished++; return; }
+        // A malformed archive is an unreadable file, never a failed scan.
+        ctx.stats.errors++; ctx.stats.errorList.push({ rel: f.rel, error: e.message });
+        payload = { file: { ...base, metaVersion: THREEMF_META_VERSION, error: (e.code ? e.code + ": " : "") + e.message } };
+      }
     }
     const w0 = Date.now();
     const r = await worker.request("index.file", { dbPath, thumbsDir, now: now(), ...payload });
     ctx.stats.writeMs.push(Date.now() - w0);
-    if (r.parseMs != null && payload.head) ctx.stats.parseMs.push(r.parseMs);
+    if (r.parseMs != null && (payload.head || payload.threemf)) ctx.stats.parseMs.push(r.parseMs);
     if (r.added) ctx.stats.added++; else if (r.changed) ctx.stats.changed++; else ctx.stats.reread++;
     if (r.thumbKey) ctx.stats.thumbs++;
-    if (r.replacedThumb) ctx.stats.thumbCandidates.push(r.replacedThumb);
+    for (const k of r.replacedThumbs || []) ctx.stats.thumbCandidates.push(k);
     ctx.stats.fileMs.push(Date.now() - t0);
   }
 
@@ -212,7 +244,7 @@ function createScanner({
     const stats = Object.assign(external || {}, {
       rootId: root.id, phase: "listing", startedAt: now(), finishedAt: null, outcome: null, error: null,
       dirs: 0, seen: 0, unchanged: 0, restat: 0, added: 0, changed: 0, reread: 0, moved: 0, missing: 0, purged: 0, vanished: 0,
-      extracted: 0, streamed: 0, thumbs: 0, thumbCandidates: [], errors: 0, errorList: [], expansions: [],
+      extracted: 0, streamed: 0, threemf: 0, threemfBytes: [], thumbs: 0, thumbCandidates: [], errors: 0, errorList: [], expansions: [],
       bytesRead: 0, readOps: 0, listOps: 0, fpOps: 0, pauses: 0, pausedMs: 0, paused: false, current: null, total: 0, done: 0,
       readMs: [], parseMs: [], writeMs: [], fileMs: [], fpMs: [],
     });
@@ -233,7 +265,7 @@ function createScanner({
       for (const f of listing.files) {
         const row = manifest.get(f.rel);
         if (row) manifest.delete(f.rel);
-        const needsMeta = roleOf(f.name) === "sliced" && wantsGcode(f.name) && (!row || row.meta_version < GCODE_META_VERSION);
+        const needsMeta = needsReading(f.name, row);
         if (row && row.size === f.size && row.mtime_ms === Math.floor(f.mtimeMs) && !needsMeta && row.state !== "unreadable") { touchIds.push(row.id); stats.unchanged++; continue; }
         todo.push({ ...f, row });
       }
@@ -270,7 +302,7 @@ function createScanner({
         await worker.request("index.move", { dbPath, id: old.id, relPath: f.rel, name: f.name, ext: extOf(f.name), now: now(), rootId: root.id, fromRelPath: old.rel_path, quickFp: fp });
         f.moved = true; stats.moved++;
         manifest.delete(old.rel_path);
-        if (!(roleOf(f.name) === "sliced" && wantsGcode(f.name) && old.meta_version < GCODE_META_VERSION) && Math.floor(f.mtimeMs) === old.mtime_ms) f.done = true;
+        if (!needsReading(f.name, old) && Math.floor(f.mtimeMs) === old.mtime_ms) f.done = true;
         else f.row = { ...old, rel_path: f.rel };
       }
       // Step 5: extraction and writes.
@@ -281,7 +313,7 @@ function createScanner({
         if (f.error && !f.fp) { stats.errors++; stats.errorList.push({ rel: f.rel, error: f.error }); continue; }
         // Same content, only the modification time moved: no read.
         const sameContent = f.row && f.row.quick_fp === f.fp && f.row.size === f.size;
-        const needsMeta = roleOf(f.name) === "sliced" && wantsGcode(f.name) && f.row && f.row.meta_version < GCODE_META_VERSION;
+        const needsMeta = !!f.row && needsReading(f.name, f.row);
         if (sameContent && !needsMeta && f.row.state !== "unreadable") {
           await worker.request("index.restat", { dbPath, id: f.row.id, mtimeMs: f.mtimeMs, now: now() });
           stats.restat++; continue;

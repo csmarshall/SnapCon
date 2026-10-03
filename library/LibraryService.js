@@ -12,7 +12,7 @@ const { createAuthorizer } = require("./permissions");
 const { createWorkerHost } = require("./WorkerHost");
 const { normalizeLocation, comparisonKey, overlaps, checkReachable } = require("./locations");
 const { createScanner, summarise } = require("./Scanner");
-const { GCODE_META_VERSION } = require("./indexStore");
+const { GCODE_META_VERSION, THREEMF_META_VERSION, thumbExt } = require("./indexStore");
 const { diagnosticsRaw } = require("./diagnosticsRaw");
 
 const GCODE_ROOT = "gcode";
@@ -127,6 +127,7 @@ function createLibraryService({
           const after = store.roots.get(id);
           if (after && after.status === "scanning") store.roots.setStatus(id, { status: res.outcome === "offline" ? "offline" : "error", error: res.error || "the scan did not finish" });
           logScan(root, res);
+          if (res.outcome === "ok") await runLineage();
           if (res.outcome === "offline") { const st = stateOf(id); st.failures = 0; st.nextAt = 0; }
         }
         // Nothing waiting: hash at idle (§6.1 step 3, full hash later).
@@ -138,6 +139,7 @@ function createLibraryService({
             lastHash = await scanner.hashIdle({ roots, stats: hashing, shouldStop: () => halt || stopReason || (stopping && "server stopping") || (scanQueue.length && "a scan is waiting") });
             hashing = null;
             if (lastHash.hashed) log.log(`[library] full hash: ${lastHash.hashed} file(s), ${Math.round(lastHash.bytesRead / 1048576)} MB, ${lastHash.outcome}`);
+            if (lastHash.hashed) await runLineage();   // new MD5s can prove a G-code came from a project plate
           }
         }
       } catch (e) {
@@ -147,6 +149,13 @@ function createLibraryService({
         if (!stopping && !halt && scanQueue.length) pump();
       }
     })();
+  }
+
+  // Lineage Claims between files, recomputed from the whole index (worker).
+  let lastLineage = null;
+  async function runLineage() {
+    try { const t0 = now(); lastLineage = { ...(await worker.request("index.lineage", { dbPath: store.dbPath, now: now() })), ms: now() - t0, at: now() }; }
+    catch (e) { log.error("[library] lineage: " + e.message); }
   }
 
   function logScan(root, s) {
@@ -348,7 +357,7 @@ function createLibraryService({
   function thumbFile(key) {
     if (!store.available || !/^e[0-9a-f]{31}$/.test(String(key))) return null;
     const t = store.db.prepare("SELECT key, mime FROM thumbs WHERE key = ?").get(key);
-    return t ? { file: path.join(thumbsDir, t.key + (t.mime === "image/png" ? ".png" : ".jpg")), mime: t.mime } : null;
+    return t ? { file: path.join(thumbsDir, t.key + "." + thumbExt(t.mime)), mime: t.mime } : null;
   }
 
   async function backupNow(reason = "manual") {
@@ -407,7 +416,9 @@ function createLibraryService({
       for (const r of store.roots.list()) fs_().registerRoot("library:" + r.id, r.path);
       // Files indexed under an older extraction rule are read again now, not
       // at the location's next scheduled scan.
-      for (const { root_id } of store.db.prepare("SELECT DISTINCT root_id FROM files WHERE role = 'sliced' AND meta_version > 0 AND meta_version < ?").all(GCODE_META_VERSION)) requestScan(root_id);
+      const stale = store.db.prepare(`SELECT DISTINCT root_id FROM files WHERE entry_path = '' AND (
+          (ext IN ('gcode', 'gco', 'g', 'gx') AND meta_version > 0 AND meta_version < ?) OR (ext = '3mf' AND meta_version < ?))`).all(GCODE_META_VERSION, THREEMF_META_VERSION);
+      for (const { root_id } of stale) requestScan(root_id);
     }
     tick();
     tickTimer = setInterval(tick, TICK_MS); tickTimer.unref();
@@ -448,14 +459,14 @@ function createLibraryService({
       out[id] = {
         outcome: s.outcome, error: s.error, startedAt: s.startedAt, finishedAt: s.finishedAt, ms: s.finishedAt - s.startedAt,
         dirs: s.dirs, seen: s.seen, unchanged: s.unchanged, restat: s.restat, added: s.added, changed: s.changed, reread: s.reread,
-        moved: s.moved, missing: s.missing, purged: s.purged, vanished: s.vanished, thumbsRemoved: s.thumbsRemoved, extracted: s.extracted, streamed: s.streamed,
+        moved: s.moved, missing: s.missing, purged: s.purged, vanished: s.vanished, thumbsRemoved: s.thumbsRemoved, threemf: s.threemf, threemfReads: s.threemfBytes, extracted: s.extracted, streamed: s.streamed,
         thumbs: s.thumbs, errors: s.errors, errorList: s.errorList.slice(0, 50), expansions: s.expansions,
         bytesRead: s.bytesRead, readOps: s.readOps, listOps: s.listOps, fpOps: s.fpOps, pauses: s.pauses, pausedMs: s.pausedMs,
         interruptedBefore: s.interruptedBefore,
         timings: { windowReadMs: summarise(s.readMs), parseMs: summarise(s.parseMs), writeMs: summarise(s.writeMs), perFileMs: summarise(s.fileMs), quickFpMs: summarise(s.fpMs) },
       };
     }
-    return { scans: out, hash: lastHash, hashing };
+    return { scans: out, hash: lastHash, hashing, lineage: lastLineage };
   }
 
   // Rebuild (§14): stop the indexer, drop and recreate the derived tables,

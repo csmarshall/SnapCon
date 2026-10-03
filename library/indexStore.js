@@ -14,6 +14,8 @@ const crypto = require("crypto");
 const PrinterIdentity = require("../public/printer-identity");
 const { classifyFolders } = require("./folders");
 const gcodeExtract = require("./gcodeExtract");
+const { normaliseObjectName } = gcodeExtract;
+const threemfExtract = require("./threemfExtract");
 
 const CLAIM_RULE_VERSION = 1;
 const MISSING_GRACE_MS = 30 * 24 * 60 * 60 * 1000;   // §6.1: a missing file is purged after 30 days
@@ -54,12 +56,12 @@ function upsertClaim(db, c, now) {
 // applied, medium → suggested ("likely"), low → recorded. Folder names are
 // never consulted. A file whose fields name no known family gets no Claim: its
 // printer is unknown, which Diagnostics shows as such.
-function printerClaims(ck, ex) {
+function printerClaims(ck, ex, sourceOf = () => "gcode:config") {
   const id = PrinterIdentity.identifyFile(ex.identity);
   if (!id.hasData) return { id, claims: [] };
   const excerptFor = { printer_model: "printer_model", printer_settings_id: "printer_settings_id", print_compatible_printers: "print_compatible_printers", default_print_profile: "default_print_profile", printer_model_id: "printer_model_id" };
   const evidence = id.evidence.map(e => ({
-    signal: e.signal, value: String(e.value).slice(0, 200), source: "gcode:config",
+    signal: e.signal, value: String(e.value).slice(0, 200), source: sourceOf(e.signal),
     excerpt: ex.excerpts[excerptFor[e.signal]] || null,
     group: e.signal === "printer_model_id" ? "identity" : "internal-content",
     strength: e.strength, family: e.family || null, ...(e.generic ? { generic: true } : {}),
@@ -101,9 +103,12 @@ function resolvePrinter(db, ck) {
 
 // ---- thumbnails ----
 
+const THUMB_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+const thumbExt = mime => THUMB_EXT[mime] || "bin";
+
 function storeThumb(db, thumbsDir, t, now) {
   const key = "e" + sha1(t.data).slice(0, 31);
-  const file = path.join(thumbsDir, key + "." + t.ext);
+  const file = path.join(thumbsDir, key + "." + thumbExt(t.mime));
   if (!fs.existsSync(file)) {
     fs.mkdirSync(thumbsDir, { recursive: true });
     const tmp = file + ".partial";
@@ -111,7 +116,7 @@ function storeThumb(db, thumbsDir, t, now) {
     fs.renameSync(tmp, file);
   }
   db.prepare(`INSERT INTO thumbs (key, source, mime, bytes, w, h, created_at, last_used_at) VALUES (?, 'embedded', ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(key) DO UPDATE SET last_used_at = excluded.last_used_at`).run(key, t.mime, t.data.length, t.w, t.h, now, now);
+    ON CONFLICT(key) DO UPDATE SET last_used_at = excluded.last_used_at`).run(key, t.mime, t.data.length, t.w ?? null, t.h ?? null, now, now);
   return key;
 }
 
@@ -139,29 +144,46 @@ function writeFile(db, f, { now, thumbsDir }) {
     const ck = sameContent ? prev.content_key : quickKey(f.quickFp);
     const sha256 = sameContent ? prev.sha256 : null, md5 = sameContent ? prev.md5 : null;
     const mtime = Math.floor(f.mtimeMs);
+    const x3 = f.threemf || null;
+    const extracted = !!(f.extract || x3);
     let thumbKey = null;
-    if (f.extract && f.extract.thumbnail && thumbsDir) thumbKey = storeThumb(db, thumbsDir, f.extract.thumbnail, now);
+    const picture = (f.extract && f.extract.thumbnail) || (x3 && x3.thumbnail);
+    if (picture && thumbsDir) thumbKey = storeThumb(db, thumbsDir, picture, now);
+    // A 3MF is sliced when a plate's G-code is inside it — content, never the name.
+    const role = x3 ? (x3.slicedCount > 0 ? "sliced" : "project") : f.role;
     const meta = f.extract ? {
       gcode: {
         generator: f.extract.generator, embeddedMd5: f.extract.embeddedMd5, lines: f.extract.lines,
         thumbnails: f.extract.thumbnails, objectsCapped: f.extract.objectsCapped, window: f.window || null,
       },
+    } : x3 ? {
+      threemf: {
+        flavour: x3.flavour, producer: x3.producer, producerVersion: x3.producerVersion, clientVersion: x3.clientVersion,
+        project: x3.project, profile: x3.profile, zip64: x3.zip64, entryCount: x3.entryCount,
+        sourceFiles: x3.sourceFiles, meshNames: x3.meshNames, problems: x3.problems, read: f.window || null,
+      },
     } : (f.error ? { error: f.error } : null);
-    const state = f.error && !f.extract ? "unreadable" : "present";
+    const state = f.error && !extracted ? "unreadable" : "present";
     let id;
     if (prev) {
       db.prepare(`UPDATE files SET name = ?, ext = ?, role = ?, size = ?, mtime_ms = ?, quick_fp = ?, sha256 = ?, md5 = ?, content_key = ?,
           meta_version = ?, meta_json = ?, thumb_key = COALESCE(?, CASE WHEN ? THEN thumb_key ELSE NULL END), state = ?, last_seen = ?, missing_since = NULL WHERE id = ?`)
-        .run(f.name, f.ext, f.role, f.size, mtime, f.quickFp, sha256, md5, ck, f.metaVersion || 0, meta ? JSON.stringify(meta) : null,
-          thumbKey, f.extract ? 0 : 1, state, now, prev.id);
+        .run(f.name, f.ext, role, f.size, mtime, f.quickFp, sha256, md5, ck, f.metaVersion || 0, meta ? JSON.stringify(meta) : null,
+          thumbKey, extracted ? 0 : 1, state, now, prev.id);
       id = prev.id;
     } else {
       id = Number(db.prepare(`INSERT INTO files (root_id, rel_path, entry_path, name, ext, role, size, mtime_ms, quick_fp, content_key,
           meta_version, meta_json, thumb_key, state, first_seen, last_seen) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(f.rootId, f.relPath, f.name, f.ext, f.role, f.size, mtime, f.quickFp, ck, f.metaVersion || 0, meta ? JSON.stringify(meta) : null,
+        .run(f.rootId, f.relPath, f.name, f.ext, role, f.size, mtime, f.quickFp, ck, f.metaVersion || 0, meta ? JSON.stringify(meta) : null,
           thumbKey, state, now, now).lastInsertRowid);
     }
     let printer = null;
+    const replacedThumbs = [];
+    if (x3) {
+      const r3 = write3mf(db, { id, ck, f, x3, now, thumbsDir });
+      replacedThumbs.push(...r3.replacedThumbs);
+      printer = r3.printers;
+    }
     if (f.extract) {
       const ex = f.extract;
       db.prepare("DELETE FROM file_objects WHERE file_id = ?").run(id);
@@ -186,10 +208,119 @@ function writeFile(db, f, { now, thumbsDir }) {
     }
     // A thumbnail this file no longer uses: a candidate for removal at the end
     // of the scan (another file may still use it).
-    const replacedThumb = prev && prev.thumb_key && f.extract && prev.thumb_key !== thumbKey ? prev.thumb_key : null;
-    return { id, contentKey: ck, added: !prev, changed: !!prev && !sameContent, thumbKey, replacedThumb, printer };
+    if (prev && prev.thumb_key && extracted && prev.thumb_key !== thumbKey) replacedThumbs.push(prev.thumb_key);
+    return { id, contentKey: ck, added: !prev, changed: !!prev && !sameContent, role, thumbKey, replacedThumbs, printer };
   });
 }
+
+// ---- 3MF: Project, Plates, Variants, objects, Auxiliaries ----
+
+const AUX_ROLE = ext => (/^(png|jpe?g|webp|gif|bmp)$/.test(ext) ? "image" : /^(pdf|txt|md|html?)$/.test(ext) ? "document" : /^(stl|obj|step|stp|3mf|amf|ply)$/.test(ext) ? "source" : "other");
+const SLICER_LABEL = { bambu: "Bambu Studio", orca: "OrcaSlicer", snapmaker_orca: "Snapmaker Orca", creality: "Creality Print", prusa: "PrusaSlicer" };
+
+// What a 3MF says, as rows. Derived, like everything here: the previous
+// Project of this file (plates cascade), its Variants, objects, entry Files
+// and automatic printer Claims are replaced. Lineage between files is not
+// written here: see lineage().
+function write3mf(db, { id, ck, f, x3, now, thumbsDir }) {
+  const old = [
+    ...db.prepare("SELECT p.thumb_key AS k FROM plates p JOIN projects pr ON pr.id = p.project_id WHERE pr.file_id = ? AND p.thumb_key IS NOT NULL").all(id),
+    ...db.prepare("SELECT thumb_key AS k FROM files WHERE container_id = ? AND thumb_key IS NOT NULL").all(id),
+  ].map(r => r.k);
+  db.prepare("DELETE FROM projects WHERE file_id = ?").run(id);
+  db.prepare("DELETE FROM files WHERE container_id = ?").run(id);
+  db.prepare("DELETE FROM variants WHERE file_id = ?").run(id);
+  db.prepare("DELETE FROM file_objects WHERE file_id = ?").run(id);
+  db.prepare("DELETE FROM claims WHERE subject_type = 'variant' AND subject_key LIKE ? AND relation = 'targets_printer' AND automatic = 1").run(ck + "#%");
+
+  const p = x3.project, pf = x3.profile || {};
+  const sliced = x3.plates.filter(pl => pl.sliced);
+  const firstSlice = (sliced.find(pl => pl.slice) || {}).slice || {};
+  const projectId = Number(db.prepare(`INSERT INTO projects (file_id, flavour, producer, producer_version, title, designer, license, origin,
+      design_model_id, design_profile_id, profile_title, printer_model, printer_model_id, printer_settings_id, print_settings_id,
+      filament_settings_json, layer_height, nozzle, plate_count, sliced_plate_count, config_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, x3.flavour.flavour, x3.producer, x3.producerVersion, p.title, p.designer, p.license, p.origin,
+      p.designModelId, p.designProfileId, p.profileTitle, pf.printer_model || null, firstSlice.printerModelId || null,
+      pf.printer_settings_id || null, pf.print_settings_id || null, pf.filament_settings_id ? JSON.stringify(pf.filament_settings_id) : null,
+      pf.layer_height != null ? pf.layer_height : null, pf.nozzle != null ? pf.nozzle : null, x3.plates.length, sliced.length, x3.configHash).lastInsertRowid);
+
+  const newThumbs = new Set();
+  const insPlate = db.prepare("INSERT INTO plates (project_id, plate_no, name, sliced, objects_json, thumb_key, gcode_md5) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  for (const pl of x3.plates) {
+    let tk = null;
+    if (pl.thumbnail && thumbsDir) { tk = storeThumb(db, thumbsDir, { ...pl.thumbnail, w: null, h: null }, now); newThumbs.add(tk); }
+    insPlate.run(projectId, pl.plate_no, pl.name, pl.sliced ? 1 : 0, JSON.stringify({ objects: pl.objects, slicedObjects: pl.slicedObjects }), tk, pl.gcodeMd5);
+  }
+
+  // A printable Variant per sliced plate, and its printer from the file's
+  // own fields: the profile, plus the plate's Bambu model id.
+  const printers = [];
+  const where = { printer_model: "3mf:Metadata/project_settings.config", printer_settings_id: "3mf:Metadata/project_settings.config",
+    print_compatible_printers: "3mf:Metadata/project_settings.config", default_print_profile: "3mf:Metadata/project_settings.config",
+    printer_model_id: "3mf:Metadata/slice_info.config" };
+  for (const pl of sliced) {
+    const si = pl.slice || {};
+    const key = ck + "#" + pl.plate_no;
+    const identity = { ...(x3.identity || {}), printerModelId: si.printerModelId || null };
+    const excerpts = Object.fromEntries(Object.entries({ printer_model: identity.printerModel, printer_settings_id: identity.printerSettingsId,
+      print_compatible_printers: identity.printCompatiblePrinters, default_print_profile: identity.defaultPrintProfile, printer_model_id: identity.printerModelId })
+      .filter(([, v]) => v).map(([k, v]) => [k, (k === "printer_model_id" ? "slice_info.config plate " + pl.plate_no : "project_settings.config") + ": " + k + " = " + String(v).slice(0, 150)]));
+    const pc = printerClaims(key, { identity, excerpts }, sig => where[sig] || "3mf");
+    for (const c of pc.claims) upsertClaim(db, c, now);
+    const res = resolvePrinter(db, key);
+    printers.push({ plate: pl.plate_no, resolver: { family: pc.id.family, confidence: pc.id.confidence, method: pc.id.method }, resolved: res });
+    const fil = si.filaments && si.filaments.length ? si.filaments
+      : (pf.filament_type || []).map((t, i) => ({ id: i + 1, type: t, color: (pf.filament_colour || [])[i] || null }));
+    const counts = {};
+    for (const o of (si.objects || []).filter(o => !o.skipped)) counts[o.name] = (counts[o.name] || 0) + 1;
+    db.prepare(`INSERT INTO variants (file_id, plate_no, printer_family, printer_claim_key, printer_decision_id, printer_model, printer_model_id,
+        printer_settings_id, print_settings_id, compatible_printers, filament_settings_json, filaments_json, layer_height, nozzle, bed_json,
+        slicer, slicer_version, config_block, config_hash, est_seconds, weight_g, copies, color_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`)
+      .run(id, pl.plate_no, res.family, res.claimKey, res.decisionId, pf.printer_model || null, si.printerModelId || null,
+        pf.printer_settings_id || null, pf.print_settings_id || null, (pf.compatible_printers || []).join(";") || null,
+        pf.filament_settings_id ? JSON.stringify(pf.filament_settings_id) : null, JSON.stringify(fil),
+        pf.layer_height != null ? pf.layer_height : null, si.nozzle != null ? si.nozzle : pf.nozzle != null ? pf.nozzle : null,
+        pf.bed_type ? JSON.stringify({ bed_type: pf.bed_type }) : null, SLICER_LABEL[x3.flavour.flavour] || x3.producer, x3.producerVersion,
+        x3.configHash, si.prediction != null ? Math.round(si.prediction) : null, si.weight, Object.keys(counts).length ? Math.max(...Object.values(counts)) : null,
+        fil.filter(x => x.usedG == null || x.usedG > 0).length || null);
+  }
+
+  // Object names, source-file references and mesh names: what M4's lineage
+  // and grouping read. Recorded as the file states them.
+  const insObj = db.prepare("INSERT OR REPLACE INTO file_objects (file_id, name_norm, raw_name, copies, origin, generic, excerpt) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const put = (names, origin, excerptOf) => {
+    const agg = new Map();
+    for (const raw of names) {
+      const n = normaliseObjectName(raw);
+      if (!n.norm) continue;
+      const a = agg.get(n.norm) || { raw, copies: 0, generic: n.generic };
+      a.copies++; agg.set(n.norm, a);
+    }
+    for (const [norm, a] of agg) insObj.run(id, norm, String(a.raw).slice(0, 300), a.copies, origin, a.generic ? 1 : 0, excerptOf(a.raw));
+  };
+  put(x3.objects.map(o => o.name).filter(Boolean), "model_settings", r => cut200("model_settings.config: object name = " + r));
+  put(x3.plates.flatMap(pl => pl.slicedObjects), "slice_info", r => cut200("slice_info.config: object name = " + r));
+  put(x3.sourceFiles.map(baseName), "source_file", r => cut200("model_settings.config: source_file = " + (x3.sourceFiles.find(s => baseName(s) === r) || r)));
+  put(x3.meshNames, "mesh_basename", r => cut200("model_settings.config: part name = " + r));
+
+  // Auxiliaries: pictures and documents inside the project, as entry Files.
+  // Their fingerprint is the archive's own record of them (size and CRC-32).
+  const insEntry = db.prepare(`INSERT INTO files (root_id, rel_path, entry_path, container_id, name, ext, role, size, mtime_ms, quick_fp, content_key,
+      meta_version, meta_json, thumb_key, state, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'present', ?, ?)`);
+  for (const a of x3.auxiliaries) {
+    const ext = path.extname(a.name).slice(1).toLowerCase();
+    const fp = sha1("zip:" + a.size + ":" + a.crc).slice(0, 32);
+    let tk = null;
+    if (a.picture && thumbsDir) { tk = storeThumb(db, thumbsDir, { ...a.picture, w: null, h: null }, now); newThumbs.add(tk); }
+    insEntry.run(f.rootId, f.relPath, a.entry, id, a.name, ext, AUX_ROLE(ext), a.size, Math.floor(f.mtimeMs), fp, quickKey(fp),
+      JSON.stringify({ entry: { crc: a.crc, fingerprint: "zip size + CRC-32" } }), tk, now, now);
+  }
+  return { replacedThumbs: old.filter(k => !newThumbs.has(k)), printers };
+}
+const cut200 = s => String(s).slice(0, 200);
+const baseName = p => String(p || "").split(/[\\/]/).pop();
 
 // Unchanged files: one stat each, recorded as seen.
 function touch(db, { ids, now }) {
@@ -236,6 +367,9 @@ function finishScan(db, { rootId, scanId, startedAt, now, complete, outcome, sta
     if (complete) {
       missing = db.prepare(`UPDATE files SET state = 'missing', missing_since = COALESCE(missing_since, ?)
         WHERE root_id = ? AND entry_path = '' AND last_seen < ? AND state != 'missing'`).run(now, rootId, startedAt).changes;
+      // A 3MF's entry Files go missing with it, and come back with it.
+      db.prepare(`UPDATE files SET state = c.state, missing_since = c.missing_since FROM (SELECT id, state, missing_since FROM files WHERE root_id = ? AND entry_path = '') AS c
+        WHERE files.container_id = c.id AND files.state != c.state`).run(rootId);
       for (const r of db.prepare("SELECT thumb_key FROM files WHERE root_id = ? AND state = 'missing' AND missing_since < ? AND thumb_key IS NOT NULL").all(rootId, now - MISSING_GRACE_MS)) candidates.add(r.thumb_key);
       purged = db.prepare("DELETE FROM files WHERE root_id = ? AND state = 'missing' AND missing_since < ?").run(rootId, now - MISSING_GRACE_MS).changes;
       if (dirs) {
@@ -274,7 +408,7 @@ function finishScan(db, { rootId, scanId, startedAt, now, complete, outcome, sta
   });
   // The files go after the rows are committed: a crash in between leaves a
   // stray file (harmless), never a row pointing at a missing file.
-  if (thumbsDir) for (const o of result.orphans) fs.rmSync(path.join(thumbsDir, o.key + (o.mime === "image/png" ? ".png" : ".jpg")), { force: true });
+  if (thumbsDir) for (const o of result.orphans) fs.rmSync(path.join(thumbsDir, o.key + "." + thumbExt(o.mime)), { force: true });
   return { missing: result.missing, purged: result.purged, thumbsRemoved: result.orphans.length };
 }
 
@@ -331,6 +465,116 @@ function setHash(db, { id, sha256, md5, expect, now }) {
   });
 }
 
+// ---- lineage (§4.4: source_of, sliced_from) ----
+// Recomputed from the index as a whole after each complete scan and after
+// full hashes arrive (MD5s). Only automatic Claims are replaced; Decisions are
+// authored and untouched. Nothing here is a guess dressed as a fact:
+//   sliced_from exact      a G-code file's MD5 = a project plate's recorded
+//                          plate_N.gcode.md5
+//   sliced_from medium     the same non-generic object names as one project
+//                          plate, and no other (2+ candidates: recorded low)
+//   source_of high         a 3MF's source_file names exactly one indexed file
+//                          (2+ files of that name: recorded low)
+//   source_of medium       a G-code object is named exactly like one source
+//                          (mesh) file, generic names never
+const GCODE_OBJECT_ORIGINS = ["exclude_object", "printing_object", "m486"];
+
+function lineage(db, { now }) {
+  return tx(db, () => {
+    db.prepare("DELETE FROM claims WHERE automatic = 1 AND relation IN ('sliced_from', 'source_of')").run();
+    const counts = { sliced_from_exact: 0, sliced_from_names: 0, sliced_from_ambiguous: 0, source_of: 0, source_of_ambiguous: 0, source_of_names: 0 };
+    const loc = r => r.root_id + ":" + r.rel_path;
+    const projects = db.prepare(`SELECT pr.id AS project_id, f.id AS file_id, f.content_key, f.root_id, f.rel_path FROM projects pr
+      JOIN files f ON f.id = pr.file_id WHERE f.state = 'present'`).all();
+    const projectByFile = new Map(projects.map(p => [p.file_id, p]));
+
+    // 1. Exact: the G-code is byte-identical to a plate's G-code.
+    const exact = db.prepare(`SELECT g.content_key AS gk, g.root_id, g.rel_path, g.md5, pl.plate_no, pf.content_key AS pk, pf.root_id AS proot, pf.rel_path AS ppath
+      FROM files g JOIN plates pl ON pl.gcode_md5 = g.md5 JOIN projects pr ON pr.id = pl.project_id JOIN files pf ON pf.id = pr.file_id
+      WHERE g.md5 IS NOT NULL AND g.entry_path = '' AND g.state = 'present' AND g.id != pf.id AND pf.state = 'present'`).all();
+    const exactPairs = new Set();
+    for (const r of exact) {
+      upsertClaim(db, { subject_type: "variant", subject_key: r.gk, relation: "sliced_from", object_type: "project", object_key: r.pk,
+        method: "plate_md5", confidence: "exact", state: "applied", groups: "identity",
+        evidence: [{ signal: "gcode_md5", value: r.md5, source: "3mf:Metadata/plate_" + r.plate_no + ".gcode.md5", group: "identity", strength: "identity",
+          excerpt: `${loc(r)} has the MD5 recorded for plate ${r.plate_no} of ${r.proot}:${r.ppath}`, at: loc(r), plate: r.plate_no }] }, now);
+      exactPairs.add(r.gk + ">" + r.pk); counts.sliced_from_exact++;
+    }
+
+    // 2. Object names: a G-code file's non-generic objects = one plate's.
+    const norm = n => normaliseObjectName(n);
+    const plateSets = [];
+    for (const pl of db.prepare("SELECT project_id, plate_no, objects_json FROM plates").all()) {
+      const p = projects.find(x => x.project_id === pl.project_id);
+      if (!p) continue;
+      let names = [];
+      try { names = JSON.parse(pl.objects_json || "{}").objects || []; } catch {}
+      const set = [...new Set(names.map(norm).filter(n => n.norm && !n.generic).map(n => n.norm))].sort();
+      if (set.length) plateSets.push({ ...p, plate_no: pl.plate_no, key: set.join("|"), names: set });
+    }
+    const byKey = new Map();
+    for (const s of plateSets) byKey.set(s.key, (byKey.get(s.key) || []).concat([s]));
+    const ph = GCODE_OBJECT_ORIGINS.map(() => "?").join(",");
+    const gObjects = db.prepare(`SELECT f.id, f.content_key, f.root_id, f.rel_path, o.name_norm, o.raw_name, o.generic FROM files f JOIN file_objects o ON o.file_id = f.id
+      WHERE f.entry_path = '' AND f.state = 'present' AND o.origin IN (${ph})`).all(...GCODE_OBJECT_ORIGINS);
+    const gSets = new Map();
+    for (const r of gObjects) {
+      const g = gSets.get(r.id) || { ...r, names: new Set(), raws: new Set(), generic: 0 };
+      if (r.generic) g.generic++; else { g.names.add(r.name_norm); g.raws.add(r.raw_name); }
+      gSets.set(r.id, g);
+    }
+    for (const g of gSets.values()) {
+      if (!g.names.size || projectByFile.has(g.id)) continue;
+      const key = [...g.names].sort().join("|");
+      const cands = (byKey.get(key) || []).filter(c => !exactPairs.has(g.content_key + ">" + c.content_key));
+      const projectsHit = [...new Map(cands.map(c => [c.content_key, c])).values()];
+      for (const c of projectsHit) {
+        const unique = projectsHit.length === 1;
+        upsertClaim(db, { subject_type: "variant", subject_key: g.content_key, relation: "sliced_from", object_type: "project", object_key: c.content_key,
+          method: "object_names", confidence: unique ? "medium" : "low", state: unique ? "suggested" : "recorded", groups: "internal-content",
+          evidence: [{ signal: "object_names", value: [...g.names].join(", ").slice(0, 200), source: "gcode:objects + 3mf:Metadata/model_settings.config",
+            group: "internal-content", strength: unique ? "medium" : "weak",
+            excerpt: `${loc(g)} and plate ${cands.filter(x => x.content_key === c.content_key).map(x => x.plate_no).join("/")} of ${loc(c)} name the same objects`,
+            at: loc(g), ...(unique ? {} : { note: `${projectsHit.length} projects match equally` }) }] }, now);
+        if (unique) counts.sliced_from_names++; else counts.sliced_from_ambiguous++;
+      }
+    }
+
+    // 3. source_file: the slicer's record of what a project was made from.
+    const nameIndex = new Map();
+    for (const r of db.prepare("SELECT id, content_key, root_id, rel_path, name, role FROM files WHERE entry_path = '' AND state = 'present'").all()) {
+      const k = r.name.toLowerCase();
+      nameIndex.set(k, (nameIndex.get(k) || []).concat([r]));
+    }
+    for (const r of db.prepare(`SELECT f.id, f.content_key, f.root_id, f.rel_path, o.raw_name FROM file_objects o JOIN files f ON f.id = o.file_id
+      WHERE o.origin = 'source_file' AND f.state = 'present'`).all()) {
+      const hits = (nameIndex.get(String(r.raw_name).toLowerCase()) || []).filter(h => h.id !== r.id);
+      for (const h of hits) {
+        const unique = hits.length === 1;
+        upsertClaim(db, { subject_type: "file", subject_key: h.content_key, relation: "source_of", object_type: "file", object_key: r.content_key,
+          method: "source_file_meta", confidence: unique ? "high" : "low", state: unique ? "applied" : "recorded", groups: "identity",
+          evidence: [{ signal: "source_file", value: r.raw_name, source: "3mf:Metadata/model_settings.config", group: "identity", strength: unique ? "identity" : "weak",
+            excerpt: `${loc(r)} records source_file ${r.raw_name}; ${loc(h)} has that name`, at: loc(r), ...(unique ? {} : { note: `${hits.length} files have that name` }) }] }, now);
+        if (unique) counts.source_of++; else counts.source_of_ambiguous++;
+      }
+    }
+    // A G-code object named exactly like a source (mesh) file.
+    for (const g of gSets.values()) {
+      for (const raw of g.raws) {
+        const hits = (nameIndex.get(String(raw).toLowerCase()) || []).filter(h => h.role === "source" && h.id !== g.id);
+        if (hits.length !== 1) continue;
+        const h = hits[0];
+        upsertClaim(db, { subject_type: "file", subject_key: h.content_key, relation: "source_of", object_type: "file", object_key: g.content_key,
+          method: "object_name=mesh_basename", confidence: "medium", state: "suggested", groups: "internal-content",
+          evidence: [{ signal: "source_object_name", value: raw, source: "gcode:objects", group: "internal-content", strength: "medium",
+            excerpt: `${loc(g)} prints an object named ${raw}; ${loc(h)} is that file`, at: loc(g) }] }, now);
+        counts.source_of_names++;
+      }
+    }
+    return counts;
+  });
+}
+
 // Removing a location: its derived rows go in batches, each its own short
 // transaction, here in the worker. A single cascading DELETE of a large
 // location (M0: 12 s at 100k files) on the main thread would freeze the
@@ -351,6 +595,7 @@ function removeRootRows(db, { rootId, batch = 2000 }) {
 }
 
 module.exports = {
-  openDb, beginScan, removeRootRows, writeFile, touch, restat, move, finishScan, setHash, printerClaims, resolvePrinter,
+  openDb, beginScan, removeRootRows, lineage, writeFile, touch, restat, move, finishScan, setHash, printerClaims, resolvePrinter,
   claimKeyOf, CLAIM_RULE_VERSION, MISSING_GRACE_MS, GCODE_META_VERSION: gcodeExtract.RULE_VERSION,
+  THREEMF_META_VERSION: threemfExtract.RULE_VERSION, thumbExt,
 };

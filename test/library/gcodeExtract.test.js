@@ -33,7 +33,8 @@ test("a complete file: generator, identity, profile, palette, time, weight, obje
 
 test("generic object names are marked and never lost", () => {
   for (const n of ["Assembly", "Part 3", "object", "12", "Body_id_0_copy_0"]) assert.equal(X.normaliseObjectName(n).generic, true, n);
-  for (const n of ["MMM_Beardie_Body_v08R.stl_id_1_copy_0", "HollowLog", "3DBenchy"]) assert.equal(X.normaliseObjectName(n).generic, false, n);
+  for (const n of ["MMM_Beardie_Body_v08R.stl_id_1_copy_0", "HollowLog", "Flexy_Grinch_Standard_STL_No Hat Version2.stl"]) assert.equal(X.normaliseObjectName(n).generic, false, n);
+  for (const n of ["3DBenchy", "3DBenchy.stl_id_0_copy_0", "Calibration Cube"]) assert.equal(X.normaliseObjectName(n).generic, true, n + ": a common test print (§6.3)");
   assert.equal(X.normaliseObjectName("MMM_Beardie_Body_v08R.stl id:1 copy 0").norm, "mmm beardie body v08r");
 });
 

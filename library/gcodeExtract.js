@@ -18,7 +18,8 @@ const { parseGcodeMap, _internal: { matchCfgLine } } = require("../parser");
 //   2  Creality thumbnail block forms recognised
 //   3  the resolver learned the Creality K1C and Ender-3 V3 KE: printer
 //      Claims are derived again from each file's own fields
-const RULE_VERSION = 3;
+//   4  common test/calibration object names (3DBenchy…) are generic
+const RULE_VERSION = 4;
 const HEAD_INITIAL = 512 * 1024;
 const TAIL_INITIAL = 256 * 1024;
 const WINDOW_MAX = 3 * 1024 * 1024;
@@ -54,7 +55,10 @@ function windowNeeds(head, tail) {
 // "<object>_id_<n>_copy_<m>" ("<object> id:<n> copy <m>" in "; printing
 // object" lines); the copy count is the number of instances.
 const ORCA_INSTANCE = /^(.*?)[ _]id[:_](\d+)[ _]copy[ _](\d+)$/;
-const GENERIC = new Set(["assembly", "object", "objects", "body", "part", "parts", "model", "mesh", "untitled", "plate", "shape", "cube", "group"]);
+// Plus the common test/calibration prints (§6.3): a "3DBenchy" object names a
+// file of thousands of people's, so two Benchys are no evidence of each other.
+const GENERIC = new Set(["assembly", "object", "objects", "body", "part", "parts", "model", "mesh", "untitled", "plate", "shape", "cube", "group",
+  "3dbenchy", "benchy", "calibration", "calibration cube", "test", "stand", "holder"]);
 
 function normaliseObjectName(raw) {
   let s = String(raw || "").trim().replace(/^["']|["']$/g, "");
