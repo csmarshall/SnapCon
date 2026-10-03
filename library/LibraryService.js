@@ -15,6 +15,7 @@ const { createScanner, summarise } = require("./Scanner");
 const { GCODE_META_VERSION, THREEMF_META_VERSION, thumbExt } = require("./indexStore");
 const { diagnosticsRaw } = require("./diagnosticsRaw");
 const { diagnosticsGrouping, stableExport } = require("./diagnosticsGrouping");
+const libraryView = require("./libraryView");
 
 const GCODE_ROOT = "gcode";
 const NAME_MAX = 60;
@@ -502,6 +503,30 @@ function createLibraryService({
       requireAvailable();
       const d = diagnosticsGrouping(store.db, { reportPath: groupingReport });
       return exportView ? stableExport(d) : { ...d, lastRun: lastGrouping };
+    },
+    // M5: the Library itself, from the index alone (never a file read).
+    browse: opts => { requireAvailable(); return libraryView.listModels(store.db, opts || {}); },
+    facets: () => { requireAvailable(); return libraryView.facets(store.db); },
+    model: uuid => {
+      requireAvailable();
+      const m = libraryView.modelDetail(store.db, String(uuid || ""));
+      if (!m) throw new LibraryError(404, "model_not_found", "No such model.");
+      return m;
+    },
+    attention: () => { requireAvailable(); return libraryView.attentionList(store.db); },
+    // What every Library page shows at the top: each location's state (never
+    // its folder), whether indexing is running, and the attention counts.
+    overview: () => {
+      requireAvailable();
+      const s = status();
+      const roots = store.roots.list().filter(r => r.enabled).map(r => ({ id: r.id, name: r.name, status: r.status, offline: r.status === "offline", lastOkAt: r.last_ok_at || null }));
+      const ix = s.indexer;
+      return {
+        roots,
+        indexing: ix ? { scanning: ix.scanning ? { rootId: ix.scanning.rootId, phase: ix.scanning.phase, done: ix.scanning.done, total: ix.scanning.total } : null,
+          queued: ix.queue.length, hashing: ix.hashing ? { hashed: ix.hashing.hashed, remaining: ix.hashing.remaining } : null } : null,
+        attention: libraryView.attentionCounts(store.db),
+      };
     },
     thumbFile,
     _store: store, _checkRoot: checkRoot, _tick: tick, _requestScan: requestScan, _group: runGrouping,

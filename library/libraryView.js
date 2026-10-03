@@ -1,0 +1,374 @@
+// library/libraryView.js — what the Library UI reads (docs/library-design.md
+// §13.2, M5): Model cards with keyset paging, search and facets, the Model
+// page, and Needs attention. Read-only, from the index alone: nothing here
+// touches a file, so browsing never reads the NAS.
+//
+// Paths: a file is shown as its location's name plus its path inside that
+// location (as /api/files shows the G-code folder to anyone signed in). A
+// location's own folder is never part of these answers; the roots route
+// shows it only to those who manage locations.
+"use strict";
+const PrinterIdentity = require("../public/printer-identity");
+
+const labelOf = fam => (fam ? (PrinterIdentity.FAMILIES.find(f => f.key === fam) || {}).label || fam : null);
+const json = s => { try { return JSON.parse(s || "null"); } catch { return null; } };
+const loc = f => f.root_id + ":" + f.rel_path;
+const PAGE_MAX = 120;
+
+// How strongly a Review Item asks for attention. "action": something the
+// owner decided no longer applies, or a file is broken; "review": SnapCon is
+// unsure and a person should look; "info": recorded so it can be explained,
+// not a problem (a folder that disagrees, two copies, a generic name kept
+// apart on purpose, an empty Model).
+function levelOf(r) {
+  switch (r.kind) {
+    case "decision_unmatched": case "file_changed": case "unreadable_file": return "action";
+    case "suggested_match": case "unknown_printer": case "missing_file": case "source_offline": case "source_may_match": return "review";
+    case "ambiguous_grouping": return /^ambiguous:(generic|nested):/.test(r.subject_key) ? "info" : "review";
+    default: return "info";   // folder_disagrees, possible_duplicate, empty_model
+  }
+}
+const LEVEL_RANK = { action: 0, review: 1, info: 2 };
+
+// Which Models an open Review Item is about: by uuid, by the content it
+// names, by the location it names, or by the files its Evidence lists.
+function attentionIndex(db) {
+  const reviews = db.prepare("SELECT * FROM review_items WHERE status = 'open' ORDER BY priority, kind, subject_key").all();
+  const models = new Map(db.prepare("SELECT id, uuid, name FROM models").all().map(m => [m.uuid, m]));
+  const byKey = new Map(), byLoc = new Map();
+  for (const f of db.prepare("SELECT root_id, rel_path, content_key, model_id FROM files WHERE entry_path = '' AND model_id IS NOT NULL").all()) {
+    if (!byKey.has(f.content_key)) byKey.set(f.content_key, new Set());
+    byKey.get(f.content_key).add(f.model_id);
+    byLoc.set(loc(f), f.model_id);
+  }
+  const perModel = new Map();   // model id -> [review]
+  const items = reviews.map(r => {
+    const ids = new Set();
+    for (const u of [r.model_uuid, r.other_model_uuid]) if (u && models.has(u)) ids.add(models.get(u).id);
+    for (const k of [r.content_key, r.other_content_key]) for (const id of byKey.get(k) || []) ids.add(id);
+    for (const l of [r.location, r.other_location]) if (l && byLoc.has(l)) ids.add(byLoc.get(l));
+    const ev = json(r.evidence_json);
+    if (ev && Array.isArray(ev.files)) for (const l of ev.files) if (byLoc.has(l)) ids.add(byLoc.get(l));
+    const item = { ...r, level: levelOf(r), evidence: ev, modelIds: [...ids] };
+    for (const id of ids) { if (!perModel.has(id)) perModel.set(id, []); perModel.get(id).push(item); }
+    return item;
+  });
+  const idToModel = new Map([...models.values()].map(m => [m.id, m]));
+  return { items, perModel, idToModel };
+}
+
+function rootsState(db) {
+  return new Map(db.prepare("SELECT id, name, status, enabled, last_scan_at FROM roots").all().map(r => [r.id, { ...r, offline: !r.enabled || r.status === "offline" }]));
+}
+function availability(f, roots) {
+  const r = roots.get(f.root_id);
+  if (r && r.offline) return "offline";       // known file; its location is unreachable — never "missing"
+  return f.state === "present" ? "ok" : f.state; // missing | unreadable
+}
+
+// ---- covers (§10 cover order) ----
+// 1 the owner's choice; 2 an image in the Model; 3 a 3MF plate picture or
+// thumbnail_3mf; 4 the largest G-code thumbnail; 6 none (the UI's
+// placeholder). (5, a render, is Phase 2.)
+function coversFor(db, ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const idsJson = JSON.stringify(ids);
+  const models = db.prepare("SELECT id, cover_content_key, cover_plate, cover_source FROM models WHERE id IN (SELECT value FROM json_each(?))").all(idsJson);
+  const files = db.prepare(`SELECT f.model_id, f.id, f.role, f.entry_path, f.content_key, f.thumb_key, t.w, t.h, t.bytes FROM files f
+    JOIN thumbs t ON t.key = f.thumb_key WHERE f.model_id IN (SELECT value FROM json_each(?)) AND f.state != 'missing'`).all(idsJson);
+  const plates = db.prepare(`SELECT f.model_id, f.content_key, p.plate_no, p.thumb_key FROM plates p JOIN projects pr ON pr.id = p.project_id JOIN files f ON f.id = pr.file_id
+    WHERE f.model_id IN (SELECT value FROM json_each(?)) AND p.thumb_key IS NOT NULL ORDER BY p.plate_no`).all(idsJson);
+  const byModel = (rows) => { const m = new Map(); for (const r of rows) { if (!m.has(r.model_id)) m.set(r.model_id, []); m.get(r.model_id).push(r); } return m; };
+  const F = byModel(files), P = byModel(plates);
+  for (const m of models) {
+    const fs_ = F.get(m.id) || [], ps = P.get(m.id) || [];
+    let pick = null;
+    if (m.cover_source === "user" && m.cover_content_key) {
+      const p = m.cover_plate != null && ps.find(x => x.content_key === m.cover_content_key && x.plate_no === m.cover_plate);
+      const f = fs_.find(x => x.content_key === m.cover_content_key);
+      pick = p ? { thumb: p.thumb_key, source: "chosen" } : f ? { thumb: f.thumb_key, source: "chosen" } : null;
+    }
+    const image = fs_.filter(f => f.role === "image").sort((a, b) => (b.bytes || 0) - (a.bytes || 0))[0];
+    if (!pick && image) pick = { thumb: image.thumb_key, source: "image" };
+    if (!pick && ps.length) pick = { thumb: ps[0].thumb_key, source: "plate" };
+    const proj = fs_.find(f => f.role === "project" && !f.entry_path);
+    if (!pick && proj) pick = { thumb: proj.thumb_key, source: "project" };
+    const g = fs_.filter(f => f.role === "sliced" && !f.entry_path).sort((a, b) => ((b.w || 0) * (b.h || 0) - (a.w || 0) * (a.h || 0)) || (b.bytes - a.bytes))[0];
+    if (!pick && g) pick = { thumb: g.thumb_key, source: "gcode" };
+    out.set(m.id, pick);
+  }
+  return out;
+}
+
+// ---- the grid ----
+
+const SORTS = {
+  name: { col: "lower(m.name)", dir: "ASC" },
+  recent: { col: "m.created_at", dir: "DESC" },
+};
+const TYPES = {
+  printable: "m.id IN (SELECT f.model_id FROM files f JOIN variants v ON v.file_id = f.id WHERE f.entry_path = '')",
+  project: "m.id IN (SELECT f.model_id FROM files f JOIN projects p ON p.file_id = f.id WHERE f.entry_path = '')",
+  source: "m.id IN (SELECT model_id FROM files WHERE role = 'source' AND entry_path = '')",
+};
+// Words, each a prefix: "skel rex" finds "Skeleton T-Rex". FTS5 syntax is
+// never passed through from the user.
+function ftsQuery(q) {
+  const toks = String(q || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+  return toks.slice(0, 8).map(t => `"${t}"*`).join(" ");
+}
+
+function listModels(db, { q = "", family = "", root = "", type = "", material = "", attention = false, sort = "name", cursor = null, limit = 60 } = {}) {
+  const where = ["m.hidden = 0", "EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')"];
+  const args = [];
+  const fq = ftsQuery(q);
+  if (fq) { where.push("m.id IN (SELECT rowid FROM model_fts WHERE model_fts MATCH ?)"); args.push(fq); }
+  if (family) { where.push("m.id IN (SELECT model_id FROM model_families WHERE printer_family = ?)"); args.push(family); }
+  if (root) { where.push("m.id IN (SELECT model_id FROM files WHERE root_id = ? AND entry_path = '')"); args.push(root); }
+  if (type && TYPES[type]) where.push(TYPES[type]);
+  if (material) {
+    where.push(`m.id IN (SELECT f.model_id FROM files f JOIN variants v ON v.file_id = f.id, json_each(v.filaments_json) j
+      WHERE upper(json_extract(j.value, '$.type')) = upper(?))`);
+    args.push(material);
+  }
+  let att = null;
+  if (attention) {
+    att = attentionIndex(db);
+    const ids = [...att.perModel.entries()].filter(([, rs]) => rs.some(r => r.level !== "info")).map(([id]) => id);
+    where.push("m.id IN (SELECT value FROM json_each(?))"); args.push(JSON.stringify(ids));
+  }
+  const s = SORTS[sort] || SORTS.name;
+  const total = db.prepare(`SELECT count(*) AS n FROM models m WHERE ${where.join(" AND ")}`).get(...args).n;
+  const page = Math.max(1, Math.min(PAGE_MAX, limit | 0 || 60));
+  const kw = [...where], ka = [...args];
+  const cur = decodeCursor(cursor);
+  if (cur) { kw.push(`(${s.col}, m.id) ${s.dir === "ASC" ? ">" : "<"} (?, ?)`); ka.push(cur[0], cur[1]); }
+  const rows = db.prepare(`SELECT m.id, m.uuid, m.name, m.designer, m.created_at, ${s.col} AS sortv FROM models m WHERE ${kw.join(" AND ")}
+    ORDER BY ${s.col} ${s.dir}, m.id ${s.dir} LIMIT ?`).all(...ka, page + 1);
+  const more = rows.length > page;
+  const pageRows = rows.slice(0, page);
+  const last = pageRows[pageRows.length - 1];
+  return { total, models: cards(db, pageRows, att), next: more && last ? encodeCursor([last.sortv, last.id]) : null };
+}
+const encodeCursor = v => Buffer.from(JSON.stringify(v)).toString("base64url");
+function decodeCursor(c) {
+  if (!c) return null;
+  try { const v = JSON.parse(Buffer.from(String(c), "base64url").toString("utf8")); return Array.isArray(v) && v.length === 2 && Number.isInteger(v[1]) ? v : null; } catch { return null; }
+}
+
+function cards(db, rows, att) {
+  const ids = rows.map(r => r.id);
+  if (!ids.length) return [];
+  const idsJson = JSON.stringify(ids);
+  const roots = rootsState(db);
+  const covers = coversFor(db, ids);
+  att = att || attentionIndex(db);
+  const counts = new Map(db.prepare(`SELECT f.model_id AS id, count(*) AS files,
+      sum(f.role = 'sliced') AS sliced, sum(f.role = 'project') AS projects, sum(f.role = 'source') AS sources,
+      sum(f.state = 'missing') AS missing, sum(f.state = 'unreadable') AS unreadable, group_concat(DISTINCT f.root_id) AS roots
+    FROM files f WHERE f.entry_path = '' AND f.model_id IN (SELECT value FROM json_each(?)) GROUP BY f.model_id`).all(idsJson).map(r => [r.id, r]));
+  const variants = new Map(db.prepare(`SELECT f.model_id AS id, count(*) AS n FROM variants v JOIN files f ON f.id = v.file_id
+    WHERE f.entry_path = '' AND f.model_id IN (SELECT value FROM json_each(?)) GROUP BY f.model_id`).all(idsJson).map(r => [r.id, r.n]));
+  const fams = new Map();
+  for (const r of db.prepare("SELECT model_id, printer_family, variant_count FROM model_families WHERE model_id IN (SELECT value FROM json_each(?)) ORDER BY variant_count DESC, printer_family").all(idsJson)) {
+    if (!fams.has(r.model_id)) fams.set(r.model_id, []);
+    fams.get(r.model_id).push({ key: r.printer_family, label: labelOf(r.printer_family), variants: r.variant_count });
+  }
+  const mats = new Map();
+  for (const r of db.prepare(`SELECT DISTINCT f.model_id, upper(json_extract(j.value, '$.type')) AS t FROM files f JOIN variants v ON v.file_id = f.id, json_each(v.filaments_json) j
+    WHERE f.model_id IN (SELECT value FROM json_each(?)) AND json_extract(j.value, '$.type') IS NOT NULL ORDER BY t`).all(idsJson)) {
+    if (!mats.has(r.model_id)) mats.set(r.model_id, []);
+    mats.get(r.model_id).push(r.t);
+  }
+  return rows.map(r => {
+    const c = counts.get(r.id) || {};
+    const rootIds = String(c.roots || "").split(",").filter(Boolean);
+    const offlineRoots = rootIds.filter(id => roots.get(id) && roots.get(id).offline);
+    const items = (att.perModel.get(r.id) || []);
+    const worst = items.reduce((w, i) => (w == null || LEVEL_RANK[i.level] < LEVEL_RANK[w] ? i.level : w), null);
+    return {
+      uuid: r.uuid, name: r.name, designer: r.designer || null,
+      cover: covers.get(r.id) || null,
+      files: c.files || 0, variants: variants.get(r.id) || 0, projects: c.projects || 0, sources: c.sources || 0,
+      families: fams.get(r.id) || [], materials: mats.get(r.id) || [],
+      locations: rootIds.map(id => ({ id, name: (roots.get(id) || {}).name || id })),
+      offline: offlineRoots.length ? (offlineRoots.length === rootIds.length ? "all" : "some") : null,
+      missing: c.missing || 0, unreadable: c.unreadable || 0,
+      attention: items.length ? { count: items.filter(i => i.level !== "info").length, info: items.filter(i => i.level === "info").length, level: worst } : null,
+    };
+  });
+}
+
+// Facets for the filters, over the whole visible Library.
+function facets(db) {
+  const vis = "SELECT m.id FROM models m WHERE m.hidden = 0 AND EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')";
+  const families = db.prepare(`SELECT printer_family AS key, count(DISTINCT model_id) AS n FROM model_families WHERE model_id IN (${vis}) GROUP BY printer_family ORDER BY n DESC, key`).all()
+    .map(r => ({ key: r.key, label: labelOf(r.key), count: r.n }));
+  const roots = db.prepare(`SELECT r.id, r.name, count(DISTINCT f.model_id) AS n FROM roots r JOIN files f ON f.root_id = r.id AND f.entry_path = '' WHERE f.model_id IN (${vis})
+    GROUP BY r.id ORDER BY r.name COLLATE NOCASE`).all().map(r => ({ id: r.id, name: r.name, count: r.n }));
+  const types = Object.entries(TYPES).map(([key, cond]) => ({ key, count: db.prepare(`SELECT count(*) AS n FROM models m WHERE m.id IN (${vis}) AND ${cond}`).get().n })).filter(t => t.count > 0);
+  const materials = db.prepare(`SELECT upper(json_extract(j.value, '$.type')) AS mat, count(DISTINCT f.model_id) AS n FROM files f JOIN variants v ON v.file_id = f.id, json_each(v.filaments_json) j
+    WHERE f.model_id IN (${vis}) AND json_extract(j.value, '$.type') IS NOT NULL GROUP BY mat ORDER BY n DESC, mat`).all().map(r => ({ key: r.mat, count: r.n }));
+  const total = db.prepare(`SELECT count(*) AS n FROM (${vis})`).get().n;
+  return { total, families, roots, types, materials };
+}
+
+// ---- the Model page ----
+
+function printerOf(db, key, v) {
+  const claims = db.prepare(`SELECT * FROM claims WHERE subject_type = 'variant' AND subject_key = ? AND relation = 'targets_printer'
+    ORDER BY CASE state WHEN 'applied' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END, CASE confidence WHEN 'exact' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`).all(key);
+  if (v.printer_decision_id) return { family: v.printer_family, label: labelOf(v.printer_family), state: "decision", confidence: null, evidence: [] };
+  const top = claims[0];
+  if (!top) return { family: null, label: null, state: "unknown", confidence: null, evidence: [] };
+  const ev = (json(top.evidence_json) || []).map(e => ({ signal: e.signal, value: e.value, source: e.source, strength: e.strength, family: e.family || null, familyLabel: labelOf(e.family) }));
+  return { family: top.object_key, label: labelOf(top.object_key), state: top.state, confidence: top.confidence, method: top.method, evidence: ev,
+    others: claims.slice(1).filter(c => c.object_key !== top.object_key).map(c => ({ family: c.object_key, label: labelOf(c.object_key), state: c.state, confidence: c.confidence })) };
+}
+
+function membershipOf(db, f, modelUuid) {
+  if (f.model_decision_id) {
+    const d = db.prepare("SELECT id, relation, polarity, reason, created_at FROM decisions WHERE id = ?").get(f.model_decision_id);
+    return { kind: "decision", decision: d ? { id: d.id, reason: d.reason, at: d.created_at } : null };
+  }
+  if (f.model_claim_key) {
+    const c = db.prepare("SELECT method, confidence, groups, evidence_json FROM claims WHERE claim_key = ?").get(f.model_claim_key);
+    if (c) {
+      const ev = (json(c.evidence_json) || []).filter(e => e.strength !== "weak")
+        .map(e => ({ signal: e.signal, value: e.value, group: e.group, strength: e.strength, with: e.with || null, compare: e.compare ? { a: e.compare.original_a, b: e.compare.original_b, normalized: e.compare.normalized_a } : null }));
+      // One line per kind of Evidence, not per partner file.
+      const seen = new Set(), uniq = [];
+      for (const e of ev) { const k = e.signal + "|" + e.value; if (!seen.has(k)) { seen.add(k); uniq.push(e); } }
+      return { kind: "automatic", method: c.method, confidence: c.confidence, groups: String(c.groups || "").split(",").filter(Boolean), evidence: uniq.slice(0, 6) };
+    }
+  }
+  return { kind: "single" };
+}
+
+function modelDetail(db, uuid) {
+  const m = db.prepare("SELECT * FROM models WHERE uuid = ?").get(uuid);
+  if (!m) return null;
+  const roots = rootsState(db);
+  const files = db.prepare(`SELECT f.*, ft.original AS title_original FROM files f LEFT JOIN file_titles ft ON ft.file_id = f.id
+    WHERE f.model_id = ? ORDER BY f.entry_path != '', f.role, f.root_id, f.rel_path, f.entry_path`).all(m.id);
+  const top = files.filter(f => !f.entry_path);
+  const att = attentionIndex(db);
+  const where = f => ({ root: f.root_id, rootName: (roots.get(f.root_id) || {}).name || f.root_id, path: f.rel_path, name: f.name });
+  const projectByFile = new Map(db.prepare(`SELECT * FROM projects WHERE file_id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(top.map(f => f.id))).map(p => [p.file_id, p]));
+  const platesByProject = new Map();
+  for (const p of db.prepare(`SELECT * FROM plates WHERE project_id IN (SELECT value FROM json_each(?)) ORDER BY plate_no`).all(JSON.stringify([...projectByFile.values()].map(p => p.id)))) {
+    if (!platesByProject.has(p.project_id)) platesByProject.set(p.project_id, []);
+    platesByProject.get(p.project_id).push(p);
+  }
+  const variantsByFile = new Map();
+  for (const v of db.prepare(`SELECT * FROM variants WHERE file_id IN (SELECT value FROM json_each(?)) ORDER BY plate_no`).all(JSON.stringify(top.map(f => f.id)))) {
+    if (!variantsByFile.has(v.file_id)) variantsByFile.set(v.file_id, []);
+    variantsByFile.get(v.file_id).push(v);
+  }
+  const fileView = f => ({ id: f.id, ...where(f), role: f.role, size: f.size, availability: availability(f, roots), thumb: f.thumb_key || null,
+    duplicates: top.filter(o => o.id !== f.id && o.content_key === f.content_key).map(o => where(o)), why: membershipOf(db, f, m.uuid) });
+
+  // Printable Variants: one per plain G-code, one per sliced plate.
+  const printables = [];
+  for (const f of top) for (const v of variantsByFile.get(f.id) || []) {
+    const key = v.plate_no == null ? f.content_key : f.content_key + "#" + v.plate_no;
+    const fil = (json(v.filaments_json) || []).filter(x => x && x.used !== false && !(x.usedG === 0)).map(x => ({ type: x.type || null, color: x.hex || x.color || null, grams: x.g != null ? x.g : x.usedG != null ? x.usedG : null, vendor: x.vendor || null }));
+    const pr = projectByFile.get(f.id);
+    const plate = pr && v.plate_no != null ? (platesByProject.get(pr.id) || []).find(p => p.plate_no === v.plate_no) : null;
+    const avail = availability(f, roots);
+    printables.push({
+      key, file: fileView(f), plate: v.plate_no, plateName: plate ? plate.name : null, thumb: (plate && plate.thumb_key) || f.thumb_key || null,
+      printer: printerOf(db, key, v),
+      profile: { printer: v.printer_settings_id || v.printer_model || null, print: v.print_settings_id || null },
+      slicer: v.slicer || null, slicerVersion: v.slicer_version || null,
+      filaments: fil, estSeconds: v.est_seconds, weightG: v.weight_g, copies: v.copies, colors: v.color_count, layerHeight: v.layer_height, nozzle: v.nozzle,
+      // Print/Queue go through the existing Send and Queue dialogs, which
+      // know only the G-code folder; other locations come with M7 (§12).
+      send: f.root_id !== "gcode" ? { ok: false, reason: "location" } : avail !== "ok" ? { ok: false, reason: avail } : { ok: true, path: f.rel_path },
+    });
+  }
+  const projects = top.filter(f => projectByFile.has(f.id)).map(f => {
+    const p = projectByFile.get(f.id);
+    // The printer the project is set up for, from its own settings — what
+    // the file says, not a Claim (an unsliced project has no Variant).
+    let setUpFor = null;
+    if (p.printer_model || p.printer_settings_id) {
+      const id = PrinterIdentity.identifyFile({ printerModel: p.printer_model, printerSettingsId: p.printer_settings_id, printerModelId: p.printer_model_id });
+      setUpFor = { family: id.family || null, label: id.label || p.printer_model || null, profile: p.printer_settings_id || null };
+    }
+    return { file: fileView(f), title: p.title, designer: p.designer, license: p.license, flavour: p.flavour, designModelId: p.design_model_id, setUpFor,
+      plates: (platesByProject.get(p.id) || []).map(pl => ({ plate: pl.plate_no, name: pl.name, printable: !!pl.sliced, thumb: pl.thumb_key || null,
+        objects: ((json(pl.objects_json) || {}).objects || []).slice(0, 12) })) };
+  });
+  const others = files.filter(f => !variantsByFile.has(f.id) && !projectByFile.has(f.id)).map(f => ({ ...fileView(f), entry: f.entry_path || null,
+    container: f.entry_path ? (top.find(t => t.id === f.container_id) || {}).name || null : null }));
+
+  // Suggestions involving this Model, and why they are only suggestions.
+  const suggestions = db.prepare("SELECT * FROM claims WHERE relation = 'same_model_as' AND state = 'suggested' AND (subject_key = ? OR object_key = ?)").all(m.uuid, m.uuid).map(c => {
+    const otherUuid = c.subject_key === m.uuid ? c.object_key : c.subject_key;
+    const o = db.prepare("SELECT uuid, name FROM models WHERE uuid = ?").get(otherUuid);
+    const ev = json(c.evidence_json) || [];
+    const missing = (ev.find(e => e.signal === "missing") || {}).value || null;
+    return { other: o ? { uuid: o.uuid, name: o.name } : null, method: c.method, groups: String(c.groups || "").split(",").filter(Boolean),
+      evidence: ev.filter(e => e.signal !== "missing").map(e => ({ signal: e.signal, value: e.value, group: e.group, strength: e.strength, between: e.between || null })).slice(0, 6),
+      missing };
+  });
+  const attention = (att.perModel.get(m.id) || []).map(i => reviewView(i, att));
+  const families = db.prepare("SELECT printer_family, variant_count FROM model_families WHERE model_id = ? ORDER BY variant_count DESC").all(m.id).map(r => ({ key: r.printer_family, label: labelOf(r.printer_family), variants: r.variant_count }));
+  const cover = coversFor(db, [m.id]).get(m.id) || null;
+  const gallery = [];
+  const seenThumb = new Set();
+  const addG = (thumb, label) => { if (thumb && !seenThumb.has(thumb)) { seenThumb.add(thumb); gallery.push({ thumb, label }); } };
+  if (cover) addG(cover.thumb, null);
+  for (const f of others) if (f.role === "image") addG(f.thumb, f.name);
+  for (const p of projects) for (const pl of p.plates) addG(pl.thumb, (p.title || p.file.name) + " · " + pl.plate);
+  for (const v of printables) addG(v.thumb, v.file.name);
+  return {
+    uuid: m.uuid, name: m.name, designer: m.designer, license: m.license, designModelId: m.design_model_id, sourceUrl: m.source_url, notes: m.notes,
+    cover, gallery: gallery.slice(0, 24), families,
+    counts: { files: top.length, printables: printables.length, projects: projects.length, others: others.length },
+    printables, projects, others, suggestions, attention,
+    locations: [...new Set(top.map(f => f.root_id))].map(id => ({ id, name: (roots.get(id) || {}).name || id, offline: !!(roots.get(id) || {}).offline })),
+  };
+}
+
+// ---- Needs attention ----
+
+function reviewView(r, att) {
+  const model = id => { const m = att.idToModel.get(id); return m ? { uuid: m.uuid, name: m.name } : null; };
+  const ev = r.evidence || {};
+  // Only what the UI needs to say it plainly; Diagnostics has the rest.
+  const detail = {};
+  switch (r.kind) {
+    case "folder_disagrees": Object.assign(detail, { folder: ev.folder, folderFamilies: (ev.folderFamilies || []).map(labelOf), fileFamily: labelOf(ev.fileFamily) }); break;
+    case "unknown_printer": Object.assign(detail, ev && ev.object_key ? { likely: labelOf(ev.object_key), confidence: ev.confidence, state: ev.state } : {}); break;
+    case "ambiguous_grouping":
+      if (/^ambiguous:generic:/.test(r.subject_key)) Object.assign(detail, { variant: "generic", terms: (ev.terms || []).map(t => String(t).replace(/^title:/, "")), files: (ev.files || []).length, reason: (ev.reason || [])[0] || null });
+      else if (/^ambiguous:file:/.test(r.subject_key)) Object.assign(detail, { variant: "file", candidates: (Array.isArray(ev) ? ev : []).map(x => x.model) });
+      else if (/^ambiguous:nested:/.test(r.subject_key)) Object.assign(detail, { variant: "nested", folder: ev.folder, subFolders: (ev.subFolders || []).length });
+      else Object.assign(detail, { variant: "anchor", model: ev.model, files: (ev.files || []).length });
+      break;
+    case "suggested_match": Object.assign(detail, { missing: ev.missing || null, method: (r.summary || "").replace(/^.*\(([^)]*)\)$/, "$1") }); break;
+    case "possible_duplicate": Object.assign(detail, { basis: ev.basis }); break;
+    case "decision_unmatched": case "file_changed": Object.assign(detail, { relation: ev.relation, lastSeenAt: ev.lastSeenAt || r.location }); break;
+    default: break;
+  }
+  return { id: r.id, kind: r.kind, level: r.level, subject: r.subject_key, location: r.location, otherLocation: r.other_location, confidence: r.confidence,
+    models: r.modelIds.map(model).filter(Boolean).slice(0, 8), modelCount: r.modelIds.length, detail, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+
+function attentionList(db) {
+  const att = attentionIndex(db);
+  const items = att.items.map(i => reviewView(i, att)).sort((a, b) => (LEVEL_RANK[a.level] - LEVEL_RANK[b.level]) || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+  const counts = { action: 0, review: 0, info: 0 };
+  for (const i of items) counts[i.level]++;
+  return { counts, items };
+}
+function attentionCounts(db) {
+  const counts = { action: 0, review: 0, info: 0 };
+  for (const r of db.prepare("SELECT kind, subject_key FROM review_items WHERE status = 'open'").all()) counts[levelOf(r)]++;
+  return counts;
+}
+
+module.exports = { listModels, facets, modelDetail, attentionList, attentionCounts, levelOf, ftsQuery };

@@ -104,6 +104,7 @@
       </div>
       <button class="gear" id="compactBtn" data-i18n-title="global.topbar.view_title_compact" title="Switch to compact view"><img src="/view-compact.svg" class="topbar-icon" data-i18n-alt="global.topbar.compact_alt" alt="Compact"></button>
       <button class="gear" id="bulkHeatBtn" data-i18n-title="global.topbar.bulk_heat_title" title="Heat multiple printers"><img src="/preheat-icon.svg" class="topbar-icon" data-i18n-alt="global.topbar.heat_alt" alt="Heat"></button>
+      <button class="gear" id="libraryBtn" data-i18n-title="library.title" title="Library" data-i18n-aria-label="library.title" aria-label="Library" aria-pressed="false"><img src="/library.svg" class="topbar-icon" data-i18n-alt="library.title" alt="Library"></button>
       <button class="gear" id="healthBtn" data-i18n-title="global.topbar.health_title" title="Printer health" data-i18n-aria-label="global.topbar.health_title" aria-label="Printer health"><img src="/health.svg" class="topbar-icon" data-i18n-alt="global.topbar.health_title" alt="Printer health"><span class="health-badge" id="healthBadge" style="display:none"></span></button>
       <!-- Shown only when Queue Management is enabled. -->
       <button class="gear" id="queueBtn" data-i18n-title="settings.tabs.queue" title="Queue Management" style="display:none"><img src="/queue.svg" class="topbar-icon" data-i18n-alt="settings.tabs.queue" alt="Queue Management"></button>
@@ -816,6 +817,8 @@
          idiom as #queueDashboard above). No auto-polling — everything is
          fetched once on open/printer-switch or via the Refresh button.
          Content rendered by openHealthPage()/renderHealthPage() in app.js. -->
+    <!-- The Library (M5): rendered by public/library.js. -->
+    <div class="library-page" id="libraryPage"></div>
     <div class="health-page" id="healthPage">
       <div class="health-page-hdr">
         <div class="health-picker" id="healthPicker"></div>
@@ -1500,5 +1503,6 @@
 <script src="/i18n.js"></script>
 <script src="/printer-identity.js"></script>
 <script src="/app.js"></script>
+<script src="/library.js"></script>
 </body>
 </html>

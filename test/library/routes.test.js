@@ -172,3 +172,53 @@ test("a location's error is withheld from those who don't manage locations: it c
   }
   assert.match((await s.call("admin", "GET", "/api/library/roots")).body.roots[0].lastError, /nas-box/, "admins still see why");
 });
+
+test("M5: every role with library.view browses the Library; no answer carries a location's folder, not even in an error", async t => {
+  const { gcodeFile } = require("./helpers/gcode");
+  const s = await server(t);
+  fs.writeFileSync(path.join(s.base, "gcode", "Beardie.gcode"), gcodeFile({ objects: [["Beardie.stl", 1]] }));
+  fs.writeFileSync(path.join(s.base, "gcode", "4x Beardie.gcode"), gcodeFile({ objects: [["Beardie.stl", 4]], bodyBytes: 3000 }));
+  assert.equal((await s.call("admin", "POST", "/api/library/roots/gcode/rescan")).status, 200);
+  let list;
+  for (let i = 0; i < 400; i++) {
+    await s.library._idle();
+    list = await s.call("view", "GET", "/api/library/models");
+    if (list.status === 200 && list.body.total === 1 && list.body.models[0].files === 2) break;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  // A network error names the share: it is a path too.
+  s.library._store.db.prepare("UPDATE roots SET last_error = ? WHERE id = 'gcode'").run("The storage at " + s.base + " is unreachable");
+  const uuid = list.body.models[0].uuid;
+  const base = s.base.replace(/\\/g, "\\\\");
+  for (const who of ["view", "regular", "admin", "implicit"]) {
+    for (const p of ["/api/library/overview", "/api/library/facets", "/api/library/models?q=beardie", "/api/library/models/" + uuid, "/api/library/attention"]) {
+      const r = await s.call(who, "GET", p);
+      assert.equal(r.status, 200, who + " " + p);
+      const txt = JSON.stringify(r.body);
+      assert.ok(!txt.includes(s.base) && !txt.includes(base), `${who} ${p} must not carry the location's folder`);
+    }
+  }
+  for (const who of ["view", "regular"]) {
+    const roots = await s.call(who, "GET", "/api/library/roots");
+    assert.equal(roots.body.roots[0].path, undefined);
+    assert.equal(roots.body.roots[0].lastError, undefined, who + ": an error message can name the share");
+  }
+  assert.match((await s.call("admin", "GET", "/api/library/roots")).body.roots[0].lastError, /unreachable/, "admins still see why");
+  assert.equal((await s.call(null, "GET", "/api/library/models")).status, 401);
+  const detail = await s.call("view", "GET", "/api/library/models/" + uuid);
+  assert.equal(detail.body.printables.length, 2);
+  assert.ok(detail.body.printables.every(v => v.send.ok && v.file.rootName && !("rootPath" in v.file)));
+  assert.equal((await s.call("view", "GET", "/api/library/models/00000000-0000-0000-0000-000000000000")).status, 404);
+});
+
+test("M5: the Library has no editing endpoints (merge, split, rename, hide and review are M6)", async t => {
+  const s = await server(t);
+  const u = "00000000-0000-0000-0000-000000000001";
+  for (const [m, p] of [["PATCH", "/api/library/models/" + u], ["DELETE", "/api/library/models/" + u], ["POST", "/api/library/models/" + u + "/merge"],
+    ["POST", "/api/library/decisions"], ["POST", "/api/library/review/1"], ["PUT", "/api/library/models/" + u + "/cover"]]) {
+    for (const who of ["view", "admin"]) {
+      const r = await fetch(s.url + p, { method: m, headers: { "content-type": "application/json", "x-as": who }, body: "{}" });
+      assert.equal(r.status, 404, `${who} ${m} ${p}`);
+    }
+  }
+});

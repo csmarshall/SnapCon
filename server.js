@@ -489,6 +489,14 @@ app.get(/^\/health(\/.*)?$/i, (req, res) => {
   try { res.type("html").send(fs.readFileSync(path.join(ASSET_DIR, "public", "index.html"), "utf8")); }
   catch (e) { res.status(500).send("index.html not found"); }
 });
+// /library, /library/m/<uuid>, /library/attention — the Library (M5), same
+// page and its own small router, like /health. /library/diagnostics is the
+// admin Diagnostics page (its API is admin-only; the page itself is static).
+app.get(/^\/library\/diagnostics\/?$/i, (req, res) => res.redirect("/library-diagnostics.html"));
+app.get(/^\/library(\/(m\/[0-9a-f-]{36}|attention)?)?\/?$/i, (req, res) => {
+  try { res.type("html").send(fs.readFileSync(path.join(ASSET_DIR, "public", "index.html"), "utf8")); }
+  catch (e) { res.status(500).send("index.html not found"); }
+});
 
 // fetchTimeout/fetchJSONTimeout/baseUrl/pickIface are generic HTTP helpers
 // (not printer-protocol-specific) shared with connectors/ — see

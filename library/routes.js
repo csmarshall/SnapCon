@@ -62,6 +62,20 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
   app.get("/api/library/diagnostics/scans", requireAuth, need("library.diagnostics"), (req, res) =>
     send(res, () => library.scanReport()));
 
+  // M5: the Library. Everyone with library.view browses; nothing here edits
+  // (M6), and no location's folder path is part of any answer.
+  const str = (v, max = 200) => (typeof v === "string" ? v.slice(0, max) : "");
+  app.get("/api/library/overview", requireAuth, need("library.view"), (req, res) => send(res, () => library.overview()));
+  app.get("/api/library/facets", requireAuth, need("library.view"), (req, res) => send(res, () => library.facets()));
+  app.get("/api/library/models", requireAuth, need("library.view"), (req, res) =>
+    send(res, () => library.browse({
+      q: str(req.query.q), family: str(req.query.printer, 80), root: str(req.query.location, 80), type: str(req.query.type, 20),
+      material: str(req.query.material, 40), attention: req.query.attention === "1", sort: str(req.query.sort, 10) || "name",
+      cursor: str(req.query.cursor, 400) || null, limit: Math.max(1, Math.min(120, parseInt(req.query.limit, 10) || 60)),
+    })));
+  app.get("/api/library/models/:uuid", requireAuth, need("library.view"), (req, res) => send(res, () => library.model(req.params.uuid)));
+  app.get("/api/library/attention", requireAuth, need("library.view"), (req, res) => send(res, () => library.attention()));
+
   // Thumbnails are content-addressed, so a key never changes what it names.
   app.get("/api/library/thumbs/:key", requireAuth, need("library.view"), (req, res) => {
     const t = library.thumbFile(req.params.key);

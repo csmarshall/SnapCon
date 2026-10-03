@@ -1339,6 +1339,8 @@ function applyRoleUI(){
   // fleet card itself; only Settings (an exclusive full-page takeover)
   // hides it, same as bulkHeatBtn/filesBtn above.
   if($("healthBtn")) $("healthBtn").style.display = settingsOpen ? "none" : "";
+  // The Library is browsing for every role (library.view); edits are M6.
+  if($("libraryBtn")) $("libraryBtn").style.display = settingsOpen ? "none" : "";
   if(USERS_ENABLED && CURRENT_USER){
     // First name if set, else fall back to the login name.
     const uname=CURRENT_USER.firstName||CURRENT_USER.loginName;
@@ -1424,6 +1426,8 @@ async function init(){
   // not this check again.
   const healthMatch=location.pathname.match(/^\/health\/?(\d*)$/i);
   if(healthMatch) openHealthPage(healthMatch[1]?parseInt(healthMatch[1],10):null);
+  // /library, /library/m/<uuid>, /library/attention (public/library.js).
+  if(window.LibraryPage) LibraryPage.openFromLocation();
   // First fleet data is in (or failed) — fade the splash out and drop it.
   const splash=$("splash");
   if(splash){ splash.classList.add("hide"); setTimeout(()=>splash.remove(), 600); }
@@ -3035,6 +3039,7 @@ function attentionReasonLabel(reason){ return ATTENTION_REASON_LABEL_KEYS[reason
 function openQueueDashboard(){
   if($("queueDashboard").classList.contains("show")) return;
   closeHealthPage();
+  if(window.LibraryPage) LibraryPage.close();
   $("queueDashboard").classList.add("show");
   // Only the Fleet-specific CONTENT is swapped out for the dashboard (can't
   // show the printer grid and the dashboard at once) — every topbar
@@ -3093,6 +3098,7 @@ const HEALTH_ATTENTION_CACHE={};
 
 function openHealthPage(printerId){
   closeQueueDashboard();
+  if(window.LibraryPage) LibraryPage.close();
   $("healthPage").classList.add("show");
   document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display="none");
   $("healthBtn").title=t("global.topbar.back_to_fleet_title");
@@ -8701,6 +8707,7 @@ $("gear").addEventListener("click",()=>{
   // underneath.
   closeQueueDashboard();
   closeHealthPage();
+  if(window.LibraryPage) LibraryPage.close();
   const open=$("setup").classList.toggle("show");
   document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display=open?"none":"");
   $("gear").querySelector("img").src = open ? "/back.svg" : "/gear.svg";
@@ -8711,6 +8718,7 @@ $("gear").addEventListener("click",()=>{
   $("filesBtn").style.display = open ? "none" : "";
   if($("bulkHeatBtn")) $("bulkHeatBtn").style.display = open ? "none" : "";
   if($("healthBtn")) $("healthBtn").style.display = open ? "none" : "";
+  if($("libraryBtn")) $("libraryBtn").style.display = open ? "none" : "";
   if($("queueBtn")) $("queueBtn").style.display = "none"; // re-shown by applyRoleUI() below once Settings' own state is settled
   if(open){
     document.body.classList.remove("showfiles"); loadGroupsUI().then(loadUsersUI); loadQueueManagementUI();
