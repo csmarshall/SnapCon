@@ -102,7 +102,8 @@ test("two independent groups at medium group automatically; one group is only a 
   const { db } = env;
   const a = file(db, { rel: "4x Beardie_PLA_3h55m.gcode", objects: ["Beardie.stl"] });
   const b = file(db, { rel: "Beardie @ 160.gcode", objects: ["Beardie.stl"] });
-  const c = file(db, { rel: "beardie.3mf", role: "project" });                       // title only
+  // Title (medium) + some objects in common (weak): still one group.
+  const c = file(db, { rel: "beardie.3mf", role: "project", objects: ["Beardie.stl", "Rock.stl"], origin: "model_settings" });
   env.run();
   assert.equal(modelOf(db, a.loc), modelOf(db, b.loc), "object names + title: two independent groups");
   const claim = memberClaim(db, a.key);
@@ -116,6 +117,8 @@ test("two independent groups at medium group automatically; one group is only a 
   assert.equal(sugg[0].state, "suggested");
   const r = report(env).suggestions[0];
   assert.match(r.missing, /only one independence group \(filename\)/);
+  assert.deepEqual(r.groups, ["filename"], "weak Evidence is listed but is not a group");
+  assert.ok(r.evidence.some(e => e.group === "internal-content" && e.strength === "weak"));
   assert.equal(openReviews(db, "suggested_match").length, 1);
 });
 

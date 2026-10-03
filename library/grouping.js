@@ -234,7 +234,10 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     } else if (evidence.length) {
       cls = "record"; confidence = "low"; method = evidence.map(e => e.signal).join("+"); missing = "weak Evidence only: it explains, it never corroborates";
     } else { cls = "none"; confidence = null; method = null; missing = ignored.length ? "only generic or ignored Evidence" : "no Evidence"; }
-    edges.push({ a: p.a, b: p.b, cls, confidence, method, groups: [...new Set(evidence.map(e => e.group))].sort(), evidence, conflicts, ignored, missing, via: [...p.via].sort() });
+    // groups: the independence groups that COUNT (medium or stronger, or
+    // identity); weak Evidence stays in the list but is not a group.
+    const counted = [...new Set(evidence.filter(e => atLeastMedium(e.strength) || e.allowsAuto).map(e => e.group))].sort();
+    edges.push({ a: p.a, b: p.b, cls, confidence, method, groups: counted, evidence, conflicts, ignored, missing, via: [...p.via].sort() });
   }
 
   // ---- decisions as constraints ----
