@@ -20,7 +20,8 @@ test("printer-like folders come from the resolver's own family names", () => {
   for (const p of ["gcode:5M PRO", "gcode:AD5X", "gcode:I7", "gcode:U1", "gcode:V3 Plus", "u1:U1"]) assert.equal(c[p].class, "printer_family_like", p);
   assert.deepEqual(c["gcode:5M PRO"].evidence[0].families, ["flashforge-5m-pro"]);
   assert.deepEqual(c["gcode:V3 Plus"].evidence[0].families, ["creality-ender3-v3-plus"]);
-  assert.equal(c["gcode:K1C"].class, "unknown", "the resolver knows no K1C family, and no separate list adds one");
+  assert.equal(c["gcode:K1C"].class, "printer_family_like", "through the resolver's K1C family, not a folder-only list");
+  assert.deepEqual(c["gcode:K1C"].evidence[0].families, ["creality-k1c"]);
   assert.equal(c["gcode:AD5X"].evidence[0].strength, "none", "never Evidence for a file's printer");
 });
 
@@ -49,5 +50,5 @@ test("familiesLikeName: a run of a label's model words with a letter and a digit
   assert.deepEqual(f("U1"), ["snapmaker-u1"]);
   assert.deepEqual(f("V3Plus"), ["creality-ender3-v3-plus"]);
   assert.deepEqual(f("5M").sort(), ["flashforge-5m", "flashforge-5m-pro"]);
-  for (const n of ["K1C", "3", "200", "Plus", "Pro", "Cinderwin 3D", ""]) assert.deepEqual(f(n), [], n);
+  for (const n of ["3", "200", "Plus", "Pro", "KE", "Cinderwin 3D", ""]) assert.deepEqual(f(n), [], n);
 });

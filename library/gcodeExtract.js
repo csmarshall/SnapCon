@@ -16,7 +16,9 @@ const { parseGcodeMap, _internal: { matchCfgLine } } = require("../parser");
 // Bump when the extraction changes what it reads: files indexed under an older
 // version are read again on the next scan.
 //   2  Creality thumbnail block forms recognised
-const RULE_VERSION = 2;
+//   3  the resolver learned the Creality K1C and Ender-3 V3 KE: printer
+//      Claims are derived again from each file's own fields
+const RULE_VERSION = 3;
 const HEAD_INITIAL = 512 * 1024;
 const TAIL_INITIAL = 256 * 1024;
 const WINDOW_MAX = 3 * 1024 * 1024;

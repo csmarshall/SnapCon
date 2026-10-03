@@ -49,7 +49,8 @@ const fileOf = (lib, rel) => lib.diagnosticsRaw({}).files.find(f => f.path === r
 
 const U1 = gcodeFile({ printerModel: "Snapmaker U1", settingsId: "PixelPrints U1 (0.4mm)", objects: [["Kitty.stl", 2]] });
 const FIVE_M = gcodeFile({ generic: true, settingsId: "Flashforge Adventurer 5M Pro 0.4 Nozzle benchy", objects: [] });
-const KE = gcodeFile({ printerModel: "Creality Ender-3 V3 KE", settingsId: "Creality Ender-3 V3 KE 0.4 nozzle" });
+// A printer the resolver does not know (the KE was the example until it was added).
+const KE = gcodeFile({ printerModel: "Creality Ender-5 S1", settingsId: "Creality Ender-5 S1 0.4 nozzle" });
 
 test("first scan: every file indexed; printer from the file's own fields, never its folder", async t => {
   const { lib } = await make(t, { files: {
@@ -429,4 +430,42 @@ test("a thumbnail still used by an identical file is kept when the other copy ch
   const s = await rescan(lib);
   assert.equal(s.thumbsRemoved, 0);
   assert.ok(fs.existsSync(lib.thumbFile(key).file), "b.gcode still shows it");
+});
+
+// ---- a printer-family folder is what the folder says, never evidence for the file ----
+
+test("HollowLog: a K1C folder is recognised as a K1C folder, the file targets the V3 Plus from its own metadata, and they disagree", async t => {
+  const V3PLUS = gcodeFile({ printerModel: "Creality Ender-3 V3 Plus", settingsId: "Creality Ender-3 V3 Plus 0.4 nozzle", compatible: "Creality Ender-3 V3 Plus 0.4 nozzle", objects: [["HollowLog.stl", 1]] });
+  // The same bytes in a K1C folder and in a folder that says nothing.
+  const { lib } = await make(t, { files: { "K1C/HollowLog (5h42m).gcode": V3PLUS, "misc/HollowLog copy.gcode": V3PLUS } });
+  await scanDone(lib);
+  const inK1C = fileOf(lib, "K1C/HollowLog (5h42m).gcode"), neutral = fileOf(lib, "misc/HollowLog copy.gcode");
+
+  assert.deepEqual(inK1C.folders, [{ path: "K1C", class: "printer_family_like", method: "resolver_family_name", families: ["creality-k1c"] }]);
+  assert.equal(inK1C.printer.family, "creality-ender3-v3-plus");
+  assert.equal(inK1C.printer.confidence, "high");
+  assert.equal(inK1C.printer.state, "applied");
+  assert.ok(inK1C.printer.evidence.every(e => e.source === "gcode:config"), "Evidence is the file's own config, nothing from its folder");
+  assert.ok(!JSON.stringify(inK1C.printer.evidence).includes("K1C"), "the folder name appears nowhere in the Claim's Evidence");
+  assert.deepEqual(inK1C.folderDisagrees, { folder: "K1C", folderFamilies: ["creality-k1c"], fileFamily: "creality-ender3-v3-plus", fileConfidence: "high" });
+
+  // The K1C folder neither raised nor lowered anything: the Claim is the very
+  // same one the file gets in a folder that says nothing.
+  assert.equal(inK1C.printer.claimKey, neutral.printer.claimKey);
+  const claims = lib._store.db.prepare("SELECT * FROM claims WHERE relation = 'targets_printer'").all();
+  assert.equal(claims.length, 1, "one Claim for the content, wherever it sits");
+  assert.equal(neutral.folderDisagrees, null);
+});
+
+test("a printer folder that agrees with a weak file does not strengthen it", async t => {
+  // Generic printer_model; only the settings name the 5M Pro: medium, suggested.
+  const { lib } = await make(t, { files: { "5M PRO/skelly.gcode": FIVE_M, "misc/skelly.gcode": FIVE_M } });
+  await scanDone(lib);
+  for (const p of ["5M PRO/skelly.gcode", "misc/skelly.gcode"]) {
+    const f = fileOf(lib, p);
+    assert.equal(f.printer.family, "flashforge-5m-pro", p);
+    assert.equal(f.printer.confidence, "medium", p);
+    assert.equal(f.printer.state, "suggested", `${p}: the agreeing folder is no corroboration`);
+  }
+  assert.equal(fileOf(lib, "5M PRO/skelly.gcode").folderDisagrees, null);
 });

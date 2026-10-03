@@ -91,9 +91,25 @@ test("no fields means nothing to detect; unrecognised fields keep the brand-leve
 });
 
 test("the K1 pattern does not claim a K1C or K1 Max", () => {
-  assert.equal(PI.familyOf("Creality K1C 0.4 nozzle"), null);
+  assert.equal(PI.familyOf("Creality K1C 0.4 nozzle"), "creality-k1c", "the K1C is its own family, never the K1");
   assert.equal(PI.familyOf("Creality K1 Max"), null);
   assert.equal(PI.familyOf("Creality@K1"), "creality-k1");
+});
+
+test("the Ender-3 V3 KE is its own family, and is not the V3 Plus", () => {
+  // The owner's real file ([CP] TinyTREX).
+  const id = PI.identifyFile({ printerModel: "Creality Ender-3 V3 KE", printerSettingsId: "PixelPrints - V3 KE (0.4)",
+    printCompatiblePrinters: '"Creality Ender-3 V3 KE 0.2 nozzle";"Creality Ender-3 V3 KE 0.4 nozzle"' });
+  assert.equal(id.family, "creality-ender3-v3-ke");
+  assert.equal(id.confidence, "high");
+  assert.equal(PI.familyOf("Creality Ender-3 V3 Plus"), "creality-ender3-v3-plus");
+  assert.equal(PI.compare(id, PI.identifyPrinter({ model: "Ender-3 V3 Plus", brand: "Creality" })).status, "model_mismatch");
+});
+
+test("folder labels resolve through the same families: K1C and V3 KE", () => {
+  assert.deepEqual(PI.familiesLikeName("K1C"), ["creality-k1c"]);
+  assert.deepEqual(PI.familiesLikeName("V3 KE"), ["creality-ender3-v3-ke"]);
+  assert.deepEqual(PI.familiesLikeName("K1"), ["creality-k1"]);
 });
 
 test("the 5M and 5M Pro are told apart", () => {
