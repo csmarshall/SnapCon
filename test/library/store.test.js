@@ -13,6 +13,8 @@ const schema = require("../../library/schema");
 const quiet = { log() {}, warn() {}, error() {} };
 const tmpBase = () => fs.mkdtempSync(path.join(os.tmpdir(), "snapcon-lib-"));
 const open = (baseDir, extra = {}) => createLibraryStore({ baseDir, log: quiet, ...extra }).open();
+// The schema as it was at version 1 (before the identity cache), for upgrade tests.
+const V1 = { ...schema, SCHEMA_VERSION: 1, IDENTITY_SQL: "" };
 let clock = Date.parse("2026-10-01T03:00:00Z");
 const tick = () => (clock += 1000);
 
@@ -137,8 +139,8 @@ test("without node:sqlite the Library is unavailable, not a crash", () => {
 
 test("an upgrade takes a pre-migration snapshot, then migrates inside a transaction", () => {
   const base = tmpBase();
-  const v1 = open(base, { now: tick }); seed(v1.db); v1.close();
-  const v2schema = { ...schema, SCHEMA_VERSION: 2 };
+  const v1 = open(base, { now: tick, schema: V1, migrations: {} }); seed(v1.db); v1.close();
+  const v2schema = { ...V1, SCHEMA_VERSION: 2 };
   const migrations = { 2: db => db.exec("ALTER TABLE models ADD COLUMN nickname TEXT") };
   const s = open(base, { now: tick, schema: v2schema, migrations });
   assert.equal(s.available, true);
@@ -154,10 +156,10 @@ test("an upgrade takes a pre-migration snapshot, then migrates inside a transact
 
 test("a failed migration rolls back and leaves the Library unavailable at the old version", () => {
   const base = tmpBase();
-  const v1 = open(base, { now: tick }); seed(v1.db); v1.close();
-  const s = open(base, { now: tick, schema: { ...schema, SCHEMA_VERSION: 2 }, migrations: { 2: db => { db.exec("ALTER TABLE models ADD COLUMN x TEXT"); throw new Error("boom"); } } });
+  const v1 = open(base, { now: tick, schema: V1, migrations: {} }); seed(v1.db); v1.close();
+  const s = open(base, { now: tick, schema: { ...V1, SCHEMA_VERSION: 2 }, migrations: { 2: db => { db.exec("ALTER TABLE models ADD COLUMN x TEXT"); throw new Error("boom"); } } });
   assert.equal(s.available, false);
-  const again = open(base);
+  const again = open(base, { schema: V1, migrations: {} });
   assert.equal(again.schemaVersion(), 1);
   assert.throws(() => again.db.prepare("SELECT x FROM models").get(), /no such column/);
   again.close();
@@ -219,4 +221,38 @@ test("after a backup is refused for failing its integrity check, the next start 
   assert.equal(s2.db.prepare("SELECT name FROM models").get().name, "Beardie");
   assert.equal(fs.existsSync(path.join(base, "library-data", "integrity-check-requested")), false, "the request is used once");
   s2.close();
+});
+
+test("migration 2 adds the identity cache, seeded from the full hashes the index already has", () => {
+  const base = tmpBase();
+  const v1 = open(base, { now: tick, schema: V1, migrations: {} });
+  seed(v1.db);
+  v1.db.prepare("INSERT INTO roots (id, name, path, created_at) VALUES ('r', 'r', 'x', 1)").run();
+  const ins = v1.db.prepare(`INSERT INTO files (root_id, rel_path, name, ext, role, size, mtime_ms, quick_fp, sha256, md5, content_key, first_seen, last_seen)
+    VALUES ('r', ?, ?, 'gcode', 'sliced', 10, 1, ?, ?, ?, ?, 1, 1)`);
+  ins.run("a.gcode", "a.gcode", "fpA", "A".repeat(64), "mA", "A".repeat(64));
+  ins.run("b.gcode", "b.gcode", "fpB", null, null, "q:fpB");
+  v1.close();
+  const s = open(base, { now: tick });
+  assert.equal(s.available, true);
+  assert.equal(s.schemaVersion(), schema.SCHEMA_VERSION);
+  assert.deepEqual(s.db.prepare("SELECT quick_fp, size, sha256, md5 FROM identity_cache").all().map(r => ({ ...r })),
+    [{ quick_fp: "fpA", size: 10, sha256: "A".repeat(64), md5: "mA" }], "only verified hashes");
+  assert.equal(s.db.prepare("SELECT name FROM models").get().name, "Beardie", "authored data untouched");
+  s.close();
+});
+
+test("a derived rebuild keeps the identity cache; the explicit reset empties only the cache", () => {
+  const base = tmpBase();
+  const s = open(base);
+  seed(s.db);
+  s.db.prepare("INSERT INTO identity_cache (quick_fp, size, sha256, md5, verified_at) VALUES ('fp', 1, 'S', 'M', 1)").run();
+  const decisions = s.db.prepare("SELECT count(*) AS n FROM decisions").get().n;
+  s.rebuildDerived();
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM identity_cache").get().n, 1, "a normal rebuild keeps it");
+  assert.deepEqual(s.resetIdentityCache(), { removed: 1 });
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM identity_cache").get().n, 0);
+  assert.equal(s.db.prepare("SELECT name FROM models").get().name, "Beardie", "Models stay");
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM decisions").get().n, decisions, "Decisions stay");
+  s.close();
 });

@@ -454,6 +454,16 @@ CREATE TABLE permission_grants (
   subject_id TEXT NOT NULL, capability TEXT NOT NULL, allow INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (subject_type, subject_id, capability));
 
+-- ============================ IDENTITY CACHE (durable) ============================
+-- Neither authored nor derived (§4.6): what full hashes verified. Kept by a
+-- normal rebuild; emptied only by the explicit identity reset.
+
+CREATE TABLE identity_cache (
+  quick_fp TEXT NOT NULL, size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL, md5 TEXT,
+  verified_at INTEGER NOT NULL,              -- when the full hash last confirmed it
+  PRIMARY KEY (quick_fp, size, sha256));
+
 -- ================================ DERIVED (rebuildable) ================================
 
 CREATE TABLE scan_runs (

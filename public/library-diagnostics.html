@@ -164,6 +164,7 @@ function summary() {
     card("member_of by method", s.memberOfByMethod), card("member_of by confidence", s.memberOfByConfidence),
     `<div class="card"><h3>Cases</h3>${kv("Suggestions", s.suggestions)}${kv("Ambiguous files", s.ambiguousFiles)}${kv("Protected generic names", s.protectedGeneric)}${kv("Duplicates", s.duplicates)}${kv("Unresolved sources", s.unresolvedSources)}</div>`,
     card("Open review items", s.reviewsByKind),
+    s.identity ? `<div class="card"><h3>Content identity</h3>${kv("Verified by full hash", s.identity.verified)}${kv("Restored from cache, unverified", s.identity.restoredUnverified)}${kv("Quick fingerprint only", s.identity.quickOnly)}${kv("Identity cache entries", s.identity.cacheEntries)}${kv("Ambiguous fingerprints", s.identity.ambiguousFingerprints.length)}</div>` : "",
     `<div class="card"><h3>Decisions</h3>${kv("Active", s.decisions.active)}${kv("Superseded", s.decisions.total - s.decisions.active)}${Object.entries(s.decisions.byRelation).map(([k, v]) => kv(k, v)).join("")}</div>`,
   ].join("");
 }
@@ -177,7 +178,7 @@ function fileRow(f) {
   const proj = f.project ? `<span class="path">3MF ${esc(f.project.flavour)} · ${f.project.plates} plate(s), ${f.project.printablePlates} printable${f.project.designer ? " · " + esc(f.project.designer) : ""}${f.project.designModelId ? " · design " + esc(f.project.designModelId) : ""}</span>` : "";
   const lin = f.lineage.length ? `<details><summary>Lineage (${f.lineage.length})</summary><ul class="ev">${f.lineage.map(l => `<li><span class="k">${esc(l.relation)} ${l.direction === "out" ? "→" : "←"}</span> ${esc(l.other)} ${pill(l.state, l.confidence + " · " + l.state)} <span class="k">${esc(l.method)}</span></li>`).join("")}</ul></details>` : "";
   return `<tr><td class="file"><span class="name" title="${esc(base(f.location))}">${esc(stem(base(f.location)))}</span><span class="path" title="${esc(f.location)}">${esc(f.location)}</span>
-      <span class="path">${esc(f.role)}${f.state !== "present" ? " · " + esc(f.state) : ""}</span>${proj}${titleInfo}${lin}</td>
+      <span class="path">${esc(f.role)}${f.state !== "present" ? " · " + esc(f.state) : ""}${f.identity && f.identity !== "verified" ? " · " + esc(f.identity) : ""}</span>${proj}${titleInfo}${lin}</td>
     <td>${printers || '<span class="sub">—</span>'}</td>
     <td>${pill(conf, conf === "none" ? "standalone" : conf)} <span class="sub">${esc(w.method)}</span>${w.note ? `<div class="why">${esc(w.note)}</div>` : ""}
       ${w.decision ? `<div class="why">Decision #${esc(w.decision)}</div>` : ""}
@@ -220,6 +221,8 @@ function ambiguousTab() {
       <details><summary>Files</summary><ul class="ev">${p.files.map(f => `<li>${esc(f)}</li>`).join("")}</ul></details></div>`).join("") +
     `<h2>Files that match several Models (${amb.length})</h2>` + amb.map(x => `<div class="item"><div class="path">${esc(x.file)}</div><div class="why">Equally like: ${esc(x.models.join(", "))} — nothing was suggested</div></div>`).join("") +
     `<h2>Folders not used as model folders (${nested.length})</h2>` + nested.map(x => `<div class="item"><div class="path">${esc(x.folder)}</div><div class="why">${esc(x.status)}: ${esc(x.reason)}</div></div>`).join("") +
+    `<h2>Fingerprints the identity cache cannot use (${(DATA.summary.identity ? DATA.summary.identity.ambiguousFingerprints : []).length})</h2><div class="sub">Several verified contents share the fingerprint, so it restores no identity; the full hash decides.</div>` +
+    (DATA.summary.identity ? DATA.summary.identity.ambiguousFingerprints : []).filter(hasText).map(x => `<div class="item"><div class="path">${esc(x.file || x.quickFp)}</div><div class="why">${esc(x.keys.length)} contents: ${esc(x.keys.map(k => k.slice(0, 12)).join(", "))}</div></div>`).join("") +
     `<h2>Common names too widely shared to compare (${blocks.length})</h2>` + blocks.map(x => `<div class="item">${esc(x.kind)}: <b>${esc(x.value)}</b> — ${esc(x.nodes)} files; ${esc(x.reason)}</div>`).join("") +
     `<h2>Source references that resolve to nothing (${unres.length})</h2><div class="sub">Weak: path text only, never grouping Evidence.</div>` +
     `<table><colgroup><col style="width:55%"><col style="width:45%"></colgroup><thead><tr><th>File</th><th>Reference</th></tr></thead><tbody>${unres.slice(0, shown).map(x => `<tr><td class="file"><span class="path" title="${esc(x.file)}">${esc(x.file)}</span></td><td class="file"><span class="path" title="${esc(x.reference)}">${esc(x.reference)}</span></td></tr>`).join("")}</tbody></table>` +

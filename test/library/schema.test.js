@@ -20,13 +20,14 @@ const specSql = (() => {
 const statements = sql => sql.replace(/--[^\n]*/g, "").split(";").map(s => s.replace(/\s+/g, " ").trim()).filter(Boolean).sort();
 
 test("library/schema.js is the specification's SQL, statement for statement", () => {
-  assert.deepEqual(statements(schema.AUTHORED_SQL + ";" + schema.DERIVED_SQL), statements(specSql));
+  assert.deepEqual(statements(schema.AUTHORED_SQL + ";" + schema.IDENTITY_SQL + ";" + schema.DERIVED_SQL), statements(specSql));
 });
 
 function freshDb() {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(schema.AUTHORED_SQL);
+  db.exec(schema.IDENTITY_SQL);
   db.exec(schema.DERIVED_SQL);
   return db;
 }
@@ -34,7 +35,7 @@ function freshDb() {
 test("it creates exactly the authored and derived tables it lists", () => {
   const db = freshDb();
   const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'model_fts_%'").all().map(r => r.name).sort();
-  assert.deepEqual(tables, [...schema.AUTHORED_TABLES, ...schema.DERIVED_TABLES].sort());
+  assert.deepEqual(tables, [...schema.AUTHORED_TABLES, ...schema.IDENTITY_TABLES, ...schema.DERIVED_TABLES].sort());
 });
 
 test("no authored table has a foreign key into a derived table (§4.6 rule 1)", () => {
@@ -64,5 +65,13 @@ test("the derived drop order drops every child before its parent", () => {
         assert.ok(pos(child) < pos(fk.table), `${child} must be dropped before ${fk.table}`);
       }
     }
+  }
+});
+
+test("the identity cache is neither authored nor derived: a rebuild never drops it, and it references nothing", () => {
+  const db = freshDb();
+  for (const t of schema.IDENTITY_TABLES) {
+    assert.ok(!schema.DERIVED_TABLES.includes(t) && !schema.AUTHORED_TABLES.includes(t), t);
+    assert.deepEqual(db.prepare(`PRAGMA foreign_key_list(${t})`).all(), [], t + " has no foreign keys");
   }
 });

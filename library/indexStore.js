@@ -141,8 +141,13 @@ function writeFile(db, f, { now, thumbsDir }) {
   return tx(db, () => {
     const prev = db.prepare("SELECT id, quick_fp, sha256, md5, content_key, size, thumb_key FROM files WHERE root_id = ? AND rel_path = ? AND entry_path = ''").get(f.rootId, f.relPath);
     const sameContent = prev && prev.quick_fp === f.quickFp && prev.size === f.size;
-    const ck = sameContent ? prev.content_key : quickKey(f.quickFp);
-    const sha256 = sameContent ? prev.sha256 : null, md5 = sameContent ? prev.md5 : null;
+    // New or changed content: the identity cache may know its verified key
+    // (after a rebuild, before the re-hash). sha256 stays NULL — the file is
+    // not verified until its own full hash — so the hash still comes.
+    const known = sameContent ? null : recoverIdentity(db, f.quickFp, f.size);
+    const ck = sameContent ? prev.content_key : known ? known.sha256 : quickKey(f.quickFp);
+    const sha256 = sameContent ? prev.sha256 : null, md5 = sameContent ? prev.md5 : known ? known.md5 : null;
+    if (known) db.prepare("INSERT OR REPLACE INTO content_aliases (alias, content_key) VALUES (?, ?)").run(quickKey(f.quickFp), known.sha256);
     const mtime = Math.floor(f.mtimeMs);
     const x3 = f.threemf || null;
     const extracted = !!(f.extract || x3);
@@ -172,9 +177,9 @@ function writeFile(db, f, { now, thumbsDir }) {
           thumbKey, extracted ? 0 : 1, state, now, prev.id);
       id = prev.id;
     } else {
-      id = Number(db.prepare(`INSERT INTO files (root_id, rel_path, entry_path, name, ext, role, size, mtime_ms, quick_fp, content_key,
-          meta_version, meta_json, thumb_key, state, first_seen, last_seen) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(f.rootId, f.relPath, f.name, f.ext, role, f.size, mtime, f.quickFp, ck, f.metaVersion || 0, meta ? JSON.stringify(meta) : null,
+      id = Number(db.prepare(`INSERT INTO files (root_id, rel_path, entry_path, name, ext, role, size, mtime_ms, quick_fp, md5, content_key,
+          meta_version, meta_json, thumb_key, state, first_seen, last_seen) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(f.rootId, f.relPath, f.name, f.ext, role, f.size, mtime, f.quickFp, md5, ck, f.metaVersion || 0, meta ? JSON.stringify(meta) : null,
           thumbKey, state, now, now).lastInsertRowid);
     }
     let printer = null;
@@ -209,8 +214,36 @@ function writeFile(db, f, { now, thumbsDir }) {
     // A thumbnail this file no longer uses: a candidate for removal at the end
     // of the scan (another file may still use it).
     if (prev && prev.thumb_key && extracted && prev.thumb_key !== thumbKey) replacedThumbs.push(prev.thumb_key);
-    return { id, contentKey: ck, added: !prev, changed: !!prev && !sameContent, role, thumbKey, replacedThumbs, printer };
+    return { id, contentKey: ck, added: !prev, changed: !!prev && !sameContent, recovered: !!known, role, thumbKey, replacedThumbs, printer };
   });
+}
+
+// ---- the durable identity cache (§4.5, §4.6) ----
+// "The last time SnapCon fully hashed content with this fingerprint and size,
+// the verified key was X." Used only when it names exactly one key: a
+// fingerprint that two verified contents share is a collision and restores
+// nothing. Never proof: the file's own full hash confirms or overrules it.
+function recoverIdentity(db, quickFp, size) {
+  const rows = db.prepare("SELECT sha256, md5 FROM identity_cache WHERE quick_fp = ? AND size = ?").all(quickFp, size);
+  return rows.length === 1 ? rows[0] : null;
+}
+
+// A full hash verified (quickFp, size) → sha256. Another key cached for the
+// same fingerprint stays only while a file in the index still holds it (a
+// real collision, now ambiguous); otherwise it was stale and is dropped.
+function noteVerified(db, { quickFp, size, sha256, md5, now }) {
+  for (const r of db.prepare("SELECT sha256 FROM identity_cache WHERE quick_fp = ? AND size = ? AND sha256 != ?").all(quickFp, size, sha256)) {
+    const held = db.prepare("SELECT 1 FROM files WHERE quick_fp = ? AND size = ? AND content_key = ? LIMIT 1").get(quickFp, size, r.sha256);
+    if (!held) db.prepare("DELETE FROM identity_cache WHERE quick_fp = ? AND size = ? AND sha256 = ?").run(quickFp, size, r.sha256);
+  }
+  db.prepare(`INSERT INTO identity_cache (quick_fp, size, sha256, md5, verified_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (quick_fp, size, sha256) DO UPDATE SET md5 = excluded.md5, verified_at = excluded.verified_at`).run(quickFp, size, sha256, md5, now);
+}
+
+// Fingerprints that restore nothing because they name several verified keys.
+function ambiguousIdentities(db) {
+  return db.prepare("SELECT quick_fp, size, group_concat(sha256) AS keys, count(*) AS n FROM identity_cache GROUP BY quick_fp, size HAVING n > 1 ORDER BY quick_fp").all()
+    .map(r => ({ quickFp: r.quick_fp, size: r.size, keys: String(r.keys).split(",").sort() }));
 }
 
 // ---- 3MF: Project, Plates, Variants, objects, Auxiliaries ----
@@ -412,35 +445,45 @@ function finishScan(db, { rootId, scanId, startedAt, now, complete, outcome, sta
   return { missing: result.missing, purged: result.purged, thumbsRemoved: result.orphans.length };
 }
 
-// The full hash arrived (read at idle). The content key becomes the sha256,
-// the quick key becomes an alias, and every row that referred to the quick
-// key — derived Claims, and authored rows (§4.5) — is re-keyed in place. If
-// the file changed while it was being hashed, nothing is written.
+// The full hash arrived (read at idle), and is recorded in the identity
+// cache. Three cases:
+//   the key was the quick key   the content key becomes the sha256, the quick
+//                               key an alias, and every row that referred to
+//                               it — derived Claims and authored rows (§4.5) —
+//                               is re-keyed in place;
+//   the key was restored from   and the hash agrees: confirmed, nothing moves;
+//   the cache                   and the hash disagrees: the cache was wrong.
+//                               The file takes its verified key and its own
+//                               derived Claims go with it; authored rows stay
+//                               on the old key — an identity is never
+//                               transferred — and grouping raises file_changed
+//                               or decision_unmatched for them.
+// If the file changed while it was being hashed, nothing is written.
 function setHash(db, { id, sha256, md5, expect, now }) {
   return tx(db, () => {
-    const row = db.prepare("SELECT size, mtime_ms, quick_fp, content_key FROM files WHERE id = ?").get(id);
+    const row = db.prepare("SELECT size, mtime_ms, quick_fp, content_key, sha256 FROM files WHERE id = ?").get(id);
     if (!row || row.size !== expect.size || row.mtime_ms !== expect.mtime_ms || row.quick_fp !== expect.quick_fp) return { ok: false, reason: "changed" };
     const oldKey = row.content_key;
+    const restored = row.sha256 == null && !oldKey.startsWith("q:");
     db.prepare("UPDATE files SET sha256 = ?, md5 = ?, content_key = ? WHERE id = ?").run(sha256, md5, sha256, id);
-    if (oldKey === sha256) return { ok: true, rekeyed: 0 };
+    noteVerified(db, { quickFp: row.quick_fp, size: row.size, sha256, md5, now });
+    if (oldKey === sha256) return { ok: true, rekeyed: 0, ...(restored ? { identity: "confirmed" } : {}) };
+    const stillUsed = db.prepare("SELECT 1 FROM files WHERE content_key = ? LIMIT 1").get(oldKey);
+    const relinkVariants = () => db.prepare("UPDATE variants SET printer_claim_key = (SELECT claim_key FROM claims WHERE subject_key = ? AND relation = 'targets_printer' AND object_key = variants.printer_family AND state = 'applied') WHERE file_id = ?").run(sha256, id);
+    if (restored) {
+      // The quick key no longer means the old content, unless a file with
+      // this fingerprint still holds it.
+      if (!db.prepare("SELECT 1 FROM files WHERE quick_fp = ? AND content_key = ? LIMIT 1").get(row.quick_fp, oldKey)) {
+        db.prepare("DELETE FROM content_aliases WHERE alias = ? AND content_key = ?").run(quickKey(row.quick_fp), oldKey);
+      }
+      const { rekeyed } = rekeyClaims(db, { oldKey, newKey: sha256, move: !stillUsed, automaticOnly: true, now });
+      relinkVariants();
+      return { ok: true, rekeyed, identity: "contradicted", was: oldKey };
+    }
     db.prepare("INSERT OR REPLACE INTO content_aliases (alias, content_key) VALUES (?, ?)").run(oldKey, sha256);
     // Other files with the same quick key keep it until their own hash comes.
-    const stillUsed = db.prepare("SELECT 1 FROM files WHERE content_key = ? LIMIT 1").get(oldKey);
-    let rekeyed = 0;
-    const rekey = (k) => (k === oldKey ? sha256 : k.startsWith(oldKey + "#") ? sha256 + k.slice(oldKey.length) : k);
-    const claims = db.prepare("SELECT * FROM claims WHERE subject_key = ? OR subject_key LIKE ? OR object_key = ? OR object_key LIKE ?").all(oldKey, oldKey + "#%", oldKey, oldKey + "#%");
-    const claimKeys = new Map();   // old claim key -> new, for the rows that refer to Claims by key
-    for (const c of claims) {
-      const sk = rekey(c.subject_key), ok = rekey(c.object_key);
-      const key = claimKeyOf(c.subject_type, sk, c.relation, c.object_type, ok);
-      claimKeys.set(c.claim_key, key);
-      if (!stillUsed) db.prepare("DELETE FROM claims WHERE id = ?").run(c.id);
-      db.prepare(`INSERT OR IGNORE INTO claims (claim_key, subject_type, subject_key, relation, object_type, object_key, method, confidence,
-          state, automatic, groups, evidence_json, rule_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(key, c.subject_type, sk, c.relation, c.object_type, ok, c.method, c.confidence, c.state, c.automatic, c.groups, c.evidence_json, c.rule_version, c.created_at, now);
-      rekeyed++;
-    }
-    db.prepare("UPDATE variants SET printer_claim_key = (SELECT claim_key FROM claims WHERE subject_key = ? AND relation = 'targets_printer' AND object_key = variants.printer_family AND state = 'applied') WHERE file_id = ?").run(sha256, id);
+    const { rekeyed, claimKeys } = rekeyClaims(db, { oldKey, newKey: sha256, move: !stillUsed, automaticOnly: false, now });
+    relinkVariants();
     if (!stillUsed) {
       // Authored rows (§4.5): re-keyed in place, never dropped.
       db.prepare("UPDATE decisions SET subject_key = ? || substr(subject_key, ?) WHERE subject_key = ? OR subject_key LIKE ?").run(sha256, oldKey.length + 1, oldKey, oldKey + "#%");
@@ -463,6 +506,25 @@ function setHash(db, { id, sha256, md5, expect, now }) {
     }
     return { ok: true, rekeyed };
   });
+}
+
+// Claims about oldKey (or oldKey#plate) re-keyed to newKey: moved when no
+// file holds oldKey any more, copied otherwise. Returns old → new claim keys.
+function rekeyClaims(db, { oldKey, newKey, move, automaticOnly, now }) {
+  const rekey = k => (k === oldKey ? newKey : k.startsWith(oldKey + "#") ? newKey + k.slice(oldKey.length) : k);
+  const claims = db.prepare(`SELECT * FROM claims WHERE (subject_key = ? OR subject_key LIKE ? OR object_key = ? OR object_key LIKE ?)${automaticOnly ? " AND automatic = 1" : ""}`)
+    .all(oldKey, oldKey + "#%", oldKey, oldKey + "#%");
+  const claimKeys = new Map();
+  for (const c of claims) {
+    const sk = rekey(c.subject_key), ok = rekey(c.object_key);
+    const key = claimKeyOf(c.subject_type, sk, c.relation, c.object_type, ok);
+    claimKeys.set(c.claim_key, key);
+    if (move) db.prepare("DELETE FROM claims WHERE id = ?").run(c.id);
+    db.prepare(`INSERT OR IGNORE INTO claims (claim_key, subject_type, subject_key, relation, object_type, object_key, method, confidence,
+        state, automatic, groups, evidence_json, rule_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(key, c.subject_type, sk, c.relation, c.object_type, ok, c.method, c.confidence, c.state, c.automatic, c.groups, c.evidence_json, c.rule_version, c.created_at, now);
+  }
+  return { rekeyed: claims.length, claimKeys };
 }
 
 // ---- lineage (§4.4: source_of, sliced_from) ----
@@ -595,7 +657,7 @@ function removeRootRows(db, { rootId, batch = 2000 }) {
 }
 
 module.exports = {
-  openDb, beginScan, removeRootRows, lineage, inTransaction: tx, writeFile, touch, restat, move, finishScan, setHash, printerClaims, resolvePrinter,
+  openDb, beginScan, removeRootRows, lineage, inTransaction: tx, writeFile, recoverIdentity, ambiguousIdentities, touch, restat, move, finishScan, setHash, printerClaims, resolvePrinter,
   claimKeyOf, CLAIM_RULE_VERSION, MISSING_GRACE_MS, GCODE_META_VERSION: gcodeExtract.RULE_VERSION,
   THREEMF_META_VERSION: threemfExtract.RULE_VERSION, thumbExt,
 };

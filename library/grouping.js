@@ -48,7 +48,7 @@ const loc = f => f.root_id + ":" + f.rel_path;
 // ---------------------------------------------------------------- load
 
 function load(db) {
-  const roots = new Map(db.prepare("SELECT id, name, grouping, status, enabled, last_scan_at FROM roots").all().map(r => [r.id, r]));
+  const roots = new Map(db.prepare("SELECT id, name, grouping, status, enabled, full_hash, last_scan_at FROM roots").all().map(r => [r.id, r]));
   const files = db.prepare(`SELECT f.id, f.root_id, f.rel_path, f.name, f.ext, f.role, f.state, f.content_key, f.sha256, f.quick_fp, f.container_id, f.entry_path, f.size
     FROM files f ORDER BY f.root_id, f.rel_path, f.entry_path`).all();
   const projects = new Map(db.prepare("SELECT file_id, title, designer, license, design_model_id, design_profile_id FROM projects").all().map(p => [p.file_id, p]));
@@ -401,7 +401,9 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     if (n.files.length < 2) continue;
     const locs = n.files.map(loc).sort();
     for (let i = 0; i < locs.length; i++) for (let j = i + 1; j < locs.length; j++) {
-      const exact = !!n.files[0].sha256;
+      // Exact only when every copy was verified by its own full hash; a key
+      // restored from the identity cache is not yet proof.
+      const exact = n.files.every(f => f.sha256 === n.key);
       putClaim({ subject_type: "location", subject_key: locs[i], relation: "duplicate_of", object_type: "location", object_key: locs[j], method: exact ? "sha256" : "quick_fp",
         confidence: exact ? "exact" : "high", state: "applied", groups: "identity",
         evidence: [{ signal: exact ? "sha256" : "quick_fp", value: exact ? n.files[0].sha256 : n.files[0].quick_fp, source: "index", group: "identity", strength: "identity",
@@ -497,6 +499,11 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
   // the location it was last seen in; never guessed. Content changed in
   // place is file_changed; moved AND changed while unseen is unmatched.
   const indexComplete = [...D.roots.values()].every(r => !r.enabled || r.status === "offline" || D.indexed.has(r.id));
+  // Files known only by their quick fingerprint whose full hash is still to
+  // come (no identity cache entry, or an ambiguous one): until it arrives,
+  // absence of a verified key proves nothing (§4.5).
+  const identityPending = D.files.some(f => !f.entry_path && f.state === "present" && !f.sha256 && f.content_key.startsWith("q:") &&
+    (D.roots.get(f.root_id) || {}).full_hash === "idle" && (D.roots.get(f.root_id) || {}).enabled);
   const locsOf = new Map();
   const byLoc = new Map();
   for (const f of D.files) { if (f.entry_path || f.state !== "present") continue; if (!locsOf.has(f.content_key)) locsOf.set(f.content_key, []); locsOf.get(f.content_key).push(loc(f)); byLoc.set(loc(f), f); }
@@ -516,6 +523,13 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     if (!indexComplete || (root && (root.status === "offline" || !D.indexed.has(rootId)))) continue;
     const now_ = d.subject_hint && byLoc.get(d.subject_hint);
     const ev = { decision: d.id, relation: d.relation, polarity: d.polarity, subject: d.subject_key, objectKey: d.object_key, lastSeenAt: d.subject_hint };
+    // Identity not settled yet: a Decision on a verified key cannot be called
+    // unmatched while files whose identity the full hash will decide remain,
+    // nor the file at its location "changed" while that file is unverified.
+    // Quick keys compare directly: different fingerprints, different content.
+    const verifiedSubject = !k.startsWith("q:");
+    if (now_ && now_.content_key !== k && !now_.sha256 && verifiedSubject) continue;
+    if (!now_ && verifiedSubject && identityPending) continue;
     if (now_ && now_.content_key !== k) {
       reviews.push(review("file_changed", "changed:" + d.id, { content_key: now_.content_key, other_content_key: k, location: d.subject_hint, priority: 2,
         summary: `${d.subject_hint} changed since a ${d.relation} Decision was made about it; the Decision still names the old content`, evidence: { ...ev, newContentKey: now_.content_key } }));
@@ -525,9 +539,10 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     }
   }
   // A Model with no files, once every location has been indexed (during a
-  // rebuild its files may simply not be scanned yet).
+  // rebuild its files may simply not be scanned yet) and no file's identity
+  // is still waiting for its full hash.
   const usedModels = new Set(modelOfNode.values());
-  if (indexComplete) for (const m of D.models.values()) if (!m.hidden && !usedModels.has(m.id)) reviews.push(review("empty_model", "empty:" + m.uuid, { model_uuid: m.uuid, priority: 3, summary: `${m.name} has no files any more` }));
+  if (indexComplete && !identityPending) for (const m of D.models.values()) if (!m.hidden && !usedModels.has(m.id)) reviews.push(review("empty_model", "empty:" + m.uuid, { model_uuid: m.uuid, priority: 3, summary: `${m.name} has no files any more` }));
 
   const reviewStats = syncReviews(db, reviews, now);
 

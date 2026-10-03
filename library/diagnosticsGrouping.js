@@ -9,6 +9,7 @@
 "use strict";
 const fs = require("fs");
 const PrinterIdentity = require("../public/printer-identity");
+const { ambiguousIdentities } = require("./indexStore");
 
 const labelOf = fam => (PrinterIdentity.FAMILIES.find(f => f.key === fam) || {}).label || fam || null;
 const loc = f => f.root_id + ":" + f.rel_path;
@@ -42,6 +43,10 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
   const byModel = new Map();
   for (const f of files) if (f.model_id != null) { if (!byModel.has(f.model_id)) byModel.set(f.model_id, []); byModel.get(f.model_id).push(f); }
 
+  // How this file's content key is known (§4.5): its own full hash, the
+  // identity cache (restored after a rebuild, verification pending), or only
+  // its quick fingerprint.
+  const identityOf = f => (f.sha256 ? "verified" : f.content_key.startsWith("q:") ? "quick fingerprint" : "restored from identity cache (unverified)");
   const evidenceView = c => (c ? { method: c.method, confidence: c.confidence, state: c.state, groups: c.groups, evidence: json(c.evidence_json) || [], ruleVersion: c.rule_version } : null);
   const variantView = (f, v) => {
     const key = v.plate_no == null ? f.content_key : f.content_key + "#" + v.plate_no;
@@ -58,7 +63,7 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
       .concat((lineageIn.get(f.content_key) || []).map(c => ({ c, dir: "in", other: c.subject_key })))
       .map(({ c, dir, other }) => ({ relation: c.relation, direction: dir, other: (locOfKey.get(baseKey(other)) || other) + (String(other).includes("#") ? " plate " + String(other).split("#")[1] : ""), otherKey: other, method: c.method, confidence: c.confidence, state: c.state, evidence: json(c.evidence_json) }));
     return {
-      location: loc(f), entry: f.entry_path || undefined, role: f.role, state: f.state, size: f.size, contentKey: f.content_key,
+      location: loc(f), entry: f.entry_path || undefined, role: f.role, state: f.state, size: f.size, contentKey: f.content_key, identity: identityOf(f),
       title: f.t_original != null ? { original: f.t_original, normalized: f.t_normalized, transformations: json(f.t_transformations) || [], genericScore: f.t_generic } : null,
       why: f.entry_path ? { method: "inside the project", confidence: "exact", evidence: [{ signal: "container", value: "an entry of the 3MF it belongs to" }] }
         : f.model_decision_id ? { method: "decision", confidence: "authoritative", decision: f.model_decision_id, claim: membership }
@@ -107,6 +112,7 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
       reviewsByKind: count(reviewViews.filter(r => r.status === "open"), r => r.kind), reviewsByStatus: count(reviewViews, r => r.status),
       decisions: { total: decisions.length, active: decisions.filter(d => !d.superseded_by).length, byRelation: count(decisions.filter(d => !d.superseded_by), d => d.relation + " " + d.polarity) },
       lastRun: report ? report.counts : null,
+      identity: identitySummary(db, files),
     },
     models: modelViews,
     suggestions: report ? report.suggestions : [],
@@ -116,6 +122,21 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
     reviews: reviewViews,
     decisions: decisions.map(d => ({ id: d.id, subjectType: d.subject_type, subject: d.subject_key, relation: d.relation, polarity: d.polarity, objectType: d.object_type, object: d.object_key,
       hint: d.subject_hint, reason: d.reason, superseded: !!d.superseded_by, createdAt: d.created_at })),
+  };
+}
+
+// The identity cache's state, and what it could not restore.
+function identitySummary(db, files) {
+  const real = files.filter(f => !f.entry_path);
+  const ambiguous = ambiguousIdentities(db);
+  const byFp = new Map(real.map(f => [f.quick_fp + ":" + f.size, f]));
+  return {
+    cacheEntries: db.prepare("SELECT count(*) AS n FROM identity_cache").get().n,
+    verified: real.filter(f => f.sha256).length,
+    restoredUnverified: real.filter(f => !f.sha256 && !f.content_key.startsWith("q:")).length,
+    quickOnly: real.filter(f => !f.sha256 && f.content_key.startsWith("q:")).length,
+    ambiguousFingerprints: ambiguous.map(a => ({ ...a, file: (byFp.get(a.quickFp + ":" + a.size) || {}).rel_path ? loc(byFp.get(a.quickFp + ":" + a.size)) : null,
+      note: "several verified contents share this fingerprint: it restores nothing" })),
   };
 }
 

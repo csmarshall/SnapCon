@@ -20,7 +20,15 @@ const { seedRoleDefaults } = require("./permissions");
 
 // version -> function(db). Each runs inside its own transaction, after a
 // pre-migration snapshot. Version 1 is the initial schema, created directly.
-const MIGRATIONS = {};
+const MIGRATIONS = {
+  // 2: the durable identity cache (§4.6), seeded from every full hash the
+  // index already holds, so the first rebuild after the upgrade keeps them.
+  2: db => {
+    db.exec(SCHEMA.IDENTITY_SQL);
+    db.prepare(`INSERT OR IGNORE INTO identity_cache (quick_fp, size, sha256, md5, verified_at)
+      SELECT quick_fp, size, sha256, md5, ? FROM files WHERE sha256 IS NOT NULL AND entry_path = ''`).run(Date.now());
+  },
+};
 
 const BACKUP_KEEP = 7;
 const SQLITE_CORRUPT = new Set([11, 26]);   // SQLITE_CORRUPT, SQLITE_NOTADB
@@ -88,7 +96,7 @@ function listBackups(backupsDir) {
 // `sqlite` is the DatabaseSync constructor; tests pass null to exercise the
 // "node:sqlite unavailable" path.
 function createLibraryStore({ baseDir, now = Date.now, log = console, schema = SCHEMA, migrations = MIGRATIONS, sqlite = loadSqlite() }) {
-  const { SCHEMA_VERSION, AUTHORED_SQL, DERIVED_SQL, DERIVED_TABLES } = schema;
+  const { SCHEMA_VERSION, AUTHORED_SQL, IDENTITY_SQL = "", DERIVED_SQL, DERIVED_TABLES } = schema;
   const dir = path.join(baseDir, "library-data");
   const dbPath = path.join(dir, "library.db");
   const backupsDir = path.join(dir, "backups");
@@ -143,6 +151,7 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
     db.exec("BEGIN");
     try {
       db.exec(AUTHORED_SQL);
+      if (IDENTITY_SQL) db.exec(IDENTITY_SQL);
       db.exec(DERIVED_SQL);
       seedRoleDefaults(db);
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -228,7 +237,8 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
   // Foreign-key enforcement is off for the drop only, which is safe because no
   // authored table references a derived one; turning it on again afterwards
   // restores it for everything else. Authored tables, including the runtime
-  // status columns of roots, are not touched.
+  // status columns of roots, are not touched, and neither is the identity
+  // cache: that is what lets rediscovered files find their content keys.
   function rebuildDerived() {
     const db = state.db;
     if (!db) throw new Error("library unavailable");
@@ -245,6 +255,16 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
     const violations = db.prepare("PRAGMA foreign_key_check").all();
     if (violations.length) throw new Error("foreign key violations after rebuild: " + JSON.stringify(violations.slice(0, 3)));
     return { ms: Date.now() - t0 };
+  }
+
+  // The deeper reset (§4.6): forget every verified identity, so the next
+  // scans rebuild identity from full hashes alone. Not part of a normal
+  // rebuild, and never touches authored tables: Models, anchors and Decisions
+  // stay, and re-attach once their files are hashed again.
+  function resetIdentityCache() {
+    const db = state.db;
+    if (!db) throw new Error("library unavailable");
+    return { removed: db.prepare("DELETE FROM identity_cache").run().changes };
   }
 
   // ---- roots (Library locations) ----
@@ -279,7 +299,7 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
   };
 
   const api = {
-    open, rebuildDerived, roots,
+    open, rebuildDerived, resetIdentityCache, roots,
     dbPath, backupsDir,
     get available() { return state.available; },
     get reason() { return state.reason; },

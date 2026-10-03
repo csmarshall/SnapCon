@@ -3,14 +3,20 @@
 // The SQL below is docs/library-design.md §5, verbatim. test/library/schema.test.js
 // fails if the two ever differ, so change them together.
 //
-// AUTHORED tables hold what people decided and what happened: they are never
-// dropped. DERIVED tables hold what the indexer can recompute from the files:
-// "rebuild index" drops and recreates them (§4.6 rule 7).
+// Three kinds of table (§4.6):
+//   AUTHORED  what people decided and what happened: never dropped.
+//   IDENTITY  the durable identity cache: what SnapCon verified about content
+//             (quick fingerprint → full hash). Not anyone's decision and not
+//             proof — a reconciliation cache that a normal rebuild keeps, so
+//             rediscovered files find their stable content keys again. Only an
+//             explicit identity reset empties it.
+//   DERIVED   what the indexer recomputes from the files: "rebuild index"
+//             drops and recreates them (§4.6 rule 7).
 "use strict";
 
 // Stored in PRAGMA user_version. Bump it only together with a new entry in
 // LibraryStore's MIGRATIONS.
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const AUTHORED_SQL = `
 CREATE TABLE roots (
@@ -268,10 +274,23 @@ CREATE VIRTUAL TABLE model_fts USING fts5(name, designer, tags, collections, fil
   object_names, project_titles, notes, tokenize='unicode61 remove_diacritics 2', prefix='2 3');
 `;
 
+// The durable identity cache (§4.5, §4.6). One row per verified
+// (fingerprint, size) → sha256; two rows for one fingerprint are a collision,
+// and a colliding fingerprint never restores an identity.
+const IDENTITY_SQL = `
+CREATE TABLE identity_cache (
+  quick_fp TEXT NOT NULL, size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL, md5 TEXT,
+  verified_at INTEGER NOT NULL,              -- when the full hash last confirmed it
+  PRIMARY KEY (quick_fp, size, sha256));
+`;
+
 // Drop order for a rebuild: children before parents.
 const DERIVED_TABLES = ["model_fts", "model_families", "model_stats", "claims", "variants", "plates", "projects",
   "folder_classes", "file_titles", "file_objects", "content_aliases", "files", "scan_runs", "thumbs"];
 const AUTHORED_TABLES = ["roots", "models", "model_anchors", "decisions", "prints", "review_items", "tags",
   "model_tags", "collections", "collection_models", "permission_grants"];
 
-module.exports = { SCHEMA_VERSION, AUTHORED_SQL, DERIVED_SQL, DERIVED_TABLES, AUTHORED_TABLES };
+const IDENTITY_TABLES = ["identity_cache"];
+
+module.exports = { SCHEMA_VERSION, AUTHORED_SQL, IDENTITY_SQL, DERIVED_SQL, DERIVED_TABLES, AUTHORED_TABLES, IDENTITY_TABLES };
