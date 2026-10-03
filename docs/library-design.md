@@ -1619,7 +1619,10 @@ Nothing from M5 was implemented.
    colourways (TinyTREX, Tiny T-REX, Kitty Flexi / Flexi Kitty) count as unrelated, so their part
    names became generic. Counting unrelated **title groups** restored them: 258 → 253 Models,
    20 → 23 multi-file (58 files); each restored group was checked by hand (object names + title).
-3. *A rebuild lost every identity (schema 2).* The first live rebuild test (example 9) failed:
+3. *A rebuild lost every identity (schema 2).* The design had two kinds of data, authored and
+   derived; the bridge between a rediscovered file and its stable identity (quick fingerprint →
+   verified sha256: `files.sha256` and `content_aliases`) was classed as derived and dropped by a
+   rebuild. The first live rebuild test (example 9) failed:
    once hashed, authored rows are keyed by `sha256`, but a rebuild drops `files.sha256` and
    `content_aliases`, so the rescanned files carried quick keys until the idle re-hash. Grouping
    created a new Model for every file (507 Models, 254 *Empty model* items), raised a false
@@ -1652,7 +1655,13 @@ Nothing from M5 was implemented.
 - The same Models with the same members and uuids in all three states; no Model created again.
 - Non-model files: 6 (images and documents). Multi-file counts are by file location (a duplicate
   pair is one content node); the grouping report counts 23 multi-node clusters with 58 files.
-- The one empty Model is Beardie @ 160's former one-file Model, emptied by Decision #1.
+- **The "+1" empty Model** is `1d0d33cc-ee93-4f9f-a023-d5801d43a92a` ("Beardie"): the automatic
+  one-file Model the first live grouping gave Beardie @ 160, **before** the failed rebuild.
+  Decision #1 then moved that file into Beardie `a6ab47d7…`, which left it empty. It is not
+  failed-rebuild debris (it predates the rebuild and the cleanup considered only Models created
+  after Decision #1), and it carries nothing authored. It is kept because nothing authored is
+  deleted automatically (§4.6 rule 4); its *Empty model* item (information level) is open for the
+  owner, and hiding or merging it is an M6 action.
 - Rescan after the rebuild: 30 s; the full re-hash on the NAS: 33 min.
 
 **The nine examples:**
@@ -1680,3 +1689,88 @@ routes (admin only, export). Each regression test was checked to fail without it
 - `connectors/zip-reader.js` (the Bambu FTPS reader) should be consolidated onto
   `library/zipReader.js` as a separate, connector-tested change.
 - The Diagnostics page is read-only; Review Item actions arrive with M5/M6.
+
+## 27. M5 results (2026-10-03)
+
+**Scope:** the Library UI only (§13.2): grid, search and filters, the Model page, Needs attention,
+explanations, offline behaviour. Nothing from M6 (merge, split, move, approve/reject, set printer,
+hide, rename, cover editing, undo) and nothing from M7 (root-aware printing, history, counts).
+
+**Implemented:**
+- An in-app page like Health: `/library`, `/library/m/<uuid>`, `/library/attention` (a topbar
+  button; Back/Forward; Library, Health, Queue and Settings close one another; first-run
+  onboarding wins over a deep link). `/library/diagnostics` redirects to the M4 Diagnostics page.
+  `public/library.js` (no framework), styles in `style.css` using the existing tokens, strings in
+  `library.*` (English and Spanish).
+- Read-only API, `library.view`: `/api/library/overview`, `/facets`, `/models` (keyset paging,
+  search, filters), `/models/:uuid`, `/attention` (`library/libraryView.js`). Everything comes
+  from the index; no request reads a file. A location's folder is never part of an answer.
+- Grouping now fills the two derived query caches the grid needs: `model_families` (printer
+  filter and facets, §14 P3) and `model_fts` (search: name, designers, file names, non-generic
+  object names, project titles).
+- **Grid:** cover, name (two lines), "N printable files" / "N files" / "N projects", materials,
+  the fleet-fit strip (each printer family the Model has files for, outlined when the fleet has
+  such a printer, with how many are idle — §14 "Fits my idle printers", client-side), and
+  badges: *Needs you* / *Check* (action / review items), *Offline*, *Missing* / *Unreadable*.
+- **Filters:** search, Printer, Location, Type (ready to print / 3MF project / source), Material,
+  Needs attention; sort by name or recently added. Not offered: Printed (M7), Tag and Collection
+  (1b), Show hidden (M6), multi-select actions (M6).
+- **Model page:** gallery (cover, Model images, plate pictures, file thumbnails); facts
+  (designer, licence, MakerWorld design, locations, "Fits" with the printers by name); its own
+  attention items; suggestions with "Why only a suggestion?"; printable files **grouped by
+  printer family** (never flattened), each with plate, printer confidence (Confident / Likely /
+  Unknown / Set by a person), profile, slicer, time (`fmtDuration`), weight, copies, layer and
+  nozzle, filament swatches, location and path, availability, duplicates, "Why is this here?"
+  and "Why this printer?"; Projects with every Plate and what the project is set up for; other
+  files. Admins get a link to Diagnostics.
+- **Print / Queue:** through the File Browser's own path — `selectFile()` then the existing Send
+  dialog, or the existing Queue dialog — so every existing check applies. Only files in the
+  G-code folder can be sent (the existing routes know only that folder); other locations show a
+  disabled button with the reason until root-aware printing (§12, M7). View users see the
+  buttons disabled with a reason.
+- **Needs attention:** every open Review Item in plain words, grouped by level — *Needs you*
+  (`decision_unmatched`, `file_changed`, `unreadable_file`), *Worth a look* (suggestions,
+  ambiguous files, uncertain printers, missing files, offline locations), *For your information*
+  (folder disagreements, duplicates, generic names kept apart, empty Models) — then by kind, each
+  linked to its Models. It explains; resolving is M6, and the page says so.
+- **Offline:** a named bar per offline location (Recheck for those who manage locations); its
+  Models stay, greyed, marked Offline; a file there is "Offline — still known", never missing;
+  Print is disabled with the reason. The indexing pill shows a running scan or verification.
+- **Covers (§10 order):** the owner's choice, an image in the Model, a plate picture, the
+  largest G-code thumbnail, else a placeholder (also used for any image that fails to load).
+- **Names:** an automatic Model's name is now its title as the file wrote it, minus exactly what
+  normalisation removed ("TinyTREX", "HollowLog", "3DBenchy"; a generic title keeps its words:
+  "Assembly", "The Plate 1"). Presentation only; never Evidence.
+
+**Real Library:** 252 Models (27 with several files, 225 one-file; 7 across several printer
+types); covers for all 252 (235 G-code thumbnails, 15 plate pictures, 2 Model images).
+Facets: Ender-3 V3 Plus 158, Snapmaker U1 73, AD5X 7, SPARKX i7 2, P2S 1, Ender-3 V3 KE 1;
+G-code folder 49, U1 Files 62, V3 PLUS 148; ready to print 236, 3MF project 17; PLA 234, PETG 2,
+TPU 1. Needs attention: 70 items (0 needs you, 53 worth a look, 17 information); 69 Models carry
+a Check badge.
+
+**Performance (real Library, localhost):** every Library request 15–17 ms median (overview,
+facets, first page and next page of 60 cards, search, printer/material/location/attention
+filters, Model detail including the 12-plate project, Needs attention), worst 16–31 ms; the same
+~15 ms floor applies to a cached thumbnail, so it is the HTTP round trip on Windows, not the
+queries (6–15 ms measured in-process). Cards appear about 1 s after a cold page load once the
+app's splash has gone. Browsing made no file-reading request: the only file-system traffic seen
+was the app's existing 15-second File Browser refresh and fleet thumbnails, present on every page.
+
+**Permissions (HTTP, packaged build, users on):** anonymous 401 everywhere; view, regular and
+admin browse (overview, facets, models, Model page, attention); Diagnostics, rescan and rebuild
+403 except admin; no editing endpoint exists for anyone (404). No answer to a non-manager carries
+a location's folder. Found and fixed: `/api/library/roots` hid `path` from non-managers but
+returned `lastError`, whose network message names the share (`\\host\share is unreachable`);
+it is now withheld as well.
+
+**Problems found (for the owner):**
+- Search is word-prefix: "trex" finds "Tiny TREX" but not "TinyTREX". An infix (trigram) index
+  would fix it; not done without a decision.
+- 69 of 252 Models carry a Check badge, mostly 21 "looks like two Models" files and 30
+  suggestions. Accurate, but busy until M6 can resolve them.
+- Same-named Models (three "Assembly", two "Axolotl Redux", two "Baby Alicorn Egg", and the empty
+  "Beardie") are told apart only by cover and location; merging is M6.
+- Printing from locations other than the G-code folder waits for M7.
+- Spanish installs show the new Library strings in English until `locales/es.json` is reseeded
+  (the existing locale rule).
