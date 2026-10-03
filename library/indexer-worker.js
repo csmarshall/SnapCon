@@ -17,6 +17,7 @@ const { runBackup } = require("./LibraryStore");
 const indexStore = require("./indexStore");
 const gcodeExtract = require("./gcodeExtract");
 const threemfExtract = require("./threemfExtract");
+const grouping = require("./grouping");
 
 const dbs = new Map();   // dbPath -> connection, opened on first use
 function dbFor(dbPath) {
@@ -61,6 +62,14 @@ const handlers = {
   },
   // Lineage between files (source_of, sliced_from), from what is indexed.
   "index.lineage": ({ dbPath, now }) => indexStore.lineage(dbFor(dbPath), { now }),
+  // Models from the index (M4), in one transaction: all of it or none of it.
+  // The report is written once the transaction has committed.
+  "index.group": ({ dbPath, now, reportPath }) => {
+    const db = dbFor(dbPath);
+    const { report, ...out } = indexStore.inTransaction(db, () => grouping.run(db, { now }));
+    if (reportPath) grouping.writeReport(reportPath, report);
+    return out;
+  },
   // The streamed fallback (§6.2: no config block within 3 MB of the end): the
   // main thread reads the file in chunks and the parsing happens here, line by
   // line, so a 200 MB file never costs the server's thread anything but I/O.

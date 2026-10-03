@@ -55,18 +55,16 @@ function windowNeeds(head, tail) {
 // "<object>_id_<n>_copy_<m>" ("<object> id:<n> copy <m>" in "; printing
 // object" lines); the copy count is the number of instances.
 const ORCA_INSTANCE = /^(.*?)[ _]id[:_](\d+)[ _]copy[ _](\d+)$/;
-// Plus the common test/calibration prints (§6.3): a "3DBenchy" object names a
-// file of thousands of people's, so two Benchys are no evidence of each other.
-const GENERIC = new Set(["assembly", "object", "objects", "body", "part", "parts", "model", "mesh", "untitled", "plate", "shape", "cube", "group",
-  "3dbenchy", "benchy", "calibration", "calibration cube", "test", "stand", "holder"]);
+// Generic object names (and why each is generic) live in genericNames.js,
+// shared with grouping.
+const { genericObject } = require("./genericNames");
 
 function normaliseObjectName(raw) {
   let s = String(raw || "").trim().replace(/^["']|["']$/g, "");
   const m = ORCA_INSTANCE.exec(s);
   const base = m ? m[1] : s;
   const norm = base.replace(/\.(stl|obj|3mf|step|stp|amf|ply)$/i, "").replace(/[_\s]+/g, " ").trim().toLowerCase();
-  const stem = norm.replace(/[\s\-_.#]*\d+$/, "").trim();
-  const generic = !norm || /^\d+$/.test(norm) || GENERIC.has(norm) || GENERIC.has(stem);
+  const generic = !!genericObject(norm);
   return { base, norm: norm || base.toLowerCase(), instance: m ? `${m[2]}:${m[3]}` : null, generic };
 }
 

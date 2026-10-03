@@ -50,6 +50,13 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
       q: req.query.q ? String(req.query.q) : null,
       limit: Math.max(1, Math.min(20000, parseInt(req.query.limit, 10) || 5000)),
     })));
+  // M4: Models, suggestions, protected and ambiguous cases, Review Items.
+  // ?export=1: the stable, versioned export (no run timestamps).
+  app.get("/api/library/diagnostics/grouping", requireAuth, need("library.diagnostics"), (req, res) => {
+    const exportView = req.query.export === "1";
+    if (exportView) res.set("Content-Disposition", 'attachment; filename="library-grouping.json"');
+    send(res, () => library.diagnosticsGrouping({ exportView }));
+  });
   app.get("/api/library/diagnostics/scans", requireAuth, need("library.diagnostics"), (req, res) =>
     send(res, () => library.scanReport()));
 

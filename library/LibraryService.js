@@ -14,6 +14,7 @@ const { normalizeLocation, comparisonKey, overlaps, checkReachable } = require("
 const { createScanner, summarise } = require("./Scanner");
 const { GCODE_META_VERSION, THREEMF_META_VERSION, thumbExt } = require("./indexStore");
 const { diagnosticsRaw } = require("./diagnosticsRaw");
+const { diagnosticsGrouping, stableExport } = require("./diagnosticsGrouping");
 
 const GCODE_ROOT = "gcode";
 const NAME_MAX = 60;
@@ -156,6 +157,16 @@ function createLibraryService({
   async function runLineage() {
     try { const t0 = now(); lastLineage = { ...(await worker.request("index.lineage", { dbPath: store.dbPath, now: now() })), ms: now() - t0, at: now() }; }
     catch (e) { log.error("[library] lineage: " + e.message); }
+    await runGrouping();
+  }
+
+  // Models (M4): regrouped from the whole index after lineage. The report is
+  // what Diagnostics shows.
+  const groupingReport = path.join(baseDir, "library-data", "grouping-report.json");
+  let lastGrouping = null;
+  async function runGrouping() {
+    try { lastGrouping = { ...(await worker.request("index.group", { dbPath: store.dbPath, now: now(), reportPath: groupingReport })), at: now() }; }
+    catch (e) { log.error("[library] grouping: " + e.message); lastGrouping = { error: e.message, at: now() }; }
   }
 
   function logScan(root, s) {
@@ -487,8 +498,13 @@ function createLibraryService({
     listRoots: () => (store.available ? store.roots.list().map(view) : []),
     addRoot, updateRoot, removeRoot, rescan, syncGcodeRoot, backupNow, rebuildDerived, scanReport,
     diagnosticsRaw: opts => { requireAvailable(); return diagnosticsRaw(store.db, opts || {}); },
+    diagnosticsGrouping: ({ exportView = false } = {}) => {
+      requireAvailable();
+      const d = diagnosticsGrouping(store.db, { reportPath: groupingReport });
+      return exportView ? stableExport(d) : { ...d, lastRun: lastGrouping };
+    },
     thumbFile,
-    _store: store, _checkRoot: checkRoot, _tick: tick, _requestScan: requestScan,
+    _store: store, _checkRoot: checkRoot, _tick: tick, _requestScan: requestScan, _group: runGrouping,
     // Tests: resolves once the indexer has nothing running.
     _idle: async () => { while (runLoop) await runLoop.catch(() => {}); },
   };

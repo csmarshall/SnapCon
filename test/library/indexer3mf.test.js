@@ -1,7 +1,7 @@
 // test/library/indexer3mf.test.js — M3 end to end: 3MFs in a real location,
 // read through netfs and the Library worker, into Projects, Plates and
 // Variants; printer Claims only on printable plates; lineage Claims only where
-// the evidence supports them; and nothing of M4 (no Models, no member_of).
+// the evidence supports them; and (M4) no grouping between unrelated projects.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -92,8 +92,8 @@ test("sliced, unsliced and multi-plate 3MFs become Projects, Plates and printabl
   assert.equal(tp.length, 2, "one for each printable plate, none for unsliced projects");
   assert.equal(db.prepare("SELECT count(*) AS n FROM projects").get().n, 3);
   assert.equal(db.prepare("SELECT count(*) AS n FROM variants").get().n, 2);
-  // M4's territory stays untouched.
-  assert.equal(db.prepare("SELECT count(*) AS n FROM models").get().n, 0);
+  // M4: three unrelated projects are three Models; nothing ties them.
+  assert.equal(db.prepare("SELECT count(*) AS n FROM models").get().n, 3);
   assert.equal(db.prepare("SELECT count(*) AS n FROM claims WHERE relation IN ('member_of', 'same_model_as')").get().n, 0);
 });
 

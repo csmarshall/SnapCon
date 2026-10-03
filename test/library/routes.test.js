@@ -39,7 +39,7 @@ async function server(t, { broken = false } = {}) {
   };
   const close = async () => { srv.closeAllConnections(); await new Promise(r => srv.close(r)); await library.stop(); };
   t.after(close);
-  return { call, base, url };
+  return { call, base, url, library };
 }
 
 test("signed-out callers get 401 everywhere", async t => {
@@ -129,4 +129,31 @@ test("M2: the raw diagnostic view and scan statistics are admin-only; thumbnails
   assert.equal((await fetch(s.url + "/api/library/thumbs/..%2F..%2Flibrary.db", { headers: { "x-as": "view" } })).status, 404, "only a well-formed key is looked up");
   assert.equal((await s.call("view", "GET", "/api/library/thumbs/e" + "0".repeat(31))).status, 404);
   assert.equal((await s.call(null, "GET", "/api/library/thumbs/" + key)).status, 401);
+});
+
+test("M4: grouping diagnostics are admin-only, versioned, and export without run timestamps", async t => {
+  const { gcodeFile } = require("./helpers/gcode");
+  const s = await server(t);
+  fs.writeFileSync(path.join(s.base, "gcode", "Beardie.gcode"), gcodeFile({ objects: [["Beardie.stl", 1]] }));
+  fs.writeFileSync(path.join(s.base, "gcode", "4x Beardie.gcode"), gcodeFile({ objects: [["Beardie.stl", 4]], bodyBytes: 3000 }));
+  assert.equal((await s.call("admin", "POST", "/api/library/roots/gcode/rescan")).status, 200);
+  let d;
+  for (let i = 0; i < 400; i++) {
+    await s.library._idle();
+    d = await s.call("admin", "GET", "/api/library/diagnostics/grouping");
+    if (d.body.generatedAt && d.body.summary.multiFileModels === 1) break;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  assert.equal(d.status, 200);
+  assert.equal(d.body.ruleVersion, require("../../library/grouping").RULE_VERSION);
+  const m = d.body.models.find(x => x.files.length === 2);
+  assert.ok(m, "the two Beardies are one Model");
+  assert.ok(m.files.every(f => f.why.method && f.why.evidence.length), "each file says why it is there");
+  for (const who of ["view", "regular"]) assert.equal((await s.call(who, "GET", "/api/library/diagnostics/grouping")).status, 403, who);
+  const res = await fetch(s.url + "/api/library/diagnostics/grouping?export=1", { headers: { "x-as": "admin" } });
+  assert.match(res.headers.get("content-disposition") || "", /attachment/);
+  const ex = await res.json();
+  assert.equal(ex.kind, "snapcon-library-grouping");
+  assert.equal(ex.generatedAt, undefined);
+  assert.equal(ex.lastRun, undefined);
 });

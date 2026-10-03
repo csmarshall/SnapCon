@@ -595,7 +595,7 @@ function removeRootRows(db, { rootId, batch = 2000 }) {
 }
 
 module.exports = {
-  openDb, beginScan, removeRootRows, lineage, writeFile, touch, restat, move, finishScan, setHash, printerClaims, resolvePrinter,
+  openDb, beginScan, removeRootRows, lineage, inTransaction: tx, writeFile, touch, restat, move, finishScan, setHash, printerClaims, resolvePrinter,
   claimKeyOf, CLAIM_RULE_VERSION, MISSING_GRACE_MS, GCODE_META_VERSION: gcodeExtract.RULE_VERSION,
   THREEMF_META_VERSION: threemfExtract.RULE_VERSION, thumbExt,
 };

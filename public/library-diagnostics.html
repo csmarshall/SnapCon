@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library — grouping diagnostics</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  /* M4 grouping diagnostics (library-design.md §13.1): plain and functional,
+     the same treatment as the M2 raw view. Admin only, read-only. */
+  body.raw { margin: 0; padding: 20px 24px 48px; background: var(--chassis); color: var(--ink); font-family: var(--sans); }
+  .raw h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .raw h2 { font-size: 14px; font-weight: 600; margin: 22px 0 10px; }
+  .raw .sub { color: var(--ink-faint); font-size: 12px; }
+  .raw .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
+  .raw .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-dim); }
+  .raw select, .raw input[type=search] { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; }
+  .raw input[type=search] { width: 240px; }
+  .raw button { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  .raw button:hover { border-color: var(--ink-faint); }
+  .raw .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-top: 18px; flex-wrap: wrap; }
+  .raw .tabs button { border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; background: none; color: var(--ink-dim); }
+  .raw .tabs button[aria-selected=true] { background: var(--panel); color: var(--ink); border-color: var(--line); }
+  .raw .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .raw .card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+  .raw .card h3 { font-size: 12px; font-weight: 600; color: var(--ink-dim); margin: 0 0 6px; }
+  .raw .card .kv { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); padding: 1px 0; }
+  .raw .card .kv span:first-child { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .raw .item { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; margin: 8px 0; font-size: 12px; }
+  .raw .item h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .raw table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+  .raw th { text-align: left; color: var(--ink-faint); font-weight: 500; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  .raw td { padding: 5px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .raw td.file { overflow: hidden; }
+  .raw .name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .raw .path { display: block; color: var(--ink-faint); font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .raw .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); white-space: nowrap; font-weight: 400; }
+  .raw .applied, .raw .exact, .raw .high { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .raw .suggested, .raw .medium { color: var(--signal); border-color: color-mix(in srgb, var(--signal) 45%, transparent); }
+  .raw .recorded, .raw .low, .raw .unknown { color: var(--ink-dim); }
+  .raw .decision, .raw .authoritative { color: var(--violet-soft); border-color: color-mix(in srgb, var(--violet-soft) 45%, transparent); }
+  .raw .missing { color: var(--bad); }
+  .raw .warn { color: var(--signal); }
+  .raw details summary { cursor: pointer; color: var(--busy); }
+  .raw .ev { margin: 6px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 11px; }
+  .raw .ev li { padding: 2px 0; border-top: 1px dashed var(--line-soft); overflow-wrap: anywhere; }
+  .raw .ev .k { color: var(--ink-dim); }
+  .raw .why { color: var(--ink-dim); margin-top: 4px; }
+  .raw .empty { color: var(--ink-faint); padding: 24px 8px; }
+  .raw .err { color: var(--bad); }
+  .raw .more { margin: 12px 0; }
+</style>
+</head>
+<body class="raw">
+  <h1>Library — grouping diagnostics</h1>
+  <div class="sub" id="meta">Loading…</div>
+
+  <div class="bar">
+    <label class="field" for="f-root">Location
+      <select id="f-root"><option value="">All locations</option></select>
+    </label>
+    <label class="field" for="f-conf">Confidence
+      <select id="f-conf"><option value="">Any</option><option>exact</option><option>high</option><option>medium</option><option>low</option><option value="decision">Decision</option><option value="none">Standalone</option></select>
+    </label>
+    <label class="field" for="f-method">Method
+      <select id="f-method"><option value="">Any</option></select>
+    </label>
+    <label class="field" for="f-kind">Review type
+      <select id="f-kind"><option value="">Any</option></select>
+    </label>
+    <label class="field" for="f-status">Review status
+      <select id="f-status"><option value="">Any</option><option>open</option><option>dismissed</option><option>resolved</option><option value="auto_closed">auto closed</option></select>
+    </label>
+    <label class="field" for="f-q">Text
+      <input id="f-q" type="search" placeholder="Name, path or evidence">
+    </label>
+    <button id="reload" type="button">Reload</button>
+    <button id="export" type="button">Export JSON</button>
+  </div>
+
+  <div class="cards" id="summary"></div>
+
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" id="t-models" aria-selected="true" data-tab="models">Models</button>
+    <button type="button" role="tab" id="t-suggestions" aria-selected="false" data-tab="suggestions">Suggestions</button>
+    <button type="button" role="tab" id="t-ambiguous" aria-selected="false" data-tab="ambiguous">Ambiguous and protected</button>
+    <button type="button" role="tab" id="t-other" aria-selected="false" data-tab="other">Other issues</button>
+  </div>
+  <div id="panel" role="tabpanel"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const stem = n => String(n || "").replace(/\.[^./\\]+$/, "");
+const base = p => String(p || "").split("/").pop();
+const PAGE = 100;
+let DATA = null, TAB = "models", shown = PAGE;
+
+async function load() {
+  $("meta").textContent = "Loading…";
+  const res = await fetch("/api/library/diagnostics/grouping");
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { $("meta").innerHTML = `<span class="err">${esc(body.error || ("HTTP " + res.status))}</span>`; return; }
+  DATA = body;
+  const keep = (id, opts) => { const sel = $(id), cur = sel.value; sel.innerHTML = '<option value="">' + (id === "f-root" ? "All locations" : "Any") + "</option>" + opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join(""); sel.value = cur; };
+  keep("f-root", DATA.roots.map(r => [r.id, r.name]));
+  const methods = new Set();
+  for (const m of DATA.models) for (const f of m.files) if (f.why && f.why.method) methods.add(f.why.method);
+  for (const s of DATA.suggestions) methods.add(s.method);
+  keep("f-method", [...methods].sort().map(m => [m, m]));
+  keep("f-kind", [...new Set(DATA.reviews.map(r => r.kind))].sort().map(k => [k, k]));
+  const when = DATA.generatedAt ? "grouped " + new Date(DATA.generatedAt).toLocaleString() : "not grouped yet";
+  $("meta").textContent = `Grouping rule v${DATA.ruleVersion ?? "?"} · title rule v${DATA.titleRuleVersion ?? "?"} · ${when}` + (DATA.lastRun && DATA.lastRun.error ? " · last run failed: " + DATA.lastRun.error : "");
+  render();
+}
+
+function card(title, obj) {
+  const rows = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
+  return `<div class="card"><h3>${esc(title)}</h3>${rows.length ? rows.map(([k, v]) => `<div class="kv"><span title="${esc(k)}">${esc(k)}</span><span>${esc(v)}</span></div>`).join("") : '<div class="sub">None</div>'}</div>`;
+}
+function evidenceList(ev) {
+  if (!ev || !ev.length) return "";
+  return `<ul class="ev">${ev.map(e => `<li><span class="k">${esc(e.signal)}</span> ${esc(e.value)}${e.with ? ` <span class="k">with ${esc(e.with)}</span>` : ""} <span class="k">[${esc(e.group || "")}${e.strength ? ", " + esc(e.strength) : ""}]</span>` +
+    `${e.note ? `<br><span class="k">${esc(e.note)}</span>` : ""}${e.compare ? compareBlock(e.compare) : ""}</li>`).join("")}</ul>`;
+}
+function compareBlock(c) {
+  const tr = t => (t || []).map(x => `${x.rule}: “${x.removed}”`).join(", ") || "none";
+  return `<br><span class="k">title ${esc(c.method)}${c.note ? " — " + esc(c.note) : ""}</span><br><span class="k">A</span> “${esc(c.original_a)}” → “${esc(c.normalized_a)}” <span class="k">(${esc(tr(c.transformations_a))})</span>` +
+    `<br><span class="k">B</span> “${esc(c.original_b)}” → “${esc(c.normalized_b)}” <span class="k">(${esc(tr(c.transformations_b))})</span>`;
+}
+function ignoredList(ig) {
+  if (!ig || !ig.length) return "";
+  return `<div class="why">Ignored or down-weighted:</div><ul class="ev">${ig.map(i => `<li><span class="k">${esc(i.signal)}</span> ${esc(i.value)} — ${esc(i.why)}</li>`).join("")}</ul>`;
+}
+const pill = (cls, text) => `<span class="pill ${esc(cls)}">${esc(text)}</span>`;
+
+// ---- filters ----
+const q = () => $("f-q").value.trim().toLowerCase();
+const inRoot = loc => !$("f-root").value || String(loc || "").startsWith($("f-root").value + ":");
+const hasText = obj => !q() || JSON.stringify(obj).toLowerCase().includes(q());
+function fileConf(f) { return f.why.method === "decision" ? "decision" : f.why.confidence || "none"; }
+function modelMatches(m) {
+  const conf = $("f-conf").value, method = $("f-method").value;
+  if ($("f-root").value && !m.files.some(f => inRoot(f.location))) return false;
+  if (conf && !m.files.some(f => fileConf(f) === conf)) return false;
+  if (method && !m.files.some(f => f.why.method === method)) return false;
+  return hasText(m);
+}
+function reviewMatches(r) {
+  if ($("f-kind").value && r.kind !== $("f-kind").value) return false;
+  if ($("f-status").value && r.status !== $("f-status").value) return false;
+  if ($("f-conf").value && r.confidence !== $("f-conf").value) return false;
+  if ($("f-root").value && !(inRoot(r.location) || inRoot(r.otherLocation) || JSON.stringify(r.evidence || "").includes('"' + $("f-root").value + ":"))) return false;
+  return hasText(r);
+}
+
+function summary() {
+  const s = DATA.summary;
+  const kv = (k, v) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
+  $("summary").innerHTML = [
+    `<div class="card"><h3>Models</h3>${kv("Models", s.models)}${kv("With several files", s.multiFileModels)}${kv("Files in those", s.filesInMultiFileModels)}${kv("Empty (no files)", s.emptyModels)}</div>`,
+    `<div class="card"><h3>Files</h3>${kv("Indexed files", s.files)}${kv("Grouped automatically", s.filesAutomaticallyGrouped)}${kv("By a Decision", s.filesByDecision)}${kv("Standalone Model", s.filesStandalone)}${kv("Not model files (images, …)", s.notModelled)}</div>`,
+    card("member_of by method", s.memberOfByMethod), card("member_of by confidence", s.memberOfByConfidence),
+    `<div class="card"><h3>Cases</h3>${kv("Suggestions", s.suggestions)}${kv("Ambiguous files", s.ambiguousFiles)}${kv("Protected generic names", s.protectedGeneric)}${kv("Duplicates", s.duplicates)}${kv("Unresolved sources", s.unresolvedSources)}</div>`,
+    card("Open review items", s.reviewsByKind),
+    `<div class="card"><h3>Decisions</h3>${kv("Active", s.decisions.active)}${kv("Superseded", s.decisions.total - s.decisions.active)}${Object.entries(s.decisions.byRelation).map(([k, v]) => kv(k, v)).join("")}</div>`,
+  ].join("");
+}
+
+function fileRow(f) {
+  const w = f.why;
+  const conf = fileConf(f);
+  const printers = f.variants.map(v => `${v.plate != null ? "plate " + v.plate + ": " : ""}${esc(v.printer.label || v.printer.family || "unknown")} ${pill(v.printer.state, (v.printer.confidence || "-") + " · " + v.printer.state)}`).join("<br>");
+  const t = f.title;
+  const titleInfo = t ? `<details><summary>Title</summary><ul class="ev"><li><span class="k">original</span> ${esc(t.original)}</li><li><span class="k">normalised</span> ${esc(t.normalized) || "∅"}${t.genericScore ? ` <span class="k">(generic ${esc(t.genericScore)})</span>` : ""}</li>${(t.transformations || []).map(x => `<li><span class="k">${esc(x.rule)}</span> removed “${esc(x.removed)}”</li>`).join("")}</ul></details>` : "";
+  const proj = f.project ? `<span class="path">3MF ${esc(f.project.flavour)} · ${f.project.plates} plate(s), ${f.project.printablePlates} printable${f.project.designer ? " · " + esc(f.project.designer) : ""}${f.project.designModelId ? " · design " + esc(f.project.designModelId) : ""}</span>` : "";
+  const lin = f.lineage.length ? `<details><summary>Lineage (${f.lineage.length})</summary><ul class="ev">${f.lineage.map(l => `<li><span class="k">${esc(l.relation)} ${l.direction === "out" ? "→" : "←"}</span> ${esc(l.other)} ${pill(l.state, l.confidence + " · " + l.state)} <span class="k">${esc(l.method)}</span></li>`).join("")}</ul></details>` : "";
+  return `<tr><td class="file"><span class="name" title="${esc(base(f.location))}">${esc(stem(base(f.location)))}</span><span class="path" title="${esc(f.location)}">${esc(f.location)}</span>
+      <span class="path">${esc(f.role)}${f.state !== "present" ? " · " + esc(f.state) : ""}</span>${proj}${titleInfo}${lin}</td>
+    <td>${printers || '<span class="sub">—</span>'}</td>
+    <td>${pill(conf, conf === "none" ? "standalone" : conf)} <span class="sub">${esc(w.method)}</span>${w.note ? `<div class="why">${esc(w.note)}</div>` : ""}
+      ${w.decision ? `<div class="why">Decision #${esc(w.decision)}</div>` : ""}
+      ${(w.evidence && w.evidence.length) || (w.claim && w.claim.evidence.length) ? `<details><summary>Evidence</summary>${evidenceList(w.evidence && w.evidence.length ? w.evidence : w.claim.evidence)}</details>` : ""}</td></tr>`;
+}
+
+function modelsTab() {
+  const list = DATA.models.filter(m => !m.empty).filter(modelMatches);
+  return `<h2>Models (${list.length})</h2>` + list.slice(0, shown).map(m => `<div class="item">
+    <h3>${esc(m.name)} ${pill(m.origin === "user" ? "decision" : "", m.origin)} <span class="sub">${m.files.length} file(s)${m.entries.length ? ", " + m.entries.length + " inside projects" : ""}${m.printers.length ? " · " + esc(m.printers.join(", ")) : ""}${m.grouping.length ? " · " + esc(m.grouping.join(", ")) : ""}</span></h3>
+    ${m.designer || m.license || m.designModelId ? `<div class="sub">${[m.designer, m.license, m.designModelId && "design " + m.designModelId].filter(Boolean).map(esc).join(" · ")}</div>` : ""}
+    ${m.decisions.length ? `<div class="why">Decisions: ${m.decisions.map(d => `#${d.id} ${esc(d.relation)} ${esc(d.polarity)}${d.superseded ? " (superseded)" : ""}`).join(", ")}</div>` : ""}
+    <table><colgroup><col style="width:44%"><col style="width:24%"><col style="width:32%"></colgroup>
+      <thead><tr><th>File</th><th>Printer</th><th>Why it is in this Model</th></tr></thead><tbody>${m.files.map(fileRow).join("")}</tbody></table>
+    <div class="sub path">${esc(m.uuid)}</div></div>`).join("") + more(list.length);
+}
+
+function suggestionsTab() {
+  const method = $("f-method").value;
+  const list = DATA.suggestions.filter(s => (!method || s.method === method) && (!$("f-conf").value || $("f-conf").value === "medium") && (!$("f-root").value || s.files.some(inRoot)) && hasText(s));
+  return `<h2>Suggestions (${list.length})</h2><div class="sub">Medium confidence: one independent group of Evidence. Nothing was merged; each needs the owner's answer.</div>` +
+    list.slice(0, shown).map(s => `<div class="item"><h3>${esc(s.a.name)} ↔ ${esc(s.b.name)} ${pill("medium", "medium · suggested")} <span class="sub">${esc(s.method)} · ${esc(s.groups.join(", "))}</span></h3>
+      <div class="path">${esc(s.files[0])}</div><div class="path">${esc(s.files[1])}</div>
+      ${evidenceList(s.evidence)}<div class="why">Missing for automatic grouping: ${esc(s.missing)}</div>${ignoredList(s.ignored)}</div>`).join("") + more(list.length);
+}
+
+function ambiguousTab() {
+  const a = DATA.ambiguous;
+  if (!a) return '<div class="empty">Grouping has not run yet.</div>';
+  const root = $("f-root").value;
+  const prot = a.protected.filter(p => (!root || p.files.some(inRoot)) && hasText(p));
+  const amb = a.files.filter(x => inRoot(x.file) && hasText(x));
+  const nested = a.modelFolders.filter(x => x.status !== "model_folder" && inRoot(x.folder) && hasText(x));
+  const unres = a.unresolvedSources.filter(x => inRoot(x.file) && hasText(x));
+  const blocks = a.commonBlocks.filter(hasText);
+  const blocked = a.blocked.filter(x => (inRoot(x.a) || inRoot(x.b)) && hasText(x));
+  const recorded = a.recorded.filter(x => (inRoot(x.a) || inRoot(x.b)) && hasText(x) && (!$("f-method").value || x.method === $("f-method").value));
+  return `<h2>Protected generic names (${prot.length})</h2><div class="sub">Files that share a name that identifies nothing; they were deliberately not merged on it.</div>` +
+    prot.map(p => `<div class="item"><h3>${esc(p.term.replace(/^title:/, "title "))} <span class="sub">${p.files.length} files in ${p.models} Models</span></h3><div class="why">${esc(p.reason)}</div>
+      <details><summary>Files</summary><ul class="ev">${p.files.map(f => `<li>${esc(f)}</li>`).join("")}</ul></details></div>`).join("") +
+    `<h2>Files that match several Models (${amb.length})</h2>` + amb.map(x => `<div class="item"><div class="path">${esc(x.file)}</div><div class="why">Equally like: ${esc(x.models.join(", "))} — nothing was suggested</div></div>`).join("") +
+    `<h2>Folders not used as model folders (${nested.length})</h2>` + nested.map(x => `<div class="item"><div class="path">${esc(x.folder)}</div><div class="why">${esc(x.status)}: ${esc(x.reason)}</div></div>`).join("") +
+    `<h2>Common names too widely shared to compare (${blocks.length})</h2>` + blocks.map(x => `<div class="item">${esc(x.kind)}: <b>${esc(x.value)}</b> — ${esc(x.nodes)} files; ${esc(x.reason)}</div>`).join("") +
+    `<h2>Source references that resolve to nothing (${unres.length})</h2><div class="sub">Weak: path text only, never grouping Evidence.</div>` +
+    `<table><colgroup><col style="width:55%"><col style="width:45%"></colgroup><thead><tr><th>File</th><th>Reference</th></tr></thead><tbody>${unres.slice(0, shown).map(x => `<tr><td class="file"><span class="path" title="${esc(x.file)}">${esc(x.file)}</span></td><td class="file"><span class="path" title="${esc(x.reference)}">${esc(x.reference)}</span></td></tr>`).join("")}</tbody></table>` +
+    `<h2>Merges a Decision prevented (${blocked.length})</h2>` + blocked.map(x => `<div class="item"><div class="path">${esc(x.a)}</div><div class="path">${esc(x.b)}</div><div class="why">${esc(x.blockedBy)}</div>${evidenceList(x.evidence)}</div>`).join("") +
+    `<h2>Recorded, not acted on (${recorded.length})</h2><div class="sub">Weak or conflicting Evidence: explains, never groups.</div>` +
+    recorded.slice(0, shown).map(x => `<div class="item"><div class="path">${esc(x.a)}</div><div class="path">${esc(x.b)}</div><div class="why">${esc(x.missing)}</div>${evidenceList(x.evidence)}${ignoredList(x.ignored)}</div>`).join("") + more(Math.max(recorded.length, unres.length));
+}
+
+function otherTab() {
+  const list = DATA.reviews.filter(reviewMatches);
+  const dups = DATA.duplicates.filter(d => (inRoot(d.a) || inRoot(d.b)) && hasText(d));
+  const decs = DATA.decisions.filter(hasText);
+  return `<h2>Review items (${list.length})</h2>` +
+    `<table><colgroup><col style="width:16%"><col style="width:9%"><col style="width:9%"><col style="width:66%"></colgroup><thead><tr><th>Type</th><th>Status</th><th>Confidence</th><th>Summary</th></tr></thead><tbody>` +
+    list.slice(0, shown).map(r => `<tr><td>${esc(r.kind)}</td><td>${pill(r.status === "open" ? "suggested" : "recorded", r.status)}</td><td>${esc(r.confidence || "—")}</td>
+      <td>${esc(r.summary)}${r.note ? `<div class="why">${esc(r.note)}</div>` : ""}${r.evidence ? `<details><summary>Evidence</summary><pre class="ev">${esc(JSON.stringify(r.evidence, null, 1)).slice(0, 4000)}</pre></details>` : ""}</td></tr>`).join("") +
+    `</tbody></table>` + more(list.length) +
+    `<h2>Duplicates (${dups.length})</h2><div class="sub">The same content at two locations. Recorded only; nothing is hidden.</div>` +
+    dups.map(d => `<div class="item"><div class="path">${esc(d.a)}</div><div class="path">${esc(d.b)}</div><div class="why">${esc(d.basis === "sha256" ? "byte-identical (full hash)" : "same quick fingerprint; the full hash will confirm")}</div></div>`).join("") +
+    `<h2>Decisions (${decs.length})</h2>` + (decs.length ? `<table><thead><tr><th>#</th><th>Relation</th><th>Subject</th><th>Object</th><th>State</th></tr></thead><tbody>${decs.map(d => `<tr><td>${d.id}</td><td>${esc(d.relation)} ${esc(d.polarity)}</td><td class="file"><span class="path">${esc(d.hint || d.subject)}</span></td><td class="file"><span class="path">${esc(d.object || "")}</span></td><td>${d.superseded ? "superseded" : "active"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No Decisions yet.</div>');
+}
+
+function more(n) { return n > shown ? `<div class="more"><button type="button" id="more">Show ${Math.min(PAGE, n - shown)} more of ${n - shown}</button></div>` : ""; }
+
+function render() {
+  summary();
+  $("panel").innerHTML = TAB === "models" ? modelsTab() : TAB === "suggestions" ? suggestionsTab() : TAB === "ambiguous" ? ambiguousTab() : otherTab();
+  $("panel").setAttribute("aria-labelledby", "t-" + TAB);
+  const m = $("more");
+  if (m) m.addEventListener("click", () => { shown += PAGE; render(); });
+}
+
+for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => {
+  TAB = b.dataset.tab; shown = PAGE;
+  for (const x of document.querySelectorAll(".tabs button")) x.setAttribute("aria-selected", String(x === b));
+  DATA && render();
+});
+for (const id of ["f-root", "f-conf", "f-method", "f-kind", "f-status"]) $(id).addEventListener("change", () => { shown = PAGE; DATA && render(); });
+$("f-q").addEventListener("input", () => { shown = PAGE; DATA && render(); });
+$("reload").addEventListener("click", load);
+$("export").addEventListener("click", () => { window.location.href = "/api/library/diagnostics/grouping?export=1"; });
+load();
+</script>
+</body>
+</html>
