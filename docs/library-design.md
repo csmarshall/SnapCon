@@ -1446,3 +1446,72 @@ spellings ("MatMires Make", "Cinderwing 3D") stay unknown: that is M4 candidate 
 
 **Known limits:** a location's first scan reads every file (~1 MB each for G-code); main-thread
 writes (location status) wait on the worker's write lock for at most one short transaction.
+
+## 25. M3 results (2026-10-02)
+
+**Commits:** c49b1bb (K1C and Ender-3 V3 KE families, a separate resolver change), 2d11e7a (zip
+reader, also behind `threemf.js`), 88b12cc (3MF extraction, Projects/Plates/Variants, lineage).
+Nothing from M4 was implemented: no Models, no `member_of`, no Review Items.
+
+**Resolver (before M3):** `K1C` folders are printer-family folders (Creality K1C);
+`[CP] TinyTREX` now resolves to the Ender-3 V3 KE, high. A printer-family folder is what the
+folder says, never Evidence: `K1C/HollowLog` keeps its identical Ender-3 V3 Plus Claim (high,
+applied) and the raw view reports the disagreement. Tests prove the folder neither raises nor
+lowers a Claim. Live: four folder disagreements, all in `K1C/` (three V3 Plus files, and
+`K1C.gcode` itself, sliced with the `Creality@K1` profile).
+
+**Implemented vs. specification:**
+- §6.2 3MF: range reads (directory + small entries; zip64, unicode names, data descriptors,
+  STORE/DEFLATE, CRC, caps on every untrusted length); `3dmodel.model` read whole only below
+  2 MB, else its head (never inflating more than the head); `model_settings.config`,
+  `project_settings.config`, `slice_info.config`, `plate_N.gcode.md5`, plate pictures (small
+  first), `thumbnail_3mf` as fallback, Auxiliaries as entry Files. Unreadable is an unreadable
+  File, never a failed scan.
+- Projects for every 3MF; Plates as the file lists them; a Variant only for a plate whose G-code
+  is inside. Role is by content (`sliced` when a plate's G-code is present, else `project`).
+- `targets_printer` per printable plate (`content#plate`) from the profile plus the plate's Bambu
+  `printer_model_id` (identity group). An unsliced project's printer is shown as "set up for",
+  from its own settings, and is not a Claim.
+- Lineage (`source_of`, `sliced_from`) per the §4.4 table, recomputed after each complete scan and
+  after full hashes (MD5s). Ties are recorded, never shared.
+- `threemf.js`'s API is unchanged; the Bambu connector's FTPS reader is untouched.
+
+**Real 3MFs (17: 2 in the G-code folder, 15 in U1 Files; 346 MB):**
+
+| | Bambu (2) | Snapmaker Orca (15) |
+|---|---|---|
+| Application | `BambuStudio-02.0x.xx.xx` | `BambuStudio-2.3.x` + Snapmaker printer + settings version 2.3.x |
+| MakerWorld metadata | both: Title, Designer, License, DesignModelId, DesignProfileId, ProfileTitle, ProfileUserName (+ DesignRegion, DesignerUserId, ProfileUserId) | none (empty fields) |
+| Sliced | `ams.gcode.3mf`: 1 plate, P2S N7, high/applied, 2 PETG filaments with grams | none: all unsliced projects |
+| Plates | 1 + 1 | 32 in total (`soniverine` 12, `Sea Turtle` 6, `santa` 2) |
+| Auxiliaries | 16 entry Files (pictures) | none |
+
+- MakerWorld values verified: Benchy `US988acfe8c03702` / `272525070`, "Speed Benchy!",
+  barbasnoo, CC0; Keyrambit `USec11953facc500` / `808246553`, TR10_, BY-NC-SA.
+- Read: 2.46 MB of 346 MB (0.7%); 80–617 KB per file (the Bambu files carry their pictures);
+  12–40 reads; parse 2–24 ms; read 2–31 ms with NAS outliers to 217 ms.
+- Source references: recorded as written. Most point at paths that cannot exist here
+  (`C:\Users\…\Temp\…`, `Z:\…`, `F:\…`) or at other 3MFs not in the library: no `source_of`
+  Claim results, correctly.
+- Lineage on the real library: one suggestion, `5x Grinch… .gcode` sliced_from
+  `5x Flexy Grinch @ 98.3mf` (same object "Flexy_Grinch_Standard_STL_No Hat Version2.stl",
+  medium, suggested). A Benchy-vs-Benchy match appeared first and was a false positive: common
+  test prints are now generic names.
+- Packaged Windows build: same results.
+
+**Data-model findings (none contradicts v3.2):**
+- MakerWorld fields beyond the `projects` columns (ProfileUserName, DesignRegion, user ids, dates)
+  are kept in `files.meta_json`; no column is needed until something filters on them.
+- `projects.printer_model_id` is one value, while Bambu records it per plate: the per-plate value
+  is on each Variant; the Project keeps the first sliced plate's.
+- Entry Files are fingerprinted from the archive's own record (size + CRC-32), not from content
+  reads, so their content key is not comparable with a loose file's.
+- Snapmaker Orca names itself "BambuStudio" in 3MFs. The `snapmaker_orca` flavour is therefore an
+  inference with its method recorded, not a field the file states.
+
+**Recommendations before M4:**
+- Treat `source_file` as weak: on the real files it is mostly an unresolvable path.
+- Object-name lineage needs the generic-name list kept honest (the Benchy case); M4's generic
+  scoring by "appears under unrelated titles" (§4.4 rule 7) will matter.
+- Consolidate `connectors/zip-reader.js` (the Bambu FTPS reader) onto `library/zipReader.js` as a
+  separate, connector-tested change.
