@@ -135,4 +135,23 @@ function compareTitles(a, b) {
   return done("different", 0, "none");
 }
 
-module.exports = { normalizeTitle, compareTitles, RULE_VERSION };
+// A title for people, with its own casing: the original text minus exactly
+// what the recorded transformations removed ("2x TinyTREX (5h11m, 3.25$,
+// 102g)" → "TinyTREX"). Presentation only; never Evidence. `noiseOnly` keeps
+// the plate, designer and format words, for the fallback name of a Model
+// whose title is generic ("The Plate 1_PLA_9h22m" → "The Plate 1").
+const NOISE_RULES = new Set(["tag", "material_time", "print_stats", "colour", "colour_weights", "colour_list", "temperature", "copy_count", "filament", "stray_stats"]);
+function displayTitle(t, { noiseOnly = false } = {}) {
+  let s = String(t.original || "");
+  for (const x of t.transformations || []) {
+    if (x.rule === "extension" || (noiseOnly && !NOISE_RULES.has(x.rule))) continue;
+    const i = s.indexOf(x.removed);
+    if (i >= 0) s = s.slice(0, i) + " " + s.slice(i + x.removed.length);
+  }
+  s = s.replace(/_/g, " ");
+  for (let k = 0; k < 4; k++) s = s.replace(/[([{]\s*[,.;:\s]*\s*[)\]}]/g, " ").replace(/\(\s*[,.;]+\s*/g, "(").replace(/\s*[,.;]+\s*\)/g, ")");
+  s = s.replace(/\s+/g, " ").replace(/^[\s\-–—,.;:@]+|[\s\-–—,.;:@]+$/g, "").trim();
+  return s;
+}
+
+module.exports = { normalizeTitle, compareTitles, displayTitle, RULE_VERSION };

@@ -474,3 +474,19 @@ test("the export is stable across reruns and carries the rule versions", t => {
   assert.equal(typeof e.titleRuleVersion, "number");
   assert.equal(e.generatedAt, undefined, "no run timestamp in the export");
 });
+
+test("Model names read as the files wrote them: the title's own casing, without counts, stats and tags", t => {
+  const env = setup(t);
+  const { db } = env;
+  const a = file(db, { rel: "2x TinyTREX (5h11m, 3.25$, 102g).gcode", objects: ["Cinderwing3D_TinyTREX.stl"] });
+  file(db, { rel: "[CP] TinyTREX @ 190 (13h19m, 9.47$, 276g).gcode", objects: ["Cinderwing3D_TinyTREX.stl"] });
+  const h = file(db, { rel: "HollowLog (5h42m).gcode" });
+  const g = file(db, { rel: "Assembly_PLA_15h12m.gcode", objects: ["Assembly"] });
+  const p = file(db, { rel: "The Plate 1_PLA_9h22m.gcode" });
+  env.run();
+  const nameOf = f => db.prepare("SELECT m.name FROM files x JOIN models m ON m.id = x.model_id WHERE x.id = ?").get(f.id).name;
+  assert.equal(nameOf(a), "TinyTREX");
+  assert.equal(nameOf(h), "HollowLog");
+  assert.equal(nameOf(g), "Assembly", "a generic title keeps its words, loses its noise");
+  assert.equal(nameOf(p), "The Plate 1");
+});

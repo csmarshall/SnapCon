@@ -23,7 +23,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const PrinterIdentity = require("../public/printer-identity");
-const { normalizeTitle, compareTitles, RULE_VERSION: TITLE_RULE_VERSION } = require("./titles");
+const { normalizeTitle, compareTitles, displayTitle, RULE_VERSION: TITLE_RULE_VERSION } = require("./titles");
 const { genericObject, commonObjects } = require("./genericNames");
 const { nameKey } = require("./folders");
 
@@ -394,6 +394,8 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     if (sets.length) db.prepare(`UPDATE models SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`).run(...vals, now, m);
   }
 
+  refreshQueryCaches(db);
+
   // Duplicates: locations with the same content (§4.4 duplicate_of: keyed by
   // location; only records, never hides or merges anything).
   const duplicates = [];
@@ -587,6 +589,28 @@ function writeReport(reportPath, report) {
 
 // ---------------------------------------------------------------- helpers
 
+// The Library's query caches (§4.6 rule 5, §14), rebuilt from what grouping
+// just wrote: which printer families each Model has Variants for (the grid's
+// printer filter and facets), and the search index. Derived; dropping them
+// loses nothing, and neither is ever the source of printer identity.
+function refreshQueryCaches(db) {
+  db.prepare("DELETE FROM model_families").run();
+  db.prepare(`INSERT INTO model_families (model_id, printer_family, variant_count)
+    SELECT f.model_id, v.printer_family, count(*) FROM variants v JOIN files f ON f.id = v.file_id
+    WHERE f.model_id IS NOT NULL AND f.entry_path = '' AND v.printer_family IS NOT NULL GROUP BY f.model_id, v.printer_family`).run();
+  db.prepare("DELETE FROM model_fts").run();
+  db.prepare(`INSERT INTO model_fts (rowid, name, designer, tags, collections, file_names, object_names, project_titles, notes)
+    SELECT m.id, m.name,
+      trim(coalesce(m.designer, '') || ' ' || coalesce((SELECT group_concat(DISTINCT p.designer) FROM projects p JOIN files f ON f.id = p.file_id WHERE f.model_id = m.id), '')),
+      '', '',
+      coalesce((SELECT group_concat(f.name, ' ') FROM files f WHERE f.model_id = m.id AND f.entry_path = ''), ''),
+      coalesce((SELECT group_concat(DISTINCT o.raw_name) FROM file_objects o JOIN files f ON f.id = o.file_id
+        WHERE f.model_id = m.id AND o.generic = 0 AND o.origin != 'source_file'), ''),
+      coalesce((SELECT group_concat(DISTINCT p.title) FROM projects p JOIN files f ON f.id = p.file_id WHERE f.model_id = m.id), ''),
+      coalesce(m.notes, '')
+    FROM models m WHERE EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id)`).run();
+}
+
 function modelIdByUuid(D, uuid) { for (const m of D.models.values()) if (m.uuid === uuid) return m.id; return null; }
 
 function edgeView(e, nodes) {
@@ -594,15 +618,23 @@ function edgeView(e, nodes) {
 }
 
 // A readable name: a 3MF project's Title if any member has one, else the
-// most common normalised title, shown with its original words.
+// most common normalised title, shown as its file wrote it ("TinyTREX", not
+// "Tinytrex"): the original text minus exactly what normalisation removed.
+// Presentation only — the name is never grouping Evidence.
 function modelName(ns, D) {
   for (const n of ns) for (const f of n.files) { const p = D.projects.get(f.id); if (p && p.title) return p.title; }
   const counts = new Map();
   // A title left empty, or only generic ("the", "assembly"), names nothing.
   for (const n of ns) for (const t of n.titles) if (t.normalized && t.tokenCount > 0 && t.genericScore < 1) counts.set(t.normalized, (counts.get(t.normalized) || 0) + 1);
   const best = [...counts.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1))[0];
-  if (!best) return ns[0].files[0].name.replace(/\.[^.]+$/, "");
-  return best[0].replace(/\b\w/g, c => c.toUpperCase());
+  if (best) {
+    for (const n of ns) for (const t of n.titles) if (t.normalized === best[0]) { const d = displayTitle(t); if (d) return d; }
+    return best[0].replace(/\b\w/g, c => c.toUpperCase());
+  }
+  // Only generic titles: the first one with its noise removed (counts, times,
+  // tags) but its words kept ("The Plate 1", "Assembly"), else the file name.
+  const d = displayTitle(ns[0].titles[0], { noiseOnly: true });
+  return d && d.length >= 2 ? d : ns[0].files[0].name.replace(/\.[^.]+$/, "");
 }
 
 function projectFacts(ns, D) {
