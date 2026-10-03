@@ -157,3 +157,18 @@ test("M4: grouping diagnostics are admin-only, versioned, and export without run
   assert.equal(ex.generatedAt, undefined);
   assert.equal(ex.lastRun, undefined);
 });
+
+test("a location's error is withheld from those who don't manage locations: it can name the share", async t => {
+  const s = await server(t);
+  // Let the start-up check and scan finish first: a successful one clears the error.
+  assert.equal((await s.call("admin", "POST", "/api/library/roots/gcode/rescan")).status, 200);
+  await s.library._idle();
+  s.library._store.db.prepare("UPDATE roots SET last_error = ? WHERE id = 'gcode'").run("The storage at \\\\nas-box\\models is unreachable");
+  for (const who of ["view", "regular"]) {
+    const r = await s.call(who, "GET", "/api/library/roots");
+    assert.equal(r.body.roots[0].path, undefined, who);
+    assert.equal(r.body.roots[0].lastError, undefined, who);
+    assert.ok(!JSON.stringify(r.body).includes("nas-box"), who + ": no part of the share leaks");
+  }
+  assert.match((await s.call("admin", "GET", "/api/library/roots")).body.roots[0].lastError, /nas-box/, "admins still see why");
+});

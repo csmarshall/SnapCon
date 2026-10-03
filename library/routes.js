@@ -27,7 +27,9 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
   // an internal UNC path.
   app.get("/api/library/roots", requireAuth, need("library.view"), (req, res) => {
     const withPaths = library.can(req.user, "library.sources.manage");
-    res.json({ roots: library.listRoots().map(r => (withPaths ? r : { ...r, path: undefined })) });
+    // lastError too: a network error names the share ("The storage at
+    // \\host\share is unreachable"), so it is a path as well.
+    res.json({ roots: library.listRoots().map(r => (withPaths ? r : { ...r, path: undefined, lastError: undefined })) });
   });
   app.post("/api/library/roots", requireAuth, need("library.sources.manage"), (req, res) =>
     send(res, () => library.addRoot(req.body || {}, actorFromReq(req))));
