@@ -20,77 +20,38 @@
 // line — test/docker.test.js enforces that.
 "use strict";
 const fs = require("fs");
-const zlib = require("zlib");
+const { openZipSync, ZipError } = require("./library/zipReader");
 
 // A .3mf is tens of megabytes at most; the entry SnapCon reads out of one is
 // the plate's gcode, a few MB. The cap is defence against a crafted archive
 // claiming a gigabyte, not a real-file limit.
 const MAX_ENTRY_BYTES = 64 * 1024 * 1024;
-const EOCD_SIG = 0x06054b50, CD_SIG = 0x02014b50, LOCAL_SIG = 0x04034b50;
 
-// ---- the smallest zip reader this needs ----
-// Central directory only: name, compression method, sizes and where the entry
-// starts. No zip64 (a .3mf that large is not a print job), no encryption.
-function readDirectory(fd, size) {
-  // The end-of-central-directory record is last, after an optional comment.
-  const tailLen = Math.min(size, 66560);
-  const tail = Buffer.alloc(tailLen);
-  fs.readSync(fd, tail, 0, tailLen, size - tailLen);
-  let eocd = -1;
-  for (let i = tail.length - 22; i >= 0; i--) {
-    if (tail.readUInt32LE(i) === EOCD_SIG) { eocd = i; break; }
-  }
-  if (eocd < 0) throw new Error("not a zip archive");
-  const count = tail.readUInt16LE(eocd + 10);
-  const cdSize = tail.readUInt32LE(eocd + 12);
-  const cdOffset = tail.readUInt32LE(eocd + 16);
-  if (cdOffset === 0xffffffff || cdSize === 0xffffffff) throw new Error("zip64 archives are not supported");
-  const cd = Buffer.alloc(cdSize);
-  fs.readSync(fd, cd, 0, cdSize, cdOffset);
-  const entries = new Map();
-  let o = 0;
-  for (let i = 0; i < count && o + 46 <= cd.length; i++) {
-    if (cd.readUInt32LE(o) !== CD_SIG) break;
-    const method = cd.readUInt16LE(o + 10);
-    const compSize = cd.readUInt32LE(o + 20);
-    const rawSize = cd.readUInt32LE(o + 24);
-    const nameLen = cd.readUInt16LE(o + 28);
-    const extraLen = cd.readUInt16LE(o + 30);
-    const commentLen = cd.readUInt16LE(o + 32);
-    const localOffset = cd.readUInt32LE(o + 42);
-    const name = cd.toString("utf8", o + 46, o + 46 + nameLen);
-    entries.set(name, { method, compSize, rawSize, localOffset });
-    o += 46 + nameLen + extraLen + commentLen;
-  }
-  return entries;
-}
-
-function readEntry(fd, entry, maxBytes) {
-  if (entry.rawSize > Math.min(maxBytes, MAX_ENTRY_BYTES)) {
-    throw new Error(`entry is too large to read (${entry.rawSize} bytes)`);
-  }
-  // The local header repeats the name and extra fields, and its lengths are the
-  // authoritative ones for finding where the data starts.
-  const lh = Buffer.alloc(30);
-  fs.readSync(fd, lh, 0, 30, entry.localOffset);
-  if (lh.readUInt32LE(0) !== LOCAL_SIG) throw new Error("damaged zip entry");
-  const dataAt = entry.localOffset + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
-  const comp = Buffer.alloc(entry.compSize);
-  fs.readSync(fd, comp, 0, entry.compSize, dataAt);
-  if (entry.method === 0) return comp;
-  if (entry.method === 8) return zlib.inflateRawSync(comp, { maxOutputLength: Math.min(maxBytes, MAX_ENTRY_BYTES) });
-  throw new Error("unsupported zip compression method " + entry.method);
-}
-
+// ---- the zip itself ----
+// library/zipReader.js, the Library's hardened reader: zip64, unicode names,
+// data descriptors, CRC-checked entries, and limits on every length a crafted
+// archive could lie about. Read synchronously here — callers already run this
+// off the main thread (netfs workers) or on local files.
 function withArchive(file, fn) {
   const fd = fs.openSync(file, "r");
   try {
     const size = fs.fstatSync(fd).size;
-    return fn(fd, readDirectory(fd, size));
+    const readAt = (pos, len) => {
+      const b = Buffer.alloc(len);
+      const n = fs.readSync(fd, b, 0, len, pos);
+      if (n !== len) throw new ZipError("ZIP_TRUNCATED", "damaged zip: short read");
+      return b;
+    };
+    const zip = openZipSync(readAt, size);
+    return fn(zip, zip.entries);
   } finally {
     fs.closeSync(fd);
   }
 }
+const readEntry = (zip, name, maxBytes) => zip.read(name, { maxBytes: Math.min(maxBytes, MAX_ENTRY_BYTES) });
+
+// The directory as name -> entry, for callers that only list names.
+function readDirectory(file) { return withArchive(file, (zip, entries) => entries); }
 
 // ---- what SnapCon asks of a .3mf ----
 
@@ -145,11 +106,10 @@ function read(file, { maxBytes = 4 * 1024 * 1024 } = {}) {
     printerModel: null
   };
   try {
-    withArchive(file, (fd, entries) => {
-      const settingsEntry = entries.get("Metadata/project_settings.config");
-      if (settingsEntry) {
+    withArchive(file, (zip, entries) => {
+      if (entries.has("Metadata/project_settings.config")) {
         try {
-          const json = JSON.parse(readEntry(fd, settingsEntry, maxBytes).toString("utf8"));
+          const json = JSON.parse(readEntry(zip, "Metadata/project_settings.config", maxBytes).toString("utf8"));
           info.isBambu = isBambuSettings(json);
           info.printerModel = (json && json.printer_model) || null;
         } catch { /* unreadable settings: not identifiable as Bambu */ }
@@ -158,9 +118,8 @@ function read(file, { maxBytes = 4 * 1024 * 1024 } = {}) {
         .map(n => PLATE_GCODE_RE.exec(n)).filter(Boolean)
         .map(m => Number(m[1])).sort((a, b) => a - b);
       info.sliced = info.plates.length > 0;
-      const sliceInfo = entries.get("Metadata/slice_info.config");
-      if (sliceInfo) {
-        try { Object.assign(info, parseSliceInfo(readEntry(fd, sliceInfo, maxBytes).toString("utf8"))); }
+      if (entries.has("Metadata/slice_info.config")) {
+        try { Object.assign(info, parseSliceInfo(readEntry(zip, "Metadata/slice_info.config", maxBytes).toString("utf8"))); }
         catch { /* the row survives without it */ }
       }
     });
@@ -174,10 +133,10 @@ function read(file, { maxBytes = 4 * 1024 * 1024 } = {}) {
 // parser every other file goes through: the header comments inside are the
 // ordinary ones.
 function plateGcode(file, plate = 1, { maxBytes = 64 * 1024 * 1024 } = {}) {
-  return withArchive(file, (fd, entries) => {
-    const entry = entries.get(`Metadata/plate_${plate}.gcode`);
-    if (!entry) throw Object.assign(new Error(`This file has no sliced plate ${plate}`), { code: "ENOPLATE" });
-    return readEntry(fd, entry, maxBytes).toString("utf8");
+  return withArchive(file, (zip, entries) => {
+    const name = `Metadata/plate_${plate}.gcode`;
+    if (!entries.has(name)) throw Object.assign(new Error(`This file has no sliced plate ${plate}`), { code: "ENOPLATE" });
+    return readEntry(zip, name, maxBytes).toString("utf8");
   });
 }
 
@@ -185,10 +144,9 @@ function plateGcode(file, plate = 1, { maxBytes = 64 * 1024 * 1024 } = {}) {
 // none, which is not an error — the card just shows no thumbnail.
 function plateThumbnail(file, plate = 1) {
   try {
-    return withArchive(file, (fd, entries) => {
+    return withArchive(file, (zip, entries) => {
       for (const name of [`Metadata/plate_${plate}.png`, `Metadata/plate_${plate}_small.png`, "Metadata/plate_1.png"]) {
-        const entry = entries.get(name);
-        if (entry) return readEntry(fd, entry, 8 * 1024 * 1024);
+        if (entries.has(name)) return readEntry(zip, name, 8 * 1024 * 1024);
       }
       return null;
     });
