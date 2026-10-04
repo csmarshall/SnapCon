@@ -490,3 +490,18 @@ test("Model names read as the files wrote them: the title's own casing, without 
   assert.equal(nameOf(g), "Assembly", "a generic title keeps its words, loses its noise");
   assert.equal(nameOf(p), "The Plate 1");
 });
+
+test("a cluster that overlaps two existing Models equally goes to the older one, whichever file was last seen where", t => {
+  for (const flip of [false, true]) {
+    const env = setup(t);
+    const { db } = env;
+    db.prepare("INSERT INTO models (uuid, origin, name, created_at, updated_at) VALUES ('00000000-0000-0000-0000-0000000000a1', 'auto', 'Older', 1, 1), ('00000000-0000-0000-0000-0000000000a2', 'auto', 'Newer', 2, 2)").run();
+    const a = file(db, { rel: "Beardie.gcode", objects: ["Beardie.stl"] });
+    const b = file(db, { rel: "4x Beardie.gcode", objects: ["Beardie.stl"] });
+    const [newerKey, olderKey] = flip ? [b.key, a.key] : [a.key, b.key];
+    db.prepare("INSERT INTO model_anchors (model_id, content_key, last_seen) VALUES ((SELECT id FROM models WHERE name = 'Newer'), ?, 1), ((SELECT id FROM models WHERE name = 'Older'), ?, 1)").run(newerKey, olderKey);
+    env.run();
+    assert.equal(modelOf(db, a.loc), "00000000-0000-0000-0000-0000000000a1", "flip " + flip);
+    assert.equal(modelOf(db, b.loc), "00000000-0000-0000-0000-0000000000a1", "flip " + flip);
+  }
+});

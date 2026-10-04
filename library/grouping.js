@@ -302,7 +302,11 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     for (const k of c.keys) for (const m of anchorOf.get(k) || []) if (!(rejected.has(k) && rejected.get(k).has(m))) counts.set(m, (counts.get(m) || 0) + 1);
     for (const [m, n] of counts) if (D.models.has(m) && n * 2 >= c.keys.length) cand.push({ i, m, n });
   });
-  cand.sort((x, y) => (y.n - x.n) || (clusters[x.i].keys[0] < clusters[y.i].keys[0] ? -1 : 1) || x.m - y.m);
+  // Largest overlap first, then cluster, then the older Model. (The cluster
+  // comparison must return 0 for the same cluster, or the Model tie-break
+  // never runs and the order depends on the sort.)
+  const cmpKey = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  cand.sort((x, y) => (y.n - x.n) || cmpKey(clusters[x.i].keys[0], clusters[y.i].keys[0]) || x.m - y.m);
   const wanted = new Map();
   for (const c of cand) {
     if (assignment.has(c.i)) continue;
