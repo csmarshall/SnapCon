@@ -184,7 +184,8 @@ Future: Project —converted_from→ Project                 [snapcon · exact, 
 
 ```
 resolve(subject, relation) =
-    latest non-superseded DECISION (affirm or reject)   → authoritative
+    latest active DECISION (affirm or reject)           → authoritative
+      (active = not superseded by a later Decision, not withdrawn by an undo)
   else strongest Claim in state 'applied'  (§4.4)
   else unresolved (Claims remain 'suggested' / 'recorded')
 ```
@@ -322,7 +323,7 @@ Three kinds of data, each with its own lifetime:
 |---|---|---|
 | `roots` (configuration columns) | `identity_cache` | `roots` runtime status columns, `scan_runs` |
 | `models`, `model_anchors` | | `files`, `content_aliases`, `file_objects`, `file_titles`, `folder_classes` |
-| `decisions` | | `projects`, `plates`, `variants` |
+| `decisions`, `actions` (M6) | | `projects`, `plates`, `variants` |
 | `review_items` | | `claims` |
 | `tags`, `model_tags`, `collections`, `collection_models` | | `model_stats`, `model_families` |
 | `prints` | | `thumbs`, `model_fts` |
@@ -795,22 +796,49 @@ Rules that apply throughout:
   - The `Assembly` files form an ambiguous cluster, not a merge.
   - Butterfly Dragon 3 vs 4 colours and Lupa vs "Lupa, 3 Colors" become suggestions.
 
-**Manual tools (M6).** Each writes a Decision. Undo supersedes it, and the history is kept.
+**Manual tools (M6, as built).** Each writes authored state — a Decision, or an authored `models`
+column — and is recorded in `actions` (who, when, what it wrote and replaced). Grouping runs in the
+same transaction, so the Library shows at once what a rebuild would show. All requests address
+stable keys (Model uuids, content keys, Review Item ids) and answer **409 with a code** when they
+no longer apply (`stale_file`, `model_merged`, `review_resolved`, `undo_blocked`, …).
 
-| Action | Where | Decision |
-|---|---|---|
-| Merge Models | Select cards → "Merge 3 models" (pick surviving name/cover); Model ⋯ → Merge with… | `member_of` affirm for every File of the absorbed Models → surviving uuid |
-| Split | Model → Files → select → "Split 2 files into a new model" | new Model (`origin='user'`); `member_of` affirm → new; `member_of` reject → old |
-| Move File/Variant | Row ⋯ → "Move to model…" | `member_of` affirm → target; `member_of` reject → source |
-| Approve suggestion | Review Item / Diagnostics (M6) | `member_of` affirm (per File), from the Claim |
-| Reject suggestion | Review Item / Diagnostics (M6) | `distinct_from` (Models) or `member_of` reject (File) |
-| Set printer | Variant ⋯ | `targets_printer` affirm, `value_json.printer_family` |
-| Confirm / reject lineage | Model page or Review Item | `source_of` / `sliced_from` affirm or reject |
-| Hide File / unhide | File ⋯ | `hidden` / supersede |
-| Hide Model, rename, notes, cover | Model page | `models` columns (`hidden`, `name` + `name_source='user'`, `notes`, `cover_*` + `cover_source='user'`) |
+| Action | Where | What is written | Capability |
+|---|---|---|---|
+| Merge A into B | Model → More… → "Merge into another model…" (pick B, the name, the cover) | `member_of` affirm for every File of A → B (earlier placements superseded); A keeps its row with `merged_into = B` (never deleted); B's authored values win, A's fill only what B lacks unless the person chose A's name or cover; tags and collections united; `distinct_from` with a third Model carried to B; suggestions between A and B resolved | `library.edit.grouping` |
+| Separate (split) | File ⋯ or ticked files → "Separate N files into a new model…" | new Model (`origin='user'`, the given name); `member_of` affirm → new; `member_of` reject → old | `library.edit.grouping` |
+| Move | File ⋯ or ticked files → "Move N files…"; an ambiguous file → "Choose model…" | `member_of` affirm → target; `member_of` reject → source | `library.edit.grouping` |
+| Approve a suggestion | Model page or Needs attention → "Merge…" (pick which stays) | a merge, its Decisions keeping the Claim (`from_claim_key`) and its Evidence (`evidence_snapshot_json`); the item resolved | `library.edit.grouping` |
+| Reject a suggestion | "Keep apart…" | `distinct_from` (Models), with the Claim and Evidence; the item resolved; never suggested again, and a later automatic merge between them is blocked | `library.edit.grouping` |
+| Dismiss | any Review Item | `review_items.status = 'dismissed'` | `library.review` |
+| Set printer | File ⋯ → "Set printer…" | `targets_printer` affirm, `value_json` `{printer_family, fileSays}`; the file's own Claim is kept and shown ("file says X → set to Y") | `library.edit.metadata` |
+| Hide / unhide a File | File ⋯ / Hidden files | `hidden` affirm / withdrawn (files.hidden is a cache of it) | `library.hide` |
+| Hide / unhide a Model | Model → More… / the hidden banner; "Show hidden models" in the grid | `models.hidden` | `library.hide` |
+| Rename | Model → Rename… ("Use the automatic name again" returns it to grouping) | `models.name` + `name_source='user'` | `library.edit.metadata` |
+| Cover | Model → Change cover… (any picture of the Model: images, plate pictures, file thumbnails) | `models.cover_*` + `cover_source='user'`; a picture that disappears falls back to the §10 order, and the page says so | `library.edit.cover` |
+
+**Structure is not grouping.** A Plate, a Variant or an entry inside a 3MF belongs to its file:
+it moves with the file and is never moved, separated or hidden on its own (`structural`, 400).
+Identical files share a content key, so their copies move together.
+
+**Undo (M6).** Every action can be undone from the flash that follows it or from the Model's
+Changes list, after a reload or a rebuild, by anyone holding the same capability. Undo reverses
+that one action exactly: the Decisions it wrote are **withdrawn** (`withdrawn_at`, kept), the
+Decisions it replaced are in force again, `models` columns return to their earlier values,
+Review Items it closed reopen (grouping closes them again if the condition is gone), each moved
+file's last-known membership anchor returns to its earlier Model, and a Model it created is kept
+with `merged_into` its origin. Automatic grouping then recomputes everything not decided. Undo is
+refused (409 `undo_blocked`) while a later action depends on it — a later Decision replaced one of
+its own, or a `models` column it set has changed since — and the action stays in the history
+marked undone.
+
+Not in Phase 1a M6: confirming or rejecting lineage (`source_of` / `sliced_from` Decisions; the
+real library has no lineage suggestion to act on), merging several Models at once from the grid,
+notes, tags and collections (1b), browser-made covers (1b, §10), approve/reject inside Diagnostics
+(the Library page does it; Diagnostics shows the result).
 
 A Model with any grouping Decision is pinned: automation may add newly matching Files, but never
-remove or re-home a decided one.
+remove or re-home a decided one. A merged-away Model never takes a cluster again; a Decision that
+still names it follows `merged_into` to the survivor.
 
 ---
 
@@ -893,7 +921,11 @@ only.
 
 - Printing stays on the existing `requireRegular` + `printerVisibleTo` + maintenance +
   busy/active-file/dedup/brand checks.
-- Library edits are written to the audit log (category `library`).
+- Library edits are written to the audit log (category `library`): `model-merge`, `model-move`,
+  `model-split`, `model-approve`, `model-reject`, `model-dismiss`, `model-hide`/`-unhide`,
+  `model-hide-file`/`-unhide-file`, `model-rename`, `model-cover`, `model-set-printer`,
+  `model-change-undone`, with the person, the action id and Model names — never folder paths.
+- Every M6 action checks its capability on the server (§7 table); undo needs the same one.
 - With users off, everything is implicitly admin.
 
 ---
@@ -1788,3 +1820,76 @@ it is now withheld as well.
 - Printing from locations other than the G-code folder waits for M7.
 - Spanish installs show the new Library strings in English until `locales/es.json` is reseeded
   (the existing locale rule).
+
+## 28. M6 results (2026-10-04)
+
+**Commits:** 7dd02dc (a deterministic tie-break between equally matched Models — an M4 bug found
+by the M6 undo tests), 8b7bf39 (schema 3), 3f307f8 (search: camel-case and punctuated names),
+ff97fe5 (the grouping tools and undo), b033cd6 (the UI). Nothing from M7 was implemented.
+
+**Implemented (§7 table, as built):** merge (A into B, the survivor chosen and named before
+confirming; A kept with `merged_into`), separate into a new Model, move (one or several files;
+"Choose model…" for an ambiguous file), approve and reject a suggestion, dismiss a Review Item,
+hide and unhide Models and Files, rename (and back to the automatic name), choose a cover (and
+back to automatic), set a printer (and back to what the file says), undo of every one of them.
+Each is a Decision or an authored `models` column, recorded in `actions`, checked against the
+current state (409 with a code), checked for its capability on the server, audited.
+
+**Deferred, and why:** confirming/rejecting lineage (`source_of` / `sliced_from` Decisions): the
+real library has no lineage suggestion to act on, and `lineage()` would have to honour Decisions
+— better done with a real case; multi-select merge of several Models from the grid (merge works
+one pair at a time from the Model page); notes, tags and collections (Phase 1b); browser-made
+covers (Phase 1b, §10); approve/reject inside Diagnostics (done from the Library; Diagnostics
+shows the Decisions and what they control).
+
+**Specification changes:**
+- §4.1: a Decision is in force unless superseded **or withdrawn** (undo).
+- §4.6 and §5: `actions` (authored); `decisions.action_id`, `decisions.withdrawn_at`;
+  `models.merged_into`; `model_fts.search_terms` (derived). Schema 3.
+- §7: the tools as built, their capabilities, structure versus grouping, and undo semantics.
+- §11: the capability of each action and the audit events.
+
+**Undo semantics:** undo reverses one action exactly — its Decisions withdrawn, those it
+replaced in force again, `models` columns restored, Review Items it closed reopened, each moved
+file's last-known membership anchor returned, a Model it created folded back — and automatic
+grouping recomputes the rest. It is refused (`undo_blocked`) while a later change depends on it.
+History and audit keep the undone action.
+
+**Real Library checkpoint (2026-10-03/04):** after a manual backup and the migration snapshot,
+schema 3 was applied to the live Library; then:
+
+| # | Action | Real example | Result |
+|---|---|---|---|
+| 1 | Approve | "WhitesTree Frog" ↔ "Whites Tree Frog" (same body and head objects) | merged into "Whites Tree Frog"; item resolved; **kept** |
+| 2 | Reject | "Zou Sea Turtle Ready" ↔ "Zou Axolotl Ready" (folder only) | kept apart, never suggested again; **kept** |
+| 3 | Merge | the two "Baby Butterfly Dragon" Models | `519dd09d…` merged into `e5f295c3…` (survivor uuid kept, absorbed row kept); undone afterwards |
+| 4 | Separate | "Skeleton T-Rex @ 192" out of Skeleton T-Rex (4 → 3) | new Model `7161f051…` (origin user); undone afterwards |
+| 5 | Move | "Beardie (9h28m)" into Leopard Gecko, against object names + title | stayed there; Diagnostics lists the merge the Decision prevented; undone afterwards |
+| 6 | Hide | 3DBenchy | only in "Show hidden models"; file untouched; undone afterwards |
+| 7 | Rename | Beardie → "Bearded Dragon (MatMire Makes)" | file names and title Evidence unchanged; undone afterwards |
+| 8 | Cover | U1 soniverine → plate 3 | kept through the rebuild; undone afterwards |
+| 9 | Printer | HollowLog: file says Ender-3 V3 Plus → set K1C | "Set by a person", "The file says: Creality Ender-3 V3 Plus" with every extracted signal; undone afterwards |
+| 10 | Undo | a move and a rename, before the rebuild | both back, and still back after it |
+| 11 | Empty "Beardie" | `1d0d33cc…` merged into Beardie | no more empty-Model item; **kept** |
+
+The 22 checks of these states passed three times: right after the actions, right after a full
+derived rebuild (31 s rescan, 292 identities restored from the cache, before any re-hash), and
+after the full re-hash (299 verified). The rebuild kept 254 Model rows and 11 active Decisions,
+and created no Model. The seven test actions were then undone; the Library is back to its
+organisation except the three deliberate resolutions (251 visible Models; open items 0 needs you,
+51 worth a look, 16 information). The audit trail has every action and undo, with Model names and
+uuids, no folder paths.
+
+**Permissions:** every action and undo tried directly over HTTP: signed out 401, view 403
+(`forbidden`) for all twelve kinds, regular and admin allowed, undo needs the same capability; no
+other editing endpoint exists. The packaged Windows build (worker thread) behaved the same.
+
+**Found and fixed during M6:**
+- the anchor tie-break never ran (M4 determinism; separate commit with a regression test);
+- undoing a merge or a move left the file in a new Model: undo now returns the file's anchor;
+- on a direct page load the Model page could render before the user's permissions arrived and
+  show no tools: the first view now waits for them;
+- search "t rex" also found "the": a one-letter word matches whole.
+
+**Search (M5 follow-up):** "trex", "t rex", "t-rex", "T-REX" find TinyTREX, Tiny TREX, Tiny T-REX,
+Skeleton T-Rex, T-Rex and the rest (9 Models on the real Library); display names unchanged.
