@@ -260,12 +260,13 @@ test("leaving Camera View releases every session at the view boundary", () => {
 test("every path that switches into List View goes through applyViewMode()", () => {
   // This is what makes the render-loop call redundant: if any path could set
   // VIEW_MODE='list' without it, Camera View sessions could survive the switch.
-  const cycle = appSrc.match(/function cycleViewMode\(\)\{[\s\S]*?\n\}/)[0];
-  assert.match(cycle, /VIEW_MODE=next;\s*\n\s*applyViewMode\(\);/);
+  // The top bar's View menu (chooseView) replaced the cycle button.
+  const choose = appSrc.match(/function chooseView\(mode\)\{[\s\S]*?\n\}/)[0];
+  assert.match(choose, /VIEW_MODE=mode;\s*\n\s*applyViewMode\(\);/);
   // Settings > View's default-view control, and the initial page-load path.
   assert.match(appSrc, /VIEW_MODE=\(\$\("setDefaultView"\)\.value==="printfarm"\)\?"regular":\$\("setDefaultView"\)\.value; applyViewMode\(\);/);
   // No assignment of the literal 'list' anywhere — it only ever arrives via
-  // nextViewMode()/the default-view control, both of which apply the mode.
+  // chooseView()/the default-view control, both of which apply the mode.
   assert.equal(/VIEW_MODE\s*=\s*['"]list['"]/.test(appSrc), false);
 });
 

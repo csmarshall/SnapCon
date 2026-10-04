@@ -27,6 +27,15 @@
     --rr-healthy:#3FB86B; --rr-warning:#E0A83C; --rr-critical:#D64545; --rr-neutral:#6B7480;
     --rr-value-healthy:#9AA3AE; --rr-bar-track:rgba(255,255,255,0.09);
     --storage-gcode:#2E7FE0; --storage-camera:#7B5FD8; --storage-logs:#2FA98C; --storage-track:rgba(255,255,255,0.08);
+    /* Top bar (.topbar). Exact values as specified for the bar; none equals
+       a core token in dark, so they're spelled out here and aliased in
+       light only where the value is identical. */
+    --tb-bg:#0F1218; --tb-divider:rgba(255,255,255,0.11); --tb-divider-strong:rgba(255,255,255,0.22);
+    --tb-text:#E8EAED; --tb-text-2:#9AA3AE; --tb-muted:#6B7480;
+    --tb-accent:#4A90D9; --tb-active-bg:rgba(74,144,217,0.14); --tb-active-text:#9CC6EE;
+    --tb-hover:rgba(255,255,255,0.05); --tb-menu:#1B1F27; --tb-menu-border:rgba(255,255,255,0.11);
+    --tb-menu-shadow:0 14px 36px rgba(0,0,0,0.5); --tb-badge-text:#0F1218;
+    --tb-scrim:rgba(0,0,0,0.5);
     /* Not theme-dependent (font choice doesn't change with light/dark) —
        kept here only, not duplicated into the [data-theme] blocks below. */
     --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
@@ -59,6 +68,15 @@
     --rr-healthy:#3FB86B; --rr-warning:#E0A83C; --rr-critical:#D64545; --rr-neutral:#6B7480;
     --rr-value-healthy:#9AA3AE; --rr-bar-track:rgba(255,255,255,0.09);
     --storage-gcode:#2E7FE0; --storage-camera:#7B5FD8; --storage-logs:#2FA98C; --storage-track:rgba(255,255,255,0.08);
+    /* Top bar (.topbar). Exact values as specified for the bar; none equals
+       a core token in dark, so they're spelled out here and aliased in
+       light only where the value is identical. */
+    --tb-bg:#0F1218; --tb-divider:rgba(255,255,255,0.11); --tb-divider-strong:rgba(255,255,255,0.22);
+    --tb-text:#E8EAED; --tb-text-2:#9AA3AE; --tb-muted:#6B7480;
+    --tb-accent:#4A90D9; --tb-active-bg:rgba(74,144,217,0.14); --tb-active-text:#9CC6EE;
+    --tb-hover:rgba(255,255,255,0.05); --tb-menu:#1B1F27; --tb-menu-border:rgba(255,255,255,0.11);
+    --tb-menu-shadow:0 14px 36px rgba(0,0,0,0.5); --tb-badge-text:#0F1218;
+    --tb-scrim:rgba(0,0,0,0.5);
   }
   [data-theme="light"]{
     --chassis:#EEF1F5; --panel:#FFFFFF; --panel-2:#F6F8FA;
@@ -88,6 +106,12 @@
     --idle:#5B6472; --offline:#756A52;
     --violet:#5B3FC4; --violet-soft:#6D4FD1;
     --accent:var(--busy); --warn:var(--signal);
+    --tb-bg:var(--panel); --tb-divider:var(--line); --tb-divider-strong:#C5CCD4;
+    --tb-text:var(--ink); --tb-text-2:var(--ink-dim); --tb-muted:var(--ink-faint);
+    --tb-accent:#1F6FD0; --tb-active-bg:rgba(31,111,208,0.10); --tb-active-text:#1858A8;
+    --tb-hover:rgba(23,26,29,0.04); --tb-menu:var(--panel); --tb-menu-border:var(--line);
+    --tb-menu-shadow:0 12px 32px rgba(15,18,24,0.14); --tb-badge-text:#171A1D;
+    --tb-scrim:rgba(15,18,24,0.28);
     /* rr-* (Health page ReadingRow cards) and storage-* (storage quota bar)
        are NOT covered by this pass — out of the "starting point" token list
        given for Phase 2. They'll keep rendering with their dark values
@@ -879,27 +903,239 @@
   .qp-extruder-footer{font-size:12px; color:var(--ink-faint); margin-top:6px;}
   .qp-ext-swatch{width:12px; height:12px; border-radius:50%; border:1px solid rgba(255,255,255,.25); flex-shrink:0;}
   .light-bg .fsq-info,.light-bg .hs-mat{color:rgba(0,0,0,.7) !important; text-shadow:none !important;}
-  .topbar{display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-bottom:6px;}
-  .topbar-brand{display:flex; align-items:center; gap:10px; margin-right:auto;}
-  .topbar-brand img{display:block; height:30px; width:auto;}
-  .topbar-brand-name{font-size:21px; font-weight:800; letter-spacing:-0.01em; color:#eaecff;}
-  [data-theme="light"] .topbar-brand-name{color:var(--ink);}
-  .topbar-view-label{margin-left:6px; font-size:15px; font-weight:600; letter-spacing:0; color:var(--ink-dim);}
-  /* Matches .topbar-view-label's font/weight/color exactly (same sans body
-     font, not --mono) — these two sit right next to each other and should
-     read as one family of secondary text, not two different treatments. */
-  .vbadge{font-size:15px; font-weight:600; letter-spacing:0; color:var(--ink-dim);}
+  /* ---- Top bar ----
+     One 46px row of cells split by full-height dividers; every colour is a
+     --tb-* token. Its tiers follow the bar's own width (container queries),
+     not the viewport: the file list narrows it too. Which cells show is set
+     by the hidden attribute from applyTopbarVisibility() in app.js.
+     Tier widths were measured on the worst case (users on, site name, four
+     two-digit pills, Spanish), so nothing overflows: Full >= 1880px,
+     Compact 1620-1880, Tablet 1310-1620, Narrow 700-1310, Phone < 700. */
+  .topbar{
+    container-type:inline-size; container-name:topbar;
+    display:flex; align-items:stretch; flex:none; position:relative; z-index:30;
+    height:calc(47px + env(safe-area-inset-top, 0px)); /* 46px cells + the 1px bottom border */
+    margin:-24px -26px 0; /* edge to edge across .main's padding */
+    padding:env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
+    background:var(--tb-bg); border-bottom:1px solid var(--tb-divider);
+    color:var(--tb-text); font-family:var(--sans); font-size:12px;
+  }
+  .topbar [hidden]{display:none !important;}
+  .topbar svg{fill:currentColor; flex:none;}
+  .tb-wrap{position:relative; display:flex;}
+  /* The right-hand group's cells are flex items of the bar itself, so the
+     status box can take real width from it (see .tb-status-box). */
+  .tb-right{display:contents;}
+  .tb-cell{
+    display:flex; align-items:center; gap:7px; flex:none; position:relative;
+    padding:0 14px; margin:0; border:0; border-radius:0; border-right:1px solid var(--tb-divider-strong);
+    background:transparent; color:var(--tb-text); font:inherit; font-size:12px; line-height:1.2;
+    white-space:nowrap; cursor:pointer;
+  }
+  div.tb-cell, span.tb-cell{cursor:default;}
+  .tb-cell:focus-visible{outline-offset:-2px; border-radius:0;}
+  /* No divider against the bar's right edge. The Menu cell is last but only
+     displayed on narrow bars, so it doesn't count as a following cell. */
+  .tb-right > .tb-cell:not([hidden]):not(:has(~ :not([hidden]):not(#tbMenuBtn))),
+  .tb-right > .tb-user:not(:has(~ :not([hidden]):not(#tbMenuBtn))) > .tb-cell:last-child{border-right:0;}
+  .tb-cell.is-active{background:var(--tb-active-bg); color:var(--tb-active-text); box-shadow:inset 0 -2px 0 var(--tb-accent);}
+  .tb-cell.is-active .tb-word, .tb-cell.is-active .tb-value, .tb-cell.is-active .tb-label, .tb-cell.is-active .tb-caret{color:var(--tb-active-text);}
+  @media (hover:hover) and (pointer:fine){
+    button.tb-cell:hover, .tb-search:hover{background:var(--tb-hover);}
+    button.tb-cell.is-active:hover{background:var(--tb-active-bg);}
+    .topbar .sort-opt:hover{background:var(--tb-hover); color:var(--tb-text);}
+    .topbar .sort-opt[aria-checked="true"]:hover{background:var(--tb-active-bg); color:var(--tb-active-text);}
+  }
+  .tb-icon{color:var(--tb-accent);}
+  .topbar .tb-icon-only{width:46px; padding:0; justify-content:center;}
+  .tb-label{color:inherit;}
+  .tb-word{color:var(--tb-text-2);}
+  .tb-value{font-weight:600; color:var(--tb-text); display:inline-grid; justify-items:start; text-align:left; /* buttons centre by default */}
+  /* All options share one grid cell (renderFixedValue()), so the cell is as
+     wide as the longest; only the current one shows. */
+  .tb-value > span{grid-area:1 / 1;}
+  .tb-value > span:not(.is-current){visibility:hidden;}
+  .tb-caret{color:var(--tb-text-2);}
+
+  .tb-brand{gap:9px;}
+  .tb-brand-text{display:flex; flex-direction:column; justify-content:center; gap:1px; line-height:1.1;}
+  .tb-name{font-size:13.5px; font-weight:700; color:var(--tb-text); letter-spacing:-0.01em;}
+  .tb-name-con{color:var(--tb-accent);}
+  .vbadge{font-family:var(--mono); font-size:9px; color:var(--tb-muted);}
   .vbadge.bad{color:var(--bad); font-weight:700;}
-  /* Always-on clock, live regardless of which view is open — hover for the
-     full date rather than spending topbar width on it permanently. */
-  .topbar-clock{font-family:var(--mono); font-size:14px; color:var(--ink-dim); letter-spacing:.02em; white-space:nowrap;}
-  /* Optional install label (Settings > View > Site Name) — hidden entirely
-     when blank rather than reserving empty space. */
-  .topbar-sitename{font-size:13px; font-weight:600; color:var(--ink-dim); white-space:nowrap; padding-left:2px;}
-  .fleet-search{font:inherit; font-size:12px; color:var(--ink); background:var(--panel-2); border:1px solid var(--line); border-radius:7px; padding:5px 10px; width:200px; outline:none; transition:border-color .15s;}
-  .fleet-search::placeholder{color:var(--ink-faint);}
-  .fleet-search:focus{border-color:var(--ink-faint);}
-  .fleet-search:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+
+  /* Health: the attention count sits in the cell's top-right corner. */
+  .tb-health{padding-right:22px;}
+  .tb-health .health-badge{position:absolute; top:5px; right:5px; min-width:15px; height:15px; padding:0 4px; border-radius:8px; background:var(--bad); color:var(--tb-badge-text); font-size:9px; font-weight:800; line-height:15px; text-align:center;}
+  /* --tb-badge-text (#171A1D) on light --bad is about 2.7:1; white is 6.5:1. */
+  [data-theme="light"] .tb-health .health-badge{color:#fff;}
+
+  /* Search takes every pixel the other cells leave, down to 120px; below
+     that the status box gives way (see .tb-status-box). */
+  .tb-search{flex:1 1 120px; min-width:120px; gap:8px; cursor:text; border-right:0; /* the status readout draws the divider */}
+  .tb-search:focus-within{background:var(--tb-hover);}
+  .tb-search:has(.fleet-search:focus-visible){outline:2px solid var(--accent); outline-offset:-2px;}
+  .tb-search-glyph{color:var(--tb-muted);}
+  .tb-search .fleet-search{flex:1; min-width:0; height:100%; padding:0; border:0; background:transparent; color:var(--tb-text); font:inherit; font-size:12px; outline:none;}
+  .tb-search .fleet-search::placeholder{color:var(--tb-muted);}
+  .tb-search .fleet-search:focus-visible{outline:none;}
+
+  /* The status box asks for the width its widest content needs (four pills
+     with words plus "next done", in Spanish) and gives it back when space is
+     short, down to four dot-and-number pills. It is a size container, so
+     what it shows follows the width it actually gets — rules below. */
+  .tb-status-box{display:flex; align-items:stretch; justify-content:flex-end; flex:0 1 590px; min-width:200px; container-type:inline-size; container-name:tbstatus;
+    margin-left:auto; /* keeps the right group right when search is hidden */}
+  /* The readout itself is content-sized at the box's right end and draws the
+     divider on its left, so spare room reads as part of the search cell. */
+  .tb-status-plain, #tbStatusBtn{border-left:1px solid var(--tb-divider-strong);}
+  .tb-status{gap:10px;}
+  .tb-status-wrap{display:none;}
+  .tb-pills{display:flex; align-items:center; gap:6px;}
+  .tb-pill{display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:11px; font-size:11px; color:var(--tb-text); background:color-mix(in srgb, var(--pill) 14%, transparent);}
+  .tb-pill b{font-weight:600;}
+  .tb-dot{width:6px; height:6px; border-radius:50%; background:var(--pill); flex:none;}
+  .tb-next{font-size:11px; color:var(--tb-text-2);}
+
+  .tb-sitename{font-size:12px; font-weight:600; color:var(--tb-text-2);}
+  .tb-user{display:flex; align-items:stretch;}
+  .tb-locale{padding:0 6px;}
+  .topbar-locale-select{height:100%; max-width:190px; padding:0 6px; border:0; background:transparent; color:var(--tb-text-2); font:inherit; font-size:12px; cursor:pointer;}
+  .topbar-locale-select:focus-visible{outline-offset:-2px;}
+  .tb-clock{flex-direction:column; align-items:flex-end; justify-content:center; gap:2px;}
+  .tb-time{font-family:var(--mono); font-size:12px; color:var(--tb-text); line-height:1;}
+  .tb-date{font-size:9px; color:var(--tb-muted); line-height:1;}
+
+  /* Menus and the status popover: the shared .sort-menu/.sort-opt pattern,
+     restyled inside the bar only (the file list and Firmware menus keep
+     theirs). */
+  .topbar .sort-menu{top:calc(100% + 4px); left:0; right:auto; min-width:188px; padding:5px; z-index:60; background:var(--tb-menu); border:1px solid var(--tb-menu-border); border-radius:8px; box-shadow:var(--tb-menu-shadow); transform-origin:top left;}
+  .topbar .tb-status-pop{left:auto; right:0; min-width:210px; transform-origin:top right;}
+  .topbar .sort-opt{height:30px; padding:0 12px 0 8px; gap:8px; border-radius:5px; font-size:12px; color:var(--tb-text);}
+  .topbar .sort-opt:focus-visible{outline-offset:-2px;}
+  .topbar .sort-opt .sort-check{width:11px; display:flex; color:var(--tb-accent);}
+  .topbar .sort-opt .sort-check svg{visibility:hidden;}
+  .topbar .sort-opt[aria-checked="true"]{background:var(--tb-active-bg); color:var(--tb-active-text); font-weight:600;}
+  .topbar .sort-opt[aria-checked="true"] .sort-check svg{visibility:visible;}
+  .tb-pop-row{display:flex; align-items:center; gap:8px; height:30px; padding:0 8px; font-size:12px; color:var(--tb-text);}
+  .tb-pop-row .tb-dot{width:8px; height:8px;}
+  .tb-pop-row b{min-width:2ch; font-weight:600;}
+  .tb-pop-sep{height:1px; margin:4px 0; background:var(--tb-menu-border);}
+  .tb-pop-next{justify-content:space-between; color:var(--tb-text-2);}
+  .tb-pop-next .tb-mono{font-family:var(--mono); color:var(--tb-text);}
+
+
+  /* Shown only in the narrower tiers (rules below). */
+  #tbSearchBtn, #tbMenuBtn{display:none;}
+  .tb-menu-btn .health-badge{position:absolute; top:6px; right:4px; min-width:15px; height:15px; padding:0 4px; border-radius:8px; background:var(--bad); color:var(--tb-badge-text); font-size:9px; font-weight:800; line-height:15px; text-align:center; visibility:hidden;}
+  [data-theme="light"] .tb-menu-btn .health-badge{color:#fff;}
+  .tb-sr{position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0;}
+
+  /* Menu sheet (Narrow and Phone): the cells that leave the bar, as rows. */
+  .tb-scrim{display:none; position:absolute; top:100%; left:0; right:0; height:100vh; background:var(--tb-scrim); z-index:64;}
+  .tb-sheet{display:none; position:absolute; top:100%; right:0; width:320px; max-height:calc(100vh - 60px); overflow-y:auto; z-index:65; background:var(--tb-menu); color:var(--tb-text); border-left:1px solid var(--tb-menu-border); border-bottom:1px solid var(--tb-menu-border); border-bottom-left-radius:8px; box-shadow:var(--tb-menu-shadow); font-size:14px;}
+  .tb-sheet.open{display:block;}
+  .tb-sheet-status{display:none; padding:12px 16px; border-bottom:1px solid var(--tb-divider);}
+  .tb-sheet-status .tb-pills{flex-wrap:wrap; gap:6px;}
+  .tb-sheet-status .tb-next{display:block; margin-top:8px; font-size:12px;}
+  .tb-sheet-row{display:flex; align-items:center; gap:12px; width:100%; height:48px; padding:0 16px; margin:0; border:0; border-bottom:1px solid var(--tb-divider); background:transparent; color:var(--tb-text); font:inherit; font-size:14px; text-align:left; cursor:pointer;}
+  .tb-sheet-row svg, .tb-sheet-util-btn svg{color:var(--tb-accent);}
+  .tb-sheet-count{margin-left:auto; min-width:20px; height:20px; padding:0 6px; border-radius:10px; background:var(--bad); color:var(--tb-badge-text); font-size:11px; font-weight:700; line-height:20px; text-align:center;}
+  [data-theme="light"] .tb-sheet-count{color:#fff;}
+  .tb-sheet-phone{display:none;}
+  .tb-sheet-label{display:block; margin-bottom:6px; font-size:11px; color:var(--tb-muted);}
+  .tb-seg{display:flex; height:44px; border:1px solid var(--tb-divider); border-radius:8px; overflow:hidden;}
+  /* Five segments on a 360px phone leave ~57px each: long labels (Spanish
+     "Granja de impresión") wrap to two lines rather than clip. */
+  .tb-seg button{flex:1 1 0; min-width:0; padding:0 3px; border:0; border-right:1px solid var(--tb-divider); background:transparent; color:var(--tb-text-2); font:inherit; font-size:11.5px; line-height:1.15; white-space:normal; overflow-wrap:normal; cursor:pointer;}
+  .tb-seg button:last-child{border-right:0;}
+  .tb-seg button[aria-checked="true"]{background:var(--tb-active-bg); color:var(--tb-active-text); font-weight:600; box-shadow:inset 0 -2px 0 var(--tb-accent);}
+  /* Theme and Log out share a row; the language picker gets its own full
+     row under them, since its option text ("System default (English)",
+     longer in Spanish) would clip in a third of a phone's width. */
+  .tb-sheet-util{display:flex; flex-wrap:wrap; border-bottom:1px solid var(--tb-divider);}
+  .tb-sheet-util-btn{flex:1 1 0; min-width:0; height:48px; display:flex; align-items:center; justify-content:center; gap:8px; padding:0 10px; border:0; border-right:1px solid var(--tb-divider); background:transparent; color:var(--tb-text); font:inherit; font-size:13px; white-space:nowrap; cursor:pointer;}
+  .tb-sheet-util-btn:last-child{border-right:0;}
+  .tb-sheet-util .tb-sheet-lang{order:3; flex:1 1 100%; border-right:0; border-top:1px solid var(--tb-divider);}
+  .tb-sheet-lang .topbar-locale-select{width:100%; max-width:100%; text-align:center;}
+  .tb-sheet-foot{padding:10px 16px; font-family:var(--mono); font-size:10px; color:var(--tb-muted);}
+  .tb-sheet-foot.bad{color:var(--bad);}
+  .tb-sheet-row:focus-visible, .tb-sheet-util-btn:focus-visible, .tb-seg button:focus-visible{outline-offset:-2px; border-radius:0;}
+  @media (hover:hover) and (pointer:fine){
+    .tb-sheet-row:hover, .tb-sheet-util-btn:hover, .tb-seg button:hover{background:var(--tb-hover);}
+    .tb-seg button[aria-checked="true"]:hover{background:var(--tb-active-bg);}
+  }
+  /* Status box too narrow for the pill words: they go, and the readout
+     becomes a button for the popover, since words (and title) are gone on
+     touch. Narrower still, "next done" lives in the popover only. */
+  @container tbstatus (max-width: 589.98px){
+    .tb-status-plain{display:none;}
+    .tb-status-wrap{display:flex;}
+    .tb-pill .tb-word{display:none;}
+    .tb-pill{padding:0 7px;}
+  }
+  @container tbstatus (max-width: 329.98px){
+    .tb-status .tb-next{display:none;}
+  }
+  /* Compact tier: the View:/Sort: prefixes and the pill words go, the status
+     is always the popover button, and the optional extras step out: "next
+     done" (still in the popover) and the site name. */
+  @container topbar (max-width: 1879.98px){
+    .tb-cell{padding:0 11px;}
+    .tb-health{padding-right:19px;}
+    .tb-word{display:none;}
+    .tb-pill{padding:0 7px;}
+    .tb-status-box{flex:none; min-width:0; container-type:normal;}
+    .tb-status-plain{display:none;}
+    .tb-status-wrap{display:flex;}
+    .tb-status .tb-next{display:none;}
+    .tb-sitename{display:none !important;}
+  }
+
+  /* Tablet tier: the page cells go icon-only (their aria-labels carry the
+     names); View and Sort keep their values, since they're read as well as
+     pressed; search collapses to a magnifier; the clock shows the time only. */
+  @container topbar (max-width: 1619.98px){
+    #filesBtn, #healthBtn, #bulkHeatBtn, #queueBtn, #libraryBtn{width:46px; padding:0; justify-content:center;}
+    .tb-label{display:none;}
+    .tb-health .health-badge{top:6px; right:4px;}
+    .tb-search{display:none;}
+    .topbar.tb-search-open .tb-search, .tb-search:has(.fleet-search:not(:placeholder-shown)){display:flex;}
+    #tbSearchBtn{display:flex; margin-left:auto;}
+    .topbar.tb-search-open #tbSearchBtn, .topbar:has(.fleet-search:not(:placeholder-shown)) #tbSearchBtn{display:none;}
+    .tb-status-box{margin-left:0;}
+    /* With no search cell at all (Settings, first run), the status box takes
+       the spacer's job again. */
+    .topbar:has(#tbSearchBtn[hidden]) .tb-status-box{margin-left:auto;}
+    .tb-date{display:none;}
+  }
+  /* Narrow tier: the brand is just the icon; Files, Heat, Queue, Library,
+     Settings, Theme, the user's cells and the clock move into the menu sheet. */
+  @container topbar (max-width: 1309.98px){
+    .tb-brand{padding:0 12px;}
+    .tb-brand-text{display:none;}
+    #filesBtn, #bulkHeatBtn, #queueBtn, #libraryBtn, #themeBtn, #gear, .tb-user, #topbarClock{display:none;}
+    #tbMenuBtn{display:flex;}
+  }
+  /* Phone tier: brand icon, status pills, then (pushed right) search and the
+     Menu cell, which carries the Health count. The sheet is full width over
+     a scrim and adds the status, View and Sort. */
+  @container topbar (max-width: 699.98px){
+    #tbViewWrap, #tbSortWrap, #healthBtn{display:none;}
+    .tb-status-box{order:1;}
+    #tbSearchBtn, .tb-search{order:2;}
+    #tbMenuBtn{order:3;}
+    .tb-pills{gap:4px;}
+    .tb-pill{height:20px; padding:0 6px;}
+    .tb-menu-btn .health-badge{visibility:visible;}
+    .tb-sheet{left:0; width:auto; border-left:0; border-radius:0;}
+    .topbar:has(.tb-sheet.open) .tb-scrim{display:block;}
+    .tb-sheet-status{display:block;}
+    .tb-sheet-status .tb-word{display:inline;}
+    .tb-sheet-status .tb-pill{height:24px; padding:0 9px;}
+    #tbSheetHealth{display:flex;}
+    .tb-sheet-seg{display:block; padding:12px 16px; border-bottom:1px solid var(--tb-divider);}
+  }
   .topbar-icon{width:22.1px; height:22.1px; display:block;}
   .gear{font:inherit; font-size:15px; font-weight:700; color:#fff; background:transparent; border:none; border-radius:7px; padding:4px; cursor:pointer; line-height:1;}
   .gear:hover{filter:brightness(1.3);}
@@ -915,8 +1151,6 @@
   [data-theme="light"] .side-icon{filter:saturate(1.2) brightness(.7);}
   [data-theme="light"] .gear:hover{filter:none;}
   [data-theme="light"] .gear:hover .topbar-icon{filter:saturate(1.2) brightness(.42);}
-  #healthBtn{position:relative;}
-  .health-badge{position:absolute; top:-2px; right:-2px; min-width:15px; height:15px; padding:0 3px; border-radius:999px; background:var(--bad); color:#fff; font-size:9px; font-weight:800; line-height:15px; text-align:center; box-shadow:0 0 0 2px var(--chassis);}
   .sort-wrap{position:relative;}
   .sort-menu{display:none; position:absolute; right:0; top:calc(100% + 6px); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:5px; min-width:170px; z-index:40; box-shadow:0 8px 24px rgba(0,0,0,.4);}
   .sort-menu.open{display:block;}
@@ -932,7 +1166,8 @@
   .sort-opt:hover{background:var(--panel-2); color:var(--ink);}
   .sort-opt.active{color:var(--ink); font-weight:600;}
   .sort-opt .sort-check{width:14px; color:var(--accent); flex:none;}
-  .setup{display:none; margin-bottom:18px;}
+  /* 22px under the top bar, matching the Fleet heading's own top margin. */
+  .setup{display:none; margin:22px 0 18px;}
   .setup.show{display:block; max-height:calc(100vh - 120px); overflow-y:auto;}
   .queue-dashboard{display:none; margin-bottom:18px;}
   .queue-dashboard.show{display:block; max-height:calc(100vh - 120px); overflow-y:auto;}
@@ -1554,14 +1789,6 @@
   .queued-banner.err{background:color-mix(in srgb,var(--bad) 12%,var(--panel-2));border:1px solid color-mix(in srgb,var(--bad) 35%,transparent);color:var(--ink-dim);}
 
   /* ---- User Access Management ---- */
-  .user-badge{display:flex;align-items:center;gap:8px;margin-left:6px;padding-left:10px;border-left:1px solid var(--line);}
-  /* Compact per-user language picker — deliberately not .field (that's
-     sized for form rows, far too tall here); matches the 22px icon row
-     it sits in next to Logout. Applies and saves immediately on change,
-     unlike Settings > View's deferred-to-Save selector — see
-     chooseUserLocale() in app.js, which both controls call through. */
-  .topbar-locale-select{height:22.1px; max-width:132px; font-size:11px; padding:0 3px; border-radius:6px; border:1px solid var(--line); background:transparent; color:var(--ink-dim); cursor:pointer;}
-  .topbar-locale-select:hover{color:var(--ink); border-color:var(--ink-faint);}
 
   .login-overlay{position:fixed;inset:0;z-index:300;background:var(--chassis);display:flex;align-items:center;justify-content:center;padding:18px;}
   .login-box{width:100%;max-width:320px;display:flex;flex-direction:column;align-items:stretch;}

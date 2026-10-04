@@ -969,11 +969,7 @@ function sortedFleet(){
       return ra - rb;
     });
   } else if(SORT_MODE === 'time'){
-    const rem = p => {
-      if(!p.online || p.state !== 'printing' || !p.progress || p.progress <= 0) return Infinity;
-      return p.elapsed * (1 / p.progress - 1);
-    };
-    arr.sort((a,b) => rem(a) - rem(b));
+    arr.sort((a,b) => printRemaining(a) - printRemaining(b));
   } else if(SORT_MODE === 'name'){
     // numeric:true so "U1-2" sorts before "U1-10" instead of lexicographically after it.
     arr.sort((a,b)=>(a.name||'').localeCompare(b.name||'', undefined, {numeric:true, sensitivity:'base'}));
@@ -981,15 +977,38 @@ function sortedFleet(){
   return arr;
 }
 
+// Seconds left on a print, estimated from progress and elapsed time. Shared
+// by the time-remaining sort and the top bar's "next done". Infinity when it
+// can't be estimated: offline, not printing (paused included), no progress.
+function printRemaining(p){
+  if(!p.online || p.state !== 'printing' || !p.progress || p.progress <= 0) return Infinity;
+  return p.elapsed * (1 / p.progress - 1);
+}
+
 // Full-sentence-per-mode keys, same reasoning as FILE_SORT_TITLE_KEYS above.
 const SORT_TITLE_KEYS = { none:'global.sort.title_none', status:'global.sort.title_status', time:'global.sort.title_time', name:'global.sort.title_name' };
+// The Sort menu's options, which are also what the Sort cell shows.
+const SORT_OPTION_KEYS = { none:'global.sort.option_none', status:'global.sort.option_status', time:'global.sort.option_time', name:'global.sort.option_name' };
 function applySortUI(){
-  ['none','status','time','name'].forEach(k=>{
-    const el = $('sc-'+k);
-    if(el) el.textContent = SORT_MODE === k ? '✓' : '';
+  document.querySelectorAll('#sortMenu .sort-opt, #tbSheetSort [data-sort]').forEach(b=>{
+    b.setAttribute('aria-checked', b.dataset.sort === SORT_MODE ? 'true' : 'false');
   });
   const btn = $('sortBtn');
   if(btn) btn.title = t(SORT_TITLE_KEYS[SORT_MODE] || SORT_TITLE_KEYS.none);
+  renderFixedValue($('sortValue'), SORT_OPTION_KEYS, Object.keys(SORT_OPTION_KEYS), SORT_MODE);
+}
+// View and Sort cells show their current option, but are always as wide as
+// their longest one: every option is stacked in the same grid cell and only
+// the current one is visible, so switching never shifts the bar.
+function renderFixedValue(el, keyMap, modes, current){
+  if(!el) return;
+  el.innerHTML=modes.map(m=>`<span${m===current?' class="is-current"':''}>${esc(t(keyMap[m]))}</span>`).join("");
+}
+function setSortMode(mode){
+  SORT_MODE = mode;
+  localStorage.setItem('snapcon-sort', SORT_MODE);
+  applySortUI();
+  renderFleet();
 }
 
 // ---- File list toggle (hidden by default) ----
@@ -1025,40 +1044,17 @@ function applyFilesOpen(){
     $("jobsechead").style.display=show?"":"none";
     $("jobcard").classList.toggle("show",show);
   }
+  syncTopbarActive();
 }
 
-// ---- Regular / Compact / Camera / List / Print Farm view cycle ----
+// ---- Regular / Compact / Camera / List / Print Farm views ----
 // Launch state comes from the "Default View to Launch" setting (loadConfigUI);
-// the header button only switches the current session. The button's icon
-// always shows the NEXT mode a click will switch to (existing convention).
+// the top bar's View menu only switches the current session (chooseView()).
 // 'printfarm' is Queue Management's own full-page dashboard, not a body-class
 // CSS mode like the other four — see openQueueDashboard()/closeQueueDashboard()
 // for how entering/leaving it is kept in sync with this same VIEW_MODE.
 let VIEW_MODE = 'regular'; // 'regular' | 'compact' | 'camera' | 'list' | 'printfarm'
-// Settings tab (View)'s "Alternate Display" — 'all' cycles through every
-// view (the original behavior); any specific mode instead makes the header
-// button a plain two-way toggle between Regular and that one view only.
-let ALT_DISPLAY = 'all'; // 'all' | 'compact' | 'camera' | 'list' | 'printfarm'
-const ALL_CYCLE = { regular:'compact', compact:'camera', camera:'list', list:'printfarm', printfarm:'regular' };
-const VIEW_ICON  = { regular:'/view-regular.svg', compact:'/view-compact.svg', camera:'/view-camera.svg', list:'/view-list.svg', printfarm:'/view-printfarm.svg' };
-const VIEW_TITLE_KEYS = { regular:'global.topbar.view_title_regular', compact:'global.topbar.view_title_compact', camera:'global.topbar.view_title_camera', list:'global.topbar.view_title_list', printfarm:'global.topbar.view_title_printfarm' };
-// Extracted from applyViewMode() so the printfarm path (which bypasses the
-// body-class logic below — see cycleViewMode()) can still keep the header
-// button's icon/title showing the correct next mode.
-function syncViewModeButtonIcon(){
-  const btn=$('compactBtn');
-  if(btn){
-    const next=nextViewMode();
-    btn.querySelector('img').src=VIEW_ICON[next]; btn.title=t(VIEW_TITLE_KEYS[next]);
-  }
-}
-function nextViewMode(){
-  if(ALT_DISPLAY==='all') return ALL_CYCLE[VIEW_MODE] || 'regular';
-  // Two-state toggle regardless of how VIEW_MODE got here (e.g. left over
-  // from a previous "All" setting) — anything that isn't already Regular
-  // goes back to Regular; Regular goes to the one configured alternate.
-  return VIEW_MODE==='regular' ? ALT_DISPLAY : 'regular';
-}
+const VIEW_NAME_KEYS = { compact:'global.topbar.view_name_compact', regular:'global.topbar.view_name_regular', camera:'global.topbar.view_name_camera', list:'global.topbar.view_name_list', printfarm:'global.topbar.view_name_printfarm' };
 // All four fleet display modes (regular, compact, camera, list) share the
 // same toolbar (status tabs, tag filter, checkbox multi-select, bulk
 // actions, Edit Tags) and the same cards/bulk actions underneath — there's
@@ -1068,18 +1064,6 @@ function nextViewMode(){
 // deliberately excluded, and #fleet-wrap (this toolbar's own ancestor) is
 // hidden outright while it's open regardless of this function's answer.
 function gridToolbarActive(){ return VIEW_MODE==='camera' || VIEW_MODE==='list' || VIEW_MODE==='regular' || VIEW_MODE==='compact'; }
-// Shows which non-default view is active right next to the SnapCon name —
-// Queue Management takes priority over the four fleet display modes since
-// it's a separate page, not one of them; the standard fleet view shows
-// nothing extra. Called from applyViewMode() and the Queue dashboard's own
-// open/close, the only two things that change which view is current.
-const VIEW_LABEL_KEYS = { camera:'global.topbar.view_label_camera', compact:'global.topbar.view_label_compact', list:'global.topbar.view_label_list', printfarm:'global.topbar.view_label_printfarm' };
-function updateTopbarViewLabel(){
-  const el=$("topbarViewLabel");
-  if(!el) return;
-  const key=VIEW_LABEL_KEYS[VIEW_MODE];
-  el.textContent=key?"("+t(key)+")":"";
-}
 function applyViewMode(){
   // Camera View is the only view that holds live sessions; leaving it
   // (or entering any other) releases every one of them.
@@ -1092,7 +1076,6 @@ function applyViewMode(){
   // silently carrying over a stale selection or filter from a previous
   // session; switching between camera and list preserves it.
   if(!gridToolbarActive()){ CAM_SELECTED.clear(); CAM_TAB='all'; CAM_TAG_FILTER=''; }
-  syncViewModeButtonIcon();
   // Camera view polls each printer's snapshot on every fast metadata tick —
   // the server (not the client poll interval) is what actually throttles
   // real camera hardware (see getSnapshotThrottled() in server.js), so
@@ -1100,25 +1083,258 @@ function applyViewMode(){
   // timer immediately on a mode switch rather than waiting for it to
   // naturally fire next.
   if($("setRefresh")) startFleetRefresh();
-  updateTopbarViewLabel();
+  syncTopbar();
 }
-function cycleViewMode(){
-  const next=nextViewMode();
-  const wasPrintFarm=VIEW_MODE==='printfarm';
-  if(next==='printfarm'){
-    // Not reachable if the feature is off — fall back to Regular rather
-    // than try to open a dashboard that isn't available. QUEUE_MANAGEMENT_ENABLED
-    // is only known once Settings has loaded at least once (loadQueueManagementUI);
-    // treat "unknown yet" the same as "off" here, since this is a live user
-    // click, not a launch-time default that already waited on that load.
-    if(!QUEUE_MANAGEMENT_ENABLED){ VIEW_MODE='regular'; applyViewMode(); renderFleet(); return; }
-    openQueueDashboard(); // sets VIEW_MODE + syncs the button icon itself
-    return;
-  }
-  if(wasPrintFarm) closeQueueDashboard();
-  VIEW_MODE=next;
+// The View menu's one way into a view. Print farm is Queue Management's
+// dashboard; every other mode goes through applyViewMode(), as the
+// default-view setting does. Picking a fleet view from Health or the Library
+// goes back to the fleet, so the choice is visible.
+function chooseView(mode){
+  if(mode==='printfarm'){ if(QUEUE_MANAGEMENT_ENABLED) openQueueDashboard(); return; }
+  closeQueueDashboard();
+  closeHealthPage();
+  if(window.LibraryPage) LibraryPage.close();
+  VIEW_MODE=mode;
   applyViewMode();
   renderFleet();
+}
+
+// ---- Top bar ----
+// Which cells show. Pure: state in, one boolean per cell out. Settings (and
+// first-run setup, which is Settings opened for you) hides the fleet
+// controls; the /orca/<name> single-printer deep link hides the ones that
+// mean nothing for one printer. Everything that changes visibility calls
+// applyTopbarVisibility(), which re-derives all of it, so a later
+// applyRoleUI() or render can't undo Settings, first run or the deep link.
+function topbarVisibility(s){
+  const fleetSide=!s.settingsOpen, whole=!s.deepLink;
+  return {
+    files: s.canAct && fleetSide && whole,
+    view: fleetSide && whole,
+    sort: fleetSide && whole,
+    health: fleetSide,
+    heat: fleetSide,
+    queue: s.queueEnabled && fleetSide,
+    library: fleetSide,
+    search: fleetSide && whole,
+    theme: whole,
+    // Settings' own cell stays while Settings is open: it is the way back.
+    gear: s.admin && (whole || s.settingsOpen),
+    user: s.signedIn,
+    clock: whole,
+  };
+}
+// Each key drives a bar cell and, where it has one, its stand-in in the
+// menu sheet (Narrow and Phone), so the two can never disagree.
+const TB_CELLS = {
+  files:['filesBtn','tbSheetFiles'], view:['tbViewWrap','tbSheetView'], sort:['tbSortWrap','tbSheetSort'],
+  health:['healthBtn','tbSheetHealth'], heat:['bulkHeatBtn','tbSheetHeat'], queue:['queueBtn','tbSheetQueue'],
+  library:['libraryBtn','tbSheetLibrary'], search:['tbSearchCell','tbSearchBtn'], theme:['themeBtn','tbSheetTheme'],
+  gear:['gear','tbSheetSettings'], user:['userBadge','tbSheetLang','tbSheetLogout'], clock:['topbarClock'],
+};
+function applyTopbarVisibility(){
+  const vis=topbarVisibility({
+    settingsOpen: $("setup").classList.contains("show"),
+    deepLink: !!URL_PRINTER_FILTER,
+    admin: isAdmin(), canAct: canAct(),
+    queueEnabled: !!QUEUE_MANAGEMENT_ENABLED,
+    signedIn: !!(USERS_ENABLED && CURRENT_USER),
+  });
+  for(const [key,ids] of Object.entries(TB_CELLS)) for(const id of ids){ const el=$(id); if(el) el.hidden=!vis[key]; }
+  // A menu whose cell just went away closes with it.
+  if(TB_POPUP && TB_POPUP.btn.closest("[hidden]")) closeTopbarPopup(false);
+}
+// Which cells look active. Pure. Fleet, Settings, Health, Queue and Library
+// are separate pages, so exactly one page cell is active, with View standing
+// for Fleet. Files is an overlay on Fleet and adds to it, as does the cell
+// whose menu or popover is open. While the Heat dialog is open, Heat is the
+// only highlighted cell; the page's highlight returns when it closes.
+function topbarActiveCells(s){
+  if(s.heatOpen) return ['heat'];
+  const page=s.settingsOpen?'gear':s.healthOpen?'health':s.queueOpen?'queue':s.libraryOpen?'library':'view';
+  const on=[page];
+  if(s.filesOpen) on.push('files');
+  if(s.popup && !on.includes(s.popup)) on.push(s.popup);
+  return on;
+}
+const TB_ACTIVE_CELLS = { view:'viewBtn', sort:'sortBtn', files:'filesBtn', health:'healthBtn', queue:'queueBtn', library:'libraryBtn', gear:'gear', status:'tbStatusBtn', sheet:'tbMenuBtn', heat:'bulkHeatBtn' };
+function syncTopbarActive(){
+  const on=topbarActiveCells({
+    settingsOpen: $("setup").classList.contains("show"),
+    healthOpen: $("healthPage").classList.contains("show"),
+    queueOpen: $("queueDashboard").classList.contains("show"),
+    libraryOpen: !!(window.LibraryPage && LibraryPage.isOpen()),
+    // body.showfiles, not FILES_OPEN: Settings hides the file list without
+    // forgetting that it was open.
+    filesOpen: document.body.classList.contains("showfiles"),
+    popup: TB_POPUP && TB_POPUP.key,
+    heatOpen: $("bulkheatmodal").classList.contains("show"),
+  });
+  const pageKey=on[0]==='heat' ? null : on[0];
+  for(const [key,id] of Object.entries(TB_ACTIVE_CELLS)){
+    const el=$(id); if(!el) continue;
+    el.classList.toggle("is-active", on.includes(key));
+    if(key===pageKey) el.setAttribute("aria-current","page"); else el.removeAttribute("aria-current");
+  }
+}
+function syncViewMenu(){
+  const modes=['compact','regular','camera','list'].concat(QUEUE_MANAGEMENT_ENABLED ? ['printfarm'] : []);
+  renderFixedValue($("viewValue"), VIEW_NAME_KEYS, modes, VIEW_MODE in VIEW_NAME_KEYS ? VIEW_MODE : 'regular');
+  document.querySelectorAll("#viewMenu .sort-opt, #tbSheetView [data-view]").forEach(b=>{
+    b.setAttribute("aria-checked", b.dataset.view===VIEW_MODE ? "true" : "false");
+    if(b.dataset.view==="printfarm") b.hidden=!QUEUE_MANAGEMENT_ENABLED;
+  });
+}
+function syncTopbar(){
+  applyTopbarVisibility();
+  syncViewMenu();
+  syncTopbarActive();
+}
+// Settings' cell reads "Back" while Settings is open.
+function syncGearTitle(){
+  const label=$("setup").classList.contains("show") ? t("common.back") : t("settings.title");
+  $("gear").title=label;
+  $("gear").setAttribute("aria-label", label);
+}
+
+// ---- Top bar popups ----
+// The View and Sort menus, the status popover and the menu sheet open and
+// close the same way: one at a time, a pointerdown outside closes, Esc
+// closes and returns focus to the cell that opened it, arrow keys move
+// between menu items, and picking an item closes. The sheet is a dialog:
+// focus moves into it and Tab stays inside while it's open.
+const TB_POPUPS = { view:{btn:'viewBtn', panel:'viewMenu'}, sort:{btn:'sortBtn', panel:'sortMenu'}, status:{btn:'tbStatusBtn', panel:'tbStatusPop'}, sheet:{btn:'tbMenuBtn', panel:'tbSheet', dialog:true} };
+let TB_POPUP = null; // { key, btn, panel } while one is open
+function topbarMenuItems(panel){ return [...panel.querySelectorAll('[role="menuitemradio"]')].filter(b=>!b.hidden); }
+function topbarFocusables(panel){ return [...panel.querySelectorAll('button, select, input, [tabindex]:not([tabindex="-1"])')].filter(e=>!e.disabled && e.offsetParent!==null); }
+function openTopbarPopup(key){
+  closeTopbarPopup(false);
+  const def=TB_POPUPS[key], btn=$(def.btn), panel=$(def.panel);
+  if(!btn || !panel) return;
+  panel.classList.add("open");
+  btn.setAttribute("aria-expanded","true");
+  TB_POPUP={ key, btn, panel, dialog:!!def.dialog };
+  const items=topbarMenuItems(panel);
+  const start=def.dialog ? topbarFocusables(panel)[0] : (items.find(b=>b.getAttribute("aria-checked")==="true") || items[0]);
+  if(start) start.focus();
+  syncTopbarActive();
+}
+function closeTopbarPopup(returnFocus){
+  if(!TB_POPUP) return;
+  const { btn, panel }=TB_POPUP;
+  TB_POPUP=null;
+  panel.classList.remove("open");
+  btn.setAttribute("aria-expanded","false");
+  if(returnFocus) btn.focus();
+  syncTopbarActive();
+}
+function wireTopbarPopups(){
+  for(const [key,def] of Object.entries(TB_POPUPS)){
+    $(def.btn).addEventListener("click", ()=>{
+      if(TB_POPUP && TB_POPUP.key===key) closeTopbarPopup(true); else openTopbarPopup(key);
+    });
+  }
+  document.addEventListener("pointerdown", e=>{
+    if(TB_POPUP && !TB_POPUP.btn.contains(e.target) && !TB_POPUP.panel.contains(e.target)) closeTopbarPopup(false);
+  });
+  document.addEventListener("keydown", e=>{
+    if(!TB_POPUP) return;
+    if(e.key==="Escape"){ e.preventDefault(); closeTopbarPopup(true); return; }
+    if(e.key==="Tab"){
+      if(!TB_POPUP.dialog){ closeTopbarPopup(false); return; }
+      const f=topbarFocusables(TB_POPUP.panel);
+      if(!f.length) return;
+      const first=f[0], last=f[f.length-1];
+      if(e.shiftKey && (document.activeElement===first || !TB_POPUP.panel.contains(document.activeElement))){ e.preventDefault(); last.focus(); }
+      else if(!e.shiftKey && (document.activeElement===last || !TB_POPUP.panel.contains(document.activeElement))){ e.preventDefault(); first.focus(); }
+      return;
+    }
+    const items=topbarMenuItems(TB_POPUP.panel);
+    if(!items.length) return;
+    const i=items.indexOf(document.activeElement), n=items.length;
+    let next=null;
+    if(e.key==="ArrowDown") next=items[i<0 ? 0 : (i+1)%n];
+    else if(e.key==="ArrowUp") next=items[i<0 ? n-1 : (i-1+n)%n];
+    else if(e.key==="Home") next=items[0];
+    else if(e.key==="End") next=items[n-1];
+    if(next){ e.preventDefault(); next.focus(); }
+  });
+  document.querySelectorAll("#viewMenu .sort-opt").forEach(b=>{
+    b.addEventListener("click", ()=>{ closeTopbarPopup(true); chooseView(b.dataset.view); });
+  });
+  // A popup whose cell the bar's tier just hid (or the sheet, once the bar
+  // is back up to Tablet width and the Menu cell is gone) closes with it.
+  new ResizeObserver(()=>{ if(TB_POPUP && TB_POPUP.btn.offsetParent===null) closeTopbarPopup(false); }).observe($("topbar"));
+  wireTopbarSearch();
+  wireTopbarSheet();
+}
+
+// Tablet and narrower: search is a magnifier until tapped. It stays open
+// while it holds a query (a collapsed cell would hide an active filter —
+// CSS keeps it open by the input's :placeholder-shown state too).
+function wireTopbarSearch(){
+  const bar=$("topbar"), btn=$("tbSearchBtn"), input=$("fleetSearch");
+  const setOpen=open=>{ bar.classList.toggle("tb-search-open", open); btn.setAttribute("aria-expanded", open ? "true" : "false"); };
+  btn.addEventListener("click", ()=>{ setOpen(true); input.focus(); });
+  input.addEventListener("blur", ()=>{ if(!input.value) setOpen(false); });
+}
+
+// Each sheet control does exactly what its bar cell does — page rows click
+// the cell itself, so the two can never diverge.
+function wireTopbarSheet(){
+  document.querySelectorAll("#tbSheet [data-for]").forEach(row=>{
+    row.addEventListener("click", ()=>{ closeTopbarPopup(true); $(row.dataset.for).click(); });
+  });
+  // View and Sort choices keep the sheet open, so both can be set together.
+  document.querySelectorAll("#tbSheetView [data-view]").forEach(b=>b.addEventListener("click", ()=>chooseView(b.dataset.view)));
+  document.querySelectorAll("#tbSheetSort [data-sort]").forEach(b=>b.addEventListener("click", ()=>setSortMode(b.dataset.sort)));
+  $("tbSheetTheme").addEventListener("click", ()=>$("themeBtn").click());
+  $("tbSheetLogout").addEventListener("click", ()=>{ closeTopbarPopup(false); $("logoutBtn").click(); });
+  $("sheetLocale").addEventListener("change", ()=>chooseUserLocale($("sheetLocale").value));
+}
+
+// ---- Top bar fleet status ----
+// Counted over the whole fleet, not the search-filtered list: searching
+// changes which cards show, not the fleet's status. Same buckets as the
+// fleet toolbar's status tabs (camBucket()), so paused printers count as
+// printing. "Next done" uses printRemaining(), the time-remaining sort's own
+// estimate, so only printers it can estimate take part.
+function fleetStatusSummary(list){
+  const sum={ printing:0, attention:0, idle:0, offline:0, nextDone:null };
+  for(const p of list){
+    sum[camBucket(p)]++;
+    const r=printRemaining(p);
+    if(Number.isFinite(r) && (sum.nextDone==null || r<sum.nextDone)) sum.nextDone=r;
+  }
+  return sum;
+}
+// Colours follow the fleet cards (statusColorText()).
+const TB_STATUS = [
+  { key:'printing',  word:'printer_status.printing',     pill:'global.topbar.pill_printing',  color:'var(--busy)' },
+  { key:'attention', word:'global.topbar.pill_word_attention', pill:'global.topbar.pill_attention', color:'var(--bad)' },
+  { key:'idle',      word:'printer_status.idle',         pill:'global.topbar.pill_idle',      color:'var(--ok)' },
+  { key:'offline',   word:'printer_status.offline',      pill:'global.topbar.pill_offline',   color:'var(--ink-faint)' },
+];
+let TB_STATUS_LAST = null;
+function renderTopbarStatus(sum){
+  TB_STATUS_LAST=sum;
+  const plain=$("tbStatusPlain"), btn=$("tbStatusBtn"), pop=$("tbStatusPop");
+  if(!plain || !btn || !pop) return;
+  // Zero counts hide, except idle, so the readout is never empty.
+  const pills=TB_STATUS.filter(s=>s.key==='idle' || sum[s.key]>0).map(s=>{
+    const label=tn(s.pill, sum[s.key]);
+    return `<span class="tb-pill" role="img" style="--pill:${s.color}" aria-label="${esc(label)}" title="${esc(label)}"><span class="tb-dot"></span><b>${sum[s.key]}</b><span class="tb-word">${esc(t(s.word))}</span></span>`;
+  }).join("");
+  const nextText=sum.nextDone!=null ? t("global.topbar.next_done",{ time:fmtDuration(sum.nextDone) }) : "";
+  const html=`<span class="tb-pills">${pills}</span>`+(nextText ? `<span class="tb-next">${esc(nextText)}</span>` : "");
+  plain.innerHTML=html;
+  btn.innerHTML=html;
+  const summary=TB_STATUS.map(s=>tn(s.pill, sum[s.key])).concat(nextText ? [nextText] : []).join(", ");
+  btn.setAttribute("aria-label", summary);
+  const sheet=$("tbSheetStatus");
+  if(sheet) sheet.innerHTML=`<span class="tb-pills">${pills}</span>`+(sum.nextDone!=null ? `<span class="tb-next">${esc(t("global.topbar.next_done_in",{ time:fmtDuration(sum.nextDone) }))}</span>` : "");
+  pop.innerHTML=TB_STATUS.map(s=>`<div class="tb-pop-row" style="--pill:${s.color}"><span class="tb-dot"></span><b>${sum[s.key]}</b><span>${esc(t(s.word))}</span></div>`).join("")+
+    (sum.nextDone!=null ? `<div class="tb-pop-sep" role="separator"></div><div class="tb-pop-row tb-pop-next"><span>${esc(t("global.topbar.next_done_label"))}</span><span class="tb-mono">${esc(fmtDuration(sum.nextDone))}</span></div>` : "");
 }
 const ICONS = {
   pause:  `<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`,
@@ -1327,51 +1543,35 @@ async function authGate(){
 // when USERS_ENABLED is false, so this is a no-op restoring today's fully-
 // open UI whenever the feature is off.
 function applyRoleUI(){
-  const admin=isAdmin(), act=canAct();
-  // Settings hides filesBtn itself while open ($("gear")'s click handler) —
-  // this runs on every login/logout AND after a mid-settings Save, so it must
-  // not re-show it out from under that, or the folder button flashes back in
-  // on top of the settings panel.
-  const settingsOpen = $("setup").classList.contains("show");
-  $("gear").style.display = admin ? "" : "none";
-  // The Queue dashboard is a normal part of the working UI, not an
-  // exclusive full-page takeover like Settings — every other topbar
-  // control (folder, sort, compact view, bulk heat, maintenance, Settings
-  // itself) stays available while it's open, so only Settings gates these.
-  if($("filesBtn")) $("filesBtn").style.display = (act && !settingsOpen) ? "" : "none";
-  if($("jobSend")) $("jobSend").style.display = act ? "" : "none";
-  // queueBtn must never hide itself while the Queue dashboard it opened is
-  // still showing — it's the only way back to Fleet (mirrors #gear staying
-  // visible/clickable the whole time Settings is open).
-  if($("queueBtn")) $("queueBtn").style.display = (QUEUE_MANAGEMENT_ENABLED && !settingsOpen) ? "" : "none";
-  // Health is read-only diagnostics — available to every role, same as the
-  // fleet card itself; only Settings (an exclusive full-page takeover)
-  // hides it, same as bulkHeatBtn/filesBtn above.
-  if($("healthBtn")) $("healthBtn").style.display = settingsOpen ? "none" : "";
-  // The Library is browsing for every role (library.view); edits are M6.
-  if($("libraryBtn")) $("libraryBtn").style.display = settingsOpen ? "none" : "";
-  if(USERS_ENABLED && CURRENT_USER){
+  if($("jobSend")) $("jobSend").style.display = canAct() ? "" : "none";
+  if(USERS_ENABLED && CURRENT_USER && $("logoutBtn")){
     // First name if set, else fall back to the login name.
-    const uname=CURRENT_USER.firstName||CURRENT_USER.loginName;
-    $("userBadge").style.display="flex";
-    if($("logoutBtn")) $("logoutBtn").title=t("global.topbar.logout_title_named",{name:uname});
-  } else if($("userBadge")){
-    $("userBadge").style.display="none";
+    $("logoutBtn").title=t("global.topbar.logout_title_named",{name:CURRENT_USER.firstName||CURRENT_USER.loginName});
   }
+  // Top bar cells (role, Settings, first run, the deep link, Queue
+  // Management) are decided in one place — see topbarVisibility().
+  syncTopbar();
   renderVbadge();
   renderFleet();
 }
 
-// Always-on topbar clock — lives in the persistent topbar (near Settings),
-// not any one view, so it ticks regardless of which screen is open. Full
-// date is a title tooltip rather than permanent text, to keep it out of the
-// way of the icon row it sits in.
+// Always-on topbar clock — lives in the persistent topbar, not any one view,
+// so it ticks regardless of which screen is open. Time (HH:MM) over a short
+// date, in SnapCon's selected language rather than the browser's; the full
+// date is the title.
+function uiDateLocale(){
+  const loc=window.i18nCurrentLocale && window.i18nCurrentLocale();
+  // A locale added through the Language Editor may not be a tag Intl knows.
+  try{ return loc && Intl.DateTimeFormat.supportedLocalesOf([loc]).length ? loc : undefined; }
+  catch{ return undefined; }
+}
 function tickTopbarClock(){
   const el=$("topbarClock");
   if(!el) return;
-  const now=new Date();
-  el.textContent=now.toLocaleTimeString([], { hour12:false });
-  el.title=now.toLocaleDateString([], { weekday:"long", month:"long", day:"numeric", year:"numeric" });
+  const now=new Date(), loc=uiDateLocale();
+  $("topbarTime").textContent=now.toLocaleTimeString(loc, { hour:"2-digit", minute:"2-digit", hour12:false });
+  $("topbarDate").textContent=now.toLocaleDateString(loc, { weekday:"short", day:"numeric", month:"short" });
+  el.title=now.toLocaleDateString(loc, { weekday:"long", month:"long", day:"numeric", year:"numeric" });
 }
 tickTopbarClock();
 setInterval(tickTopbarClock, 1000);
@@ -1382,21 +1582,13 @@ async function init(){
   await authGate();
   applyRoleUI();
   wireUI();
-  // Single-printer deep link: this is a focused view — the search box, file
-  // browser, sort, compact toggle, settings, the "Selected Model" summary and
-  // the "Fleet x/x online" heading are all dead weight/noise; only the
-  // printer card itself earns a place here. Inline display:none beats the
-  // .show class toggle these elements use, so this stays permanent even once
-  // a file gets selected (e.g. via a notify-load pending delivery).
+  // Single-printer deep link (/orca/<name>): this is a focused view — the
+  // "Selected Model" summary and the "Fleet x/x online" heading are noise;
+  // only the printer card itself earns a place here. Inline display:none
+  // beats the .show class toggle these elements use, so this stays permanent
+  // even once a file gets selected (e.g. via a notify-load pending delivery).
+  // The top bar's own cells for this state come from topbarVisibility().
   if(URL_PRINTER_FILTER){
-    if($("fleetSearch")) $("fleetSearch").style.display="none";
-    if($("filesBtn")) $("filesBtn").style.display="none";
-    const topSort=document.querySelector(".topbar .sort-wrap");
-    if(topSort) topSort.style.display="none";
-    if($("compactBtn")) $("compactBtn").style.display="none";
-    if($("themeBtn")) $("themeBtn").style.display="none";
-    if($("gear")) $("gear").style.display="none";
-    if($("topbarClock")) $("topbarClock").style.display="none";
     if($("jobsechead")) $("jobsechead").style.display="none";
     if($("jobloading")) $("jobloading").style.display="none";
     if($("jobcard")) $("jobcard").style.display="none";
@@ -1457,17 +1649,18 @@ function wireModal(modalId, closeFn, buttonIds){
   $(modalId).addEventListener("click", e=>{ if(e.target===$(modalId)) closeFn(); });
 }
 
-// The icon shows the theme clicking would switch TO, not the one you're
-// already in — the common convention for a theme toggle (a moon while you're
-// in light mode means "click for dark"). Icon, alt and title therefore all
-// describe the same destination, so nothing on the button reads as stale
-// after a click.
+// The glyph is the same in both themes. The title names the theme a click
+// switches TO; for assistive tech it is a "Light theme" toggle, pressed while
+// light is on, so the name and the pressed state never contradict each other.
 function syncThemeButton(){
   const light=document.documentElement.getAttribute("data-theme")==="light";
-  $("themeBtnIcon").src=light?"/moon.svg":"/sun.svg";
-  $("themeBtnIcon").alt=t(light?"global.topbar.theme_alt_dark":"global.topbar.theme_alt_light");
   $("themeBtn").title=t(light?"global.topbar.theme_title_to_dark":"global.topbar.theme_title_to_light");
+  $("themeBtn").setAttribute("aria-label",t("global.topbar.theme_alt_light"));
   $("themeBtn").setAttribute("aria-pressed",light?"true":"false");
+  if($("tbSheetTheme")){
+    $("tbSheetThemeLabel").textContent=t(light?"global.topbar.theme_alt_dark":"global.topbar.theme_alt_light");
+    $("tbSheetTheme").setAttribute("aria-pressed",light?"true":"false");
+  }
 }
 // A signed-in user's saved theme is authoritative over whatever this
 // particular browser guessed for first paint (local prefers-color-scheme or
@@ -1655,9 +1848,11 @@ function refreshGlobalUIDynamicText(){
   if($("sortMenu")) applySortUI();
   if($("fileSortMenu")) applyFileSortUI();
   if($("filesBtn")) applyFilesOpen();
-  if($("compactBtn")) syncViewModeButtonIcon();
-  if($("topbarViewLabel")) updateTopbarViewLabel();
   if($("themeBtn")) syncThemeButton();
+  syncTopbar();
+  tickTopbarClock();
+  renderVbadge();
+  if(TB_STATUS_LAST) renderTopbarStatus(TB_STATUS_LAST);
   if($("configLoadWarningCard")) renderConfigLoadWarning({configLoadFailed:CONFIG_LOAD_FAILED, configLoadQuarantinePath:CONFIG_LOAD_QUARANTINE_PATH});
   // logoutBtn's title carries the current user's display name — set by
   // applyRoleUI() on login/logout, which also does a lot more (visibility
@@ -1672,9 +1867,7 @@ function refreshGlobalUIDynamicText(){
   // state, via the SAME attribute this reuses for the closed case, so this
   // re-derives just the title from current DOM state rather than re-running
   // the click handler or any Settings-rendering logic.
-  if($("gear")&&$("setup")){
-    $("gear").title=$("setup").classList.contains("show")?t("common.back"):t("settings.title");
-  }
+  if($("gear")&&$("setup")) syncGearTitle();
   // Same class of bug as gear's title above, just discovered later: Health's
   // openHealthPage()/closeHealthPage() set healthBtn.title imperatively
   // ("Back to Fleet"/"Printer health"), bypassing the data-i18n-title on the
@@ -1759,6 +1952,7 @@ async function populateLocaleSelectors(){
   const userValue=(USERS_ENABLED&&CURRENT_USER&&CURRENT_USER.locale)||"";
   if($("setUserLocale")){ $("setUserLocale").innerHTML=userOptsHtml; $("setUserLocale").value=userValue; }
   if($("topbarLocale")){ $("topbarLocale").innerHTML=userOptsHtml; $("topbarLocale").value=userValue; }
+  if($("sheetLocale")){ $("sheetLocale").innerHTML=userOptsHtml; $("sheetLocale").value=userValue; }
 }
 // Persists a per-user locale override (or null, meaning "follow system
 // default") to the account — the one place either control actually talks
@@ -2153,7 +2347,7 @@ function wireUI(){
   // dashboard, clicking it again while open closes it — there's no separate
   // close/X button now that this is a full-page view, not a modal.
   $("queueBtn").addEventListener("click", ()=>{
-    // Back to Fleet re-renders at once, as cycleViewMode() does, rather than
+    // Back to Fleet re-renders at once, as chooseView() does, rather than
     // leaving the fleet empty until the next poll.
     if($("queueDashboard").classList.contains("show")){ closeQueueDashboard(); renderFleet(); }
     else openQueueDashboard();
@@ -2365,15 +2559,9 @@ function wireUI(){
   wirePrinterDrag();
 
   applySortUI();
-  $("sortBtn").addEventListener("click", e=>{ e.stopPropagation(); $("sortMenu").classList.toggle("open"); });
+  wireTopbarPopups();
   document.querySelectorAll("#sortMenu .sort-opt").forEach(btn=>{
-    btn.addEventListener("click", ()=>{
-      SORT_MODE = btn.dataset.sort;
-      localStorage.setItem("snapcon-sort", SORT_MODE);
-      applySortUI();
-      $("sortMenu").classList.remove("open");
-      renderFleet();
-    });
+    btn.addEventListener("click", ()=>{ closeTopbarPopup(true); setSortMode(btn.dataset.sort); });
   });
 
   applyFileSortUI();
@@ -2388,8 +2576,9 @@ function wireUI(){
     });
   });
 
+  // The top bar's own menus close through closeTopbarPopup() instead.
   document.addEventListener("click", ()=>{
-    $("sortMenu").classList.remove("open"); $("fileSortMenu").classList.remove("open");
+    $("fileSortMenu").classList.remove("open");
     if($("fwSortMenu")) $("fwSortMenu").classList.remove("open");
     document.querySelectorAll(".prow-menu.open").forEach(m=>m.classList.remove("open"));
   });
@@ -2419,7 +2608,6 @@ function wireUI(){
   $("setup").addEventListener("change", onSettingsFieldChange);
 
   applyViewMode();
-  $("compactBtn").addEventListener("click", cycleViewMode);
 
   applyFilesOpen();
   $("filesBtn").addEventListener("click", ()=>{ FILES_OPEN=!FILES_OPEN; applyFilesOpen(); });
@@ -2583,7 +2771,14 @@ function renderVbadge(){
   const b=$("vbadge");
   if(!b) return;
   const viewMode=USERS_ENABLED && CURRENT_USER && CURRENT_USER.role==="view";
-  b.textContent=VBADGE_BASE+(viewMode?" (View Mode)":"");
+  const suffix=viewMode?" (View Mode)":"";
+  // The mismatch text is long; the brand cell shows a short form (keeping the
+  // View Mode cue), the full text stays in the title.
+  if(b.classList.contains("bad")){ b.textContent=t("global.topbar.version_mismatch")+suffix; b.title=VBADGE_BASE+suffix; }
+  else { b.textContent=VBADGE_BASE+suffix; b.removeAttribute("title"); }
+  // Narrow and Phone show the version in the menu sheet's footer instead.
+  const foot=$("tbSheetVersion");
+  if(foot){ foot.textContent="SnapCon "+VBADGE_BASE+suffix; foot.classList.toggle("bad", b.classList.contains("bad")); }
 }
 async function checkVersion(){
   const b=$("vbadge");
@@ -3065,13 +3260,11 @@ function openQueueDashboard(){
   // stays visible and usable, unlike Settings' own exclusive takeover.
   document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display="none");
   $("queueBtn").title=t("global.topbar.back_to_fleet_title");
-  // Kept in sync with VIEW_MODE regardless of which button opened this
-  // (the dedicated queueBtn, or the alternate-display cycle button when
-  // configured to include Print Farm) — this is the one place both paths
-  // funnel through, so the cycle button's own icon/title always reflects
-  // reality no matter how the dashboard got opened. applyViewMode() (not a
-  // bare assignment) so the previous view's body class and Camera View
-  // sessions don't outlive it.
+  // Kept in sync with VIEW_MODE regardless of which control opened this
+  // (queueBtn, or Print farm in the View menu) — this is the one place both
+  // funnel through, so the View cell always reflects reality. applyViewMode()
+  // (not a bare assignment) so the previous view's body class and Camera
+  // View sessions don't outlive it.
   VIEW_MODE='printfarm';
   applyViewMode();
   refreshQueueDashboard();
@@ -3121,6 +3314,7 @@ function openHealthPage(printerId){
   $("healthPage").classList.add("show");
   document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display="none");
   $("healthBtn").title=t("global.topbar.back_to_fleet_title");
+  syncTopbarActive();
   let id=printerId;
   if(id==null){
     const attn=FLEET.find(p=>p.needsAttention);
@@ -3193,8 +3387,13 @@ function updateHealthBadge(){
   const badge=$("healthBadge");
   if(!badge) return;
   const n=FLEET.filter(p=>p.needsAttention).length;
-  if(n>0){ badge.textContent=n>99?"99+":String(n); badge.style.display=""; }
-  else badge.style.display="none";
+  // The same count on Health's cell, on the Menu cell (which stands in for
+  // Health on phones) and on the menu sheet's Health row.
+  for(const id of ["healthBadge","tbMenuBadge","tbSheetHealthCount"]){
+    const el=$(id); if(!el) continue;
+    if(n>0){ el.textContent=n>99?"99+":String(n); el.style.display=""; }
+    else el.style.display="none";
+  }
 }
 function renderHealthPicker(){
   const wrap=$("healthPicker");
@@ -5877,6 +6076,7 @@ function renderFleet({incremental}={}){
   }
   $("fleetcount").textContent=t("fleet.status.count_online",{online,total:FLEET.length});
   updateHealthBadge();
+  renderTopbarStatus(fleetStatusSummary(FLEET));
   if(gridToolbarActive()) updateCamToolbar();
 }
 
@@ -8169,10 +8369,12 @@ function openBulkHeat(){
   $("bulkheatCancelQueue").style.display="none";
   BULKHEAT_CANCEL=false;
   $("bulkheatmodal").classList.add("show");
+  syncTopbarActive();
 }
 function closeBulkHeatModal(){
   BULKHEAT_CANCEL = true;
   $("bulkheatmodal").classList.remove("show");
+  syncTopbarActive();
 }
 // Applies (or re-applies, e.g. after a live locale switch) a row's status
 // purely from BULKHEAT_ROW_STATE — never by reading back what's currently
@@ -8733,23 +8935,17 @@ $("gear").addEventListener("click",()=>{
   // opening Settings on top of either of the other two closes it first
   // (clearing its refresh timer, for Queue), never leaves it running hidden
   // underneath.
+  closeTopbarPopup(false);
   closeQueueDashboard();
   closeHealthPage();
   if(window.LibraryPage) LibraryPage.close();
   const open=$("setup").classList.toggle("show");
   document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display=open?"none":"");
-  $("gear").querySelector("img").src = open ? "/back.svg" : "/gear.svg";
-  $("gear").title = open ? t("common.back") : t("settings.title");
-  $("fleetSearch").style.display = open ? "none" : "";
-  $("sortBtn").style.display = open ? "none" : "";
-  $("compactBtn").style.display = open ? "none" : "";
-  $("filesBtn").style.display = open ? "none" : "";
-  if($("bulkHeatBtn")) $("bulkHeatBtn").style.display = open ? "none" : "";
-  if($("healthBtn")) $("healthBtn").style.display = open ? "none" : "";
-  if($("libraryBtn")) $("libraryBtn").style.display = open ? "none" : "";
-  if($("queueBtn")) $("queueBtn").style.display = "none"; // re-shown by applyRoleUI() below once Settings' own state is settled
+  // Settings' cell shows the active state (syncTopbar()) and reads "Back";
+  // which top bar cells hide while Settings is open is topbarVisibility()'s call.
+  syncGearTitle();
   if(open){
-    document.body.classList.remove("showfiles"); loadGroupsUI().then(loadUsersUI); loadQueueManagementUI();
+    document.body.classList.remove("showfiles"); syncTopbar(); loadGroupsUI().then(loadUsersUI); loadQueueManagementUI();
     // showSetTab() is what actually hides #globalSaveRow for a registered
     // tab (General) in favor of its sticky dirty footer — that only ever
     // ran on a tab-button click, never on Settings simply opening onto
@@ -8761,7 +8957,7 @@ $("gear").addEventListener("click",()=>{
     showSetTab(activeTab);
   }
   else {
-    applyFilesOpen(); $("sortMenu").classList.remove("open");
+    applyFilesOpen();
     if(RA_POLL_TIMER){ clearInterval(RA_POLL_TIMER); RA_POLL_TIMER=null; } // Settings closed — stop polling even if "remote" was the last-open tab
     applyRoleUI(); // correctly restores queueBtn (enablement-gated) instead of showing it unconditionally
   }
@@ -10846,8 +11042,6 @@ async function loadConfigUI(){
     if($("topbarSiteName")){ $("topbarSiteName").textContent=siteName; $("topbarSiteName").style.display=siteName?"":"none"; }
     $("setCameraRefresh").value=c.cameraViewRefreshInterval||6;
     CAM_STAGGER=c.cameraViewStagger!==false; $("setCameraStagger").checked=CAM_STAGGER;
-    ALT_DISPLAY=["all","compact","camera","list","printfarm"].includes(c.alternateDisplay)?c.alternateDisplay:"all";
-    $("setAltDisplay").value=ALT_DISPLAY;
     ALLOW_MAPPING=c.allowMapping!==false; $("setAllowMapping").checked=ALLOW_MAPPING;
     SUGGEST_MATCHING=c.suggestMatching!==false; $("setSuggestMatching").checked=SUGGEST_MATCHING;
     // Absent means on, matching the server's own default.
@@ -10927,7 +11121,7 @@ async function loadConfigUI(){
     // hide the warning banner above (it lives on tab-general, and showSetTab
     // below hides every other .set-panel) and invite saving an empty printer
     // list over the still-recoverable original.
-    if(!c.configured && !CONFIG_LOAD_FAILED && isAdmin()){ $("setup").classList.add("show"); showSetTab("printers"); $("gear").querySelector("img").src="/back.svg"; $("gear").title=t("common.back"); document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display="none"); $("fleetSearch").style.display="none"; $("sortBtn").style.display="none"; $("compactBtn").style.display="none"; if($("filesBtn")) $("filesBtn").style.display="none"; $("setupmsg").textContent=t("settings.onboarding_welcome"); if(!$("setPrinters").children.length) addPrinterRow("",""); }
+    if(!c.configured && !CONFIG_LOAD_FAILED && isAdmin()){ $("setup").classList.add("show"); showSetTab("printers"); syncGearTitle(); document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display="none"); syncTopbar(); $("setupmsg").textContent=t("settings.onboarding_welcome"); if(!$("setPrinters").children.length) addPrinterRow("",""); }
   }catch(e){}
 }
 // ---- Shared masked-secret control (printer API token, Telegram bot token) ----
@@ -12341,12 +12535,11 @@ async function saveConfig(){
   const useTNotation=$("setTNotation").checked; USE_T_NOTATION=useTNotation;
   ALLOW_MAPPING=$("setAllowMapping").checked; SUGGEST_MATCHING=$("setSuggestMatching").checked;
   CAM_STAGGER=$("setCameraStagger").checked;
-  ALT_DISPLAY=$("setAltDisplay").value;
   CURRENCY=$("setCurrency").value.trim()||"$";
   const logsRetentionDays=parseInt($("setLogsRetentionDays").value,10);
   const cameraRetentionDays=parseInt($("setCameraRetentionDays").value,10);
   const gcodeSyncRetentionDays=parseInt($("setGcodeSyncRetentionDays").value,10);
-  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, alternateDisplay:ALT_DISPLAY, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked, locale:$("setLocale")?$("setLocale").value:undefined,
+  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked, locale:$("setLocale")?$("setLocale").value:undefined,
     usersEnabled:$("setUsersEnabled").checked||undefined,
     resend:{ apiKey:$("setResendKey").value.trim(), fromAddress:$("setResendFrom").value.trim() },
     otp:{
@@ -12422,7 +12615,7 @@ async function saveConfig(){
     USERS_ENABLED=!!c.usersEnabled;
     if(USERS_ENABLED && !CURRENT_USER){ applyRoleUI(); showLoginOverlay(); }
     else applyRoleUI();
-    applyViewMode(); // refresh the header button's icon/title if Alternate Display just changed
+    applyViewMode(); // re-sync the View cell and realign the view's own state after a save
     loadFiles(); loadFleet(); startFleetRefresh();
     // The Health page reads the same interval, so a changed value has to
     // re-arm that timer too — it caches the interval when it starts.

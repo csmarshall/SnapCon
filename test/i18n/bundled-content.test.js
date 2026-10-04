@@ -247,7 +247,7 @@ test("the global.* namespace exists — topbar chrome, both sort menus, the spla
   // for the gear button, settings.tabs.queue for the queue button) — those
   // two are asserted against settings.*, not global.topbar.*, on purpose.
   ["files_show_title", "files_hide_title", "files_alt", "fleet_search_placeholder",
-    "fleet_search_aria", "sort_button_title", "sort_alt", "compact_alt",
+    "fleet_search_aria", "sort_button_title", "sort_alt",
     "bulk_heat_title", "heat_alt", "maintenance_title", "health_title", "logout_title",
     "theme_alt_light", "theme_alt_dark", "theme_title_to_dark", "theme_title_to_light"]
     .forEach(k => assert.ok(`global.topbar.${k}` in enFlat, `global.topbar.${k} must exist`));
@@ -262,14 +262,11 @@ test("the global.* namespace exists — topbar chrome, both sort menus, the spla
   assert.ok("settings.title" in enFlat, "gear button title/alt reuses settings.title, not a new key");
   assert.ok("settings.tabs.queue" in enFlat, "queue button title reuses settings.tabs.queue, not a new key");
   // Every VIEW_MODE / stable view id (regular/compact/camera/list/printfarm)
-  // needs its own full-sentence title key — never assembled from a shared
-  // prefix + a per-mode word, so a translation never has to reassemble a
-  // sentence out of fragments.
+  // needs its own key for the View menu item and the View cell's value —
+  // never assembled from a shared prefix + a per-mode word. (The old cycle
+  // button's view_title_*/view_label_* keys went with it.)
   ["regular", "compact", "camera", "list", "printfarm"].forEach(mode => {
-    assert.ok(`global.topbar.view_title_${mode}` in enFlat, `global.topbar.view_title_${mode} must exist`);
-  });
-  ["camera", "compact", "list", "printfarm"].forEach(mode => {
-    assert.ok(`global.topbar.view_label_${mode}` in enFlat, `global.topbar.view_label_${mode} must exist`);
+    assert.ok(`global.topbar.view_name_${mode}` in enFlat, `global.topbar.view_name_${mode} must exist`);
   });
   // Printer sort (#sortMenu, stable ids none/status/time/name) and file sort
   // (#fileSortMenu, stable ids new/old/az/za/big/small) are DELIBERATELY

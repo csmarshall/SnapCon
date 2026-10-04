@@ -54,6 +54,7 @@
       hideFleet(true);
       $("libraryBtn").title=t("global.topbar.back_to_fleet_title");
       $("libraryBtn").setAttribute("aria-pressed","true");
+      if(typeof syncTopbarActive==="function") syncTopbarActive();
     }
     route(path||"/library", push);
   }
