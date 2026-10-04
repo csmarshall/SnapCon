@@ -37,7 +37,7 @@ async function service(t) {
   registerLibraryRoutes(app, { library, requireAuth: auth.requireAuth, actorFromReq: () => ({ userId: null, userLabel: null }) });
   const srv = await new Promise(r => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const url = `http://127.0.0.1:${srv.address().port}`;
-  const call = async (as, p) => { const res = await fetch(url + p, { headers: as ? { "x-as": as } : {} }); return { status: res.status, body: await res.json() }; };
+  const call = async (as, p, body) => { const res = await fetch(url + p, { method: body ? "POST" : "GET", headers: { "content-type": "application/json", ...(as ? { "x-as": as } : {}) }, body: body ? JSON.stringify(body) : undefined }); return { status: res.status, body: await res.json() }; };
   t.after(async () => { srv.closeAllConnections(); await new Promise(r => srv.close(r)); await library.stop(); });
   return { library, db, call, base };
 }
@@ -111,4 +111,29 @@ test("over HTTP: everyone with library.view sees the counts; the rows only for p
   assert.equal((await call("nobody", "/api/library/models/" + uuid)).status, 403);
   const grid = (await call("view", "/api/library/models")).body.models[0];
   assert.equal(grid.prints.count, 2, "the grid shows the count from model_stats");
+});
+
+test("an unlinked print on a printer someone may not see: they can't dismiss it, link it, undo its link, or see it in a Model's changes (M8 review)", async t => {
+  const { library, db, call } = await service(t);
+  indexFile(db, { root: "gcode", rel: "A/Lamp.gcode", key: "q:lamp-a" });
+  indexFile(db, { root: "gcode", rel: "B/Lamp.gcode", key: "q:lamp-b" });
+  await library._group();
+  await library.recordPrintStart({ jobKey: "o:1", printerId: "secret", printerName: "Secret K1C", remoteName: "Lamp.gcode", source: "external", startedAt: 10 });
+  const item = db.prepare("SELECT id, evidence_json FROM review_items WHERE kind = 'unlinked_print'").get();
+  assert.ok(item, "the ambiguous print asks a person");
+  const pick = JSON.parse(item.evidence_json).candidates[0].uuid;
+  for (const kind of ["dismiss", "approve"]) {
+    const r = await call("regular", "/api/library/actions", { kind, review: item.id, model: pick });
+    assert.equal(r.status, 404, kind + ": as if the item did not exist");
+  }
+  assert.equal(db.prepare("SELECT status FROM review_items WHERE id = ?").get(item.id).status, "open", "untouched");
+  const linked = await call("admin", "/api/library/actions", { kind: "approve", review: item.id, model: pick });
+  assert.equal(linked.status, 200);
+  assert.equal((await call("regular", `/api/library/actions/${linked.body.actionId}/undo`, {})).status, 404, "nor undo it");
+  const asRegular = (await call("regular", "/api/library/models/" + pick)).body;
+  assert.equal(asRegular.history.some(h => h.summary && h.summary.print), false, "the change naming the hidden printer's job is not shown");
+  assert.equal(JSON.stringify(asRegular).includes("Lamp.gcode\",\"at"), false);
+  const asAdmin = (await call("admin", "/api/library/models/" + pick)).body;
+  assert.equal(asAdmin.history.some(h => h.summary && h.summary.print), true);
+  assert.equal((await call("admin", `/api/library/actions/${linked.body.actionId}/undo`, {})).status, 200);
 });

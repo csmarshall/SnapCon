@@ -187,6 +187,9 @@ function createLibraryService({
     const cap = libraryActions.CAPABILITY[action && action.kind];
     if (!cap) throw new LibraryError(400, "unknown_action", "Unknown action.");
     if (!authz || !authz.can(user, cap)) throw new LibraryError(403, "forbidden", "You don't have permission to do this.");
+    // An item about a Print on a printer this person may not see is not
+    // theirs to see or act on (§9 D6): as if it did not exist.
+    if (action.review != null && !reviewVisible(user, action.review)) throw new LibraryError(404, "review_not_found", "That item no longer exists.");
     let res;
     try { res = await worker.request("library.act", { dbPath: store.dbPath, action, actor, now: now(), reportPath: groupingReport }); }
     catch (e) { throw asLibraryError(e); }
@@ -199,12 +202,31 @@ function createLibraryService({
     const a = store.db.prepare("SELECT id, kind FROM actions WHERE id = ?").get(Number(actionId));
     if (!a) throw new LibraryError(404, "action_not_found", "That change no longer exists.");
     if (!authz || !authz.can(user, libraryActions.CAPABILITY[a.kind])) throw new LibraryError(403, "forbidden", "You don't have permission to do this.");
+    if (!changeVisible(user, a.id)) throw new LibraryError(404, "action_not_found", "That change no longer exists.");
     let res;
     try { res = await worker.request("library.undo", { dbPath: store.dbPath, actionId: a.id, actor, now: now(), reportPath: groupingReport }); }
     catch (e) { throw asLibraryError(e); }
     audit("model-change-undone", actor, { action: a.id, kind: a.kind, ...auditSummary(res.summary || {}) });
     return res;
   }
+  // Print visibility for Library items and changes (§9 D6): an unlinked_print
+  // Review Item, and a change that linked a Print, belong to that Print's
+  // printer.
+  function printVisible(user, printId) {
+    const p = printId == null ? null : store.db.prepare("SELECT printer_id FROM prints WHERE id = ?").get(Number(printId));
+    return !p || printerVisible(user, p.printer_id);
+  }
+  function reviewVisible(user, reviewId) {
+    const r = store.db.prepare("SELECT kind, print_id FROM review_items WHERE id = ?").get(Number(reviewId));
+    return !r || r.kind !== "unlinked_print" || (r.print_id != null && printVisible(user, r.print_id));
+  }
+  function changeVisible(user, actionId) {
+    const a = store.db.prepare("SELECT detail_json FROM actions WHERE id = ?").get(Number(actionId));
+    let s = {};
+    try { s = (JSON.parse((a && a.detail_json) || "{}").summary) || {}; } catch {}
+    return !s.print || printVisible(user, s.print.id);
+  }
+
   function auditSummary(r) {
     const out = {};
     for (const k of ["model", "name", "before", "after", "family", "fileSays", "plate", "reviewKind"]) if (r[k] != null) out[k] = r[k];
@@ -630,7 +652,7 @@ function createLibraryService({
       const m = libraryView.modelDetail(store.db, String(uuid || ""), { printerVisible: pid => printerVisible(user, pid) });
       if (!m) throw new LibraryError(404, "model_not_found", "No such model.");
       if (!m.mergedInto) {
-        m.history = libraryActions.history(store.db, m.uuid);
+        m.history = libraryActions.history(store.db, m.uuid).filter(h => !(h.summary && h.summary.print) || printVisible(user, h.summary.print.id));
         // Counts are everyone's (§9 D6); the rows only for printers this
         // user may see, and nothing about how many others there are.
         const id = store.db.prepare("SELECT id FROM models WHERE uuid = ?").get(m.uuid).id;
