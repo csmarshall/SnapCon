@@ -4891,6 +4891,11 @@ app.get("/api/queue/:printerId", requireAuth, (req, res) => {
 // Variant. null when it answered the request with the reason.
 async function resolveQueuedFile(req, res, f, name, sub) {
   const root = (f || {}).root;
+  // A file no printer can start is never queued (M8 review: with Library
+  // locations any file in one — an STL, a PDF — could be). Pools only hold
+  // printers that print the default types.
+  const why = name && fileTypeRefusal(null, name, "The queue");
+  if (why) { res.status(400).json({ error: why, code: "not_printable" }); return null; }
   let ref, hash, ident = null;
   try {
     ref = name ? await resolveFileRef(req.user, root, sub ? sub + "/" + name : name) : null;
@@ -5131,14 +5136,16 @@ app.post("/api/queue/:printerId/accept-file-change", requireRegular, async (req,
   const qs = queueStore.getPrinterState(p.id);
   if (qs.attentionReason !== "file-changed" || !qs.currentItem) return res.status(409).json({ error: "Nothing to accept right now" });
   const item = qs.currentItem;
-  const fp = safePath((item.file.sub ? item.file.sub + "/" : "") + item.file.name);
-  if (!fp) return res.status(400).json({ error: "File no longer exists" });
   let hash;
   try {
-    if (!(await fileExists(fp))) return res.status(400).json({ error: "File no longer exists" });
-    hash = await queueStore.computeFileHash(fp, { force: true });
+    // The file where the item lives: the G-code folder, or the Library
+    // location it was queued from (M8 review: this hashed the G-code folder's
+    // path for a Library item, so it could never be accepted).
+    const ref = await resolveFileRef(req.user, item.file.root, (item.file.sub ? item.file.sub + "/" : "") + item.file.name);
+    if (!ref || !(await fileExists(ref.fp))) return res.status(400).json({ error: "File no longer exists" });
+    hash = await queueStore.computeFileHash(ref.fp, { force: true });
   } catch (e) {
-    if (replyIfNasDown(res, e)) return;
+    if (replyFileRefError(res, e, item.file.root)) return;
     return res.status(400).json({ error: e.message });
   }
   const actor = actorFromReq(req);

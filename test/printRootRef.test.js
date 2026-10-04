@@ -90,3 +90,24 @@ test("dispatch: a moved file is used only after its full hash matches, and every
   assert.ok(body.indexOf("library.recordPrintStart(") > body.indexOf("await c.startPrintFile(p, name)"));
   assert.match(body, /if \(start\) \{\s*library\.recordPrintStart\(/, "an upload without a start is not a print");
 });
+
+test("accepting a changed file hashes it where the item lives, not in the G-code folder (M8 review)", () => {
+  const at = serverSrc.indexOf('app.post("/api/queue/:printerId/accept-file-change"');
+  const route = serverSrc.slice(at, at + serverSrc.slice(at).search(/\r?\n\}\);\r?\n/));
+  assert.match(route, /resolveFileRef\(req\.user, item\.file\.root, /, "the item's own location, as the person accepting");
+  assert.doesNotMatch(route, /safePath\(/, "never the G-code folder's path for a Library item");
+  assert.match(route, /replyFileRefError\(res, e, item\.file\.root\)/);
+});
+
+test("the queue refuses a file no printer can start, before reading it (M8 review)", () => {
+  const at = serverSrc.indexOf("async function resolveQueuedFile(");
+  const fn = serverSrc.slice(at, at + serverSrc.slice(at).search(/\r?\n\}\r?\n/));
+  const refuse = fn.indexOf('fileTypeRefusal(null, name, "The queue")');
+  assert.ok(refuse > 0 && refuse < fn.indexOf("resolveFileRef("), "checked before the file is even resolved");
+  const env = { DEFAULT_FILE_TYPES: ["gcode", "gco", "g", "gx", "3mf"] };
+  vm.createContext(env);
+  const ft = serverSrc.indexOf("function fileTypeRefusal(");
+  vm.runInContext(serverSrc.slice(ft, ft + serverSrc.slice(ft).search(/\r?\n\}\r?\n/) + 3), env);
+  assert.match(env.fileTypeRefusal(null, "Beardie.stl", "The queue"), /cannot print/);
+  assert.equal(env.fileTypeRefusal(null, "Beardie.gcode", "The queue"), null);
+});

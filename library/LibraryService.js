@@ -253,7 +253,9 @@ function createLibraryService({
     if (!r.enabled) throw new LibraryError(409, "location_disabled", `The location "${r.name}" is switched off.`);
     if (r.status === "offline") throw new LibraryError(503, "location_offline", `The location "${r.name}" is unreachable. SnapCon keeps checking and will use it again as soon as it answers.`);
     // Answers, but can't be used (its folder is gone, or overlaps another).
-    if (r.status === "error") throw new LibraryError(409, "location_error", `The location "${r.name}" can't be used right now${r.last_error ? ": " + r.last_error : ""}.`);
+    // Its own error text is not repeated: it can name the share's path, which
+    // only those who manage locations see (Settings → Library).
+    if (r.status === "error") throw new LibraryError(409, "location_error", `The location "${r.name}" can't be used right now. An admin can see why in Settings → Library.`);
     return { id: r.id, name: r.name, path: r.path, realPath: stateOf(r.id).realPath || null };
   }
 
