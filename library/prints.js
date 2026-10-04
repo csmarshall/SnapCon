@@ -70,7 +70,15 @@ function liveModel(db, uuid) {
 // first (two copies of the same content can sit in two Models); then the
 // only Model holding it; then, among several, the one it was in when it
 // printed; else the one holding the most copies.
-function modelOfContent(db, contentKey, { location = null, atLink = null } = {}) {
+// memo: one refresh's answers (many Prints share content), keyed by input.
+function modelOfContent(db, contentKey, { location = null, atLink = null } = {}, memo = null) {
+  const mk = memo && contentKey + "|" + (location || "") + "|" + (atLink || "");
+  if (memo && memo.has(mk)) return memo.get(mk);
+  const id = modelOfContentNow(db, contentKey, { location, atLink });
+  if (memo) memo.set(mk, id);
+  return id;
+}
+function modelOfContentNow(db, contentKey, { location, atLink }) {
   const ck = canonical(db, contentKey);
   const keys = keysFor(db, ck);
   const rows = db.prepare(`SELECT root_id, rel_path, model_id FROM files WHERE entry_path = '' AND model_id IS NOT NULL
@@ -86,16 +94,19 @@ function modelOfContent(db, contentKey, { location = null, atLink = null } = {})
 }
 
 // What a Print is linked to now: a person's Decision, else its own link.
-function effectiveLink(db, p) {
-  const d = db.prepare(`SELECT id, object_type, object_key FROM decisions WHERE subject_type = 'print' AND subject_key = ? AND relation = 'printed_as'
-    AND polarity = 'affirm' AND ${ACTIVE} ORDER BY id DESC LIMIT 1`).get(String(p.id));
+// ctx (a whole refresh): { memo, decisions: Map print id -> Decision }.
+const DECISION_SQL = `SELECT id, subject_key, object_type, object_key FROM decisions WHERE subject_type = 'print' AND relation = 'printed_as'
+    AND polarity = 'affirm' AND ${ACTIVE}`;
+function effectiveLink(db, p, ctx = null) {
+  const d = ctx ? ctx.decisions.get(String(p.id)) : db.prepare(DECISION_SQL + " AND subject_key = ? ORDER BY id DESC LIMIT 1").get(String(p.id));
+  const memo = ctx && ctx.memo;
   if (d) {
     if (d.object_type === "model") { const m = liveModel(db, d.object_key); return { modelId: m ? m.id : null, variantKey: null, confidence: "exact", method: "decision", byDecision: true }; }
     const [ck, plate] = String(d.object_key).split("#");
-    return { modelId: modelOfContent(db, ck, { location: p.location }), variantKey: canonical(db, ck) + (plate ? "#" + plate : ""), confidence: "exact", method: "decision", byDecision: true };
+    return { modelId: modelOfContent(db, ck, { location: p.location }, memo), variantKey: canonical(db, ck) + (plate ? "#" + plate : ""), confidence: "exact", method: "decision", byDecision: true };
   }
   if (p.content_key) {
-    return { modelId: modelOfContent(db, p.content_key, { location: p.location, atLink: p.model_uuid_at_link }) || (liveModel(db, p.model_uuid_at_link) || {}).id || null,
+    return { modelId: modelOfContent(db, p.content_key, { location: p.location, atLink: p.model_uuid_at_link }, memo) || (liveModel(db, p.model_uuid_at_link) || {}).id || null,
       variantKey: canonical(db, p.content_key) + (p.plate_no != null ? "#" + p.plate_no : ""), confidence: p.link_confidence, method: p.link_method, byDecision: false };
   }
   if (p.model_uuid_at_link && p.link_confidence !== "low" && p.link_confidence !== "none") {
@@ -106,16 +117,19 @@ function effectiveLink(db, p) {
 }
 
 // print_links and model_stats, recomputed from every Print (derived, §4.6):
-// run after grouping and after any Print is recorded. Counts only what is
-// linked: exact/high (and a person's Decision) are confirmed; medium is
-// "matched by filename"; low and none count nowhere.
+// run after grouping (which may have moved the content Prints are linked by)
+// and after an import. Counts only what is linked: exact/high (and a
+// person's Decision) are confirmed; medium is "matched by filename"; low and
+// none count nowhere. One recorded job updates only itself: refreshPrint.
 function refreshStats(db) {
   db.prepare("DELETE FROM print_links").run();
   db.prepare("DELETE FROM model_stats").run();
   const ins = db.prepare("INSERT INTO print_links (print_id, model_id, variant_key, confidence, method, by_decision) VALUES (?, ?, ?, ?, ?, ?)");
   const stats = new Map();
+  const ctx = { memo: new Map(), decisions: new Map() };
+  for (const d of db.prepare(DECISION_SQL + " ORDER BY id").all()) ctx.decisions.set(d.subject_key, d);   // the newest wins
   for (const p of db.prepare("SELECT * FROM prints").all()) {
-    const l = effectiveLink(db, p);
+    const l = effectiveLink(db, p, ctx);
     ins.run(p.id, l.modelId, l.variantKey, l.confidence, l.method, l.byDecision ? 1 : 0);
     if (!l.modelId || !(CONFIRMED.has(l.confidence) || l.confidence === "medium")) continue;
     const s = stats.get(l.modelId) || { n: 0, confirmed: 0, filename: 0, last: null };
@@ -128,6 +142,27 @@ function refreshStats(db) {
   const st = db.prepare("INSERT INTO model_stats (model_id, print_count, print_count_confirmed, print_count_filename, last_printed_at) VALUES (?, ?, ?, ?, ?)");
   for (const [id, s] of stats) st.run(id, s.n, s.confirmed, s.filename, s.last);
   return { prints: db.prepare("SELECT count(*) AS n FROM prints").get().n, models: stats.size };
+}
+
+// One Print's link and its Model's counts, as refreshStats would compute them
+// (M8: recomputing every Print on every recorded job took ~5 s at 27k Prints).
+function refreshPrint(db, printId) {
+  const p = db.prepare("SELECT * FROM prints WHERE id = ?").get(printId);
+  if (!p) return;
+  const before = db.prepare("SELECT model_id FROM print_links WHERE print_id = ?").get(printId);
+  const l = effectiveLink(db, p);
+  db.prepare("INSERT OR REPLACE INTO print_links (print_id, model_id, variant_key, confidence, method, by_decision) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(p.id, l.modelId, l.variantKey, l.confidence, l.method, l.byDecision ? 1 : 0);
+  for (const id of new Set([before && before.model_id, l.modelId].filter(x => x != null))) refreshModelStats(db, id);
+}
+function refreshModelStats(db, modelId) {
+  const s = db.prepare(`SELECT count(*) AS n, sum(pl.by_decision = 1 OR pl.confidence IN ('exact','high')) AS confirmed,
+      sum(pl.by_decision = 0 AND pl.confidence = 'medium') AS filename, max(coalesce(p.started_at, p.ended_at)) AS last
+    FROM print_links pl JOIN prints p ON p.id = pl.print_id
+    WHERE pl.model_id = ? AND (pl.by_decision = 1 OR pl.confidence IN ('exact','high','medium'))`).get(modelId);
+  if (!s.n) { db.prepare("DELETE FROM model_stats WHERE model_id = ?").run(modelId); return; }
+  db.prepare("INSERT OR REPLACE INTO model_stats (model_id, print_count, print_count_confirmed, print_count_filename, last_printed_at) VALUES (?, ?, ?, ?, ?)")
+    .run(modelId, s.n, s.confirmed || 0, s.filename || 0, s.last);
 }
 
 // ---------------------------------------------------------------- linking
@@ -254,8 +289,7 @@ function recordStart(db, e, { now = Date.now() } = {}) {
     started_at: at, outcome: "printing", audit_ref: e.auditRef || null, location: e.location || null, queue_item_id: e.queueItemId || null, job_key: e.jobKey,
   };
   const id = insertPrint(db, row);
-  if (id) raiseReview(db, id, link, row, now);
-  refreshStats(db);
+  if (id) { raiseReview(db, id, link, row, now); refreshPrint(db, id); }
   return { id, link: { method: link.link_method, confidence: link.link_confidence } };
 }
 
@@ -266,8 +300,8 @@ function recordOutcome(db, e, { now = Date.now() } = {}) {
   const open = db.prepare("SELECT * FROM prints WHERE printer_id = ? AND outcome = 'printing' ORDER BY coalesce(started_at, 0) DESC, id DESC LIMIT 1").get(e.printerId);
   const at = e.at || now;
   if (!open || !(jobName(open.remote_name) === jobName(e.remoteName) || (open.started_at && at - open.started_at < OPEN_JOB_TRUST_MS))) return { updated: 0 };
+  // How it ended changes neither its link nor any count.
   closeJob(db, open, { outcome, at, elapsedSec: e.elapsedSec, filamentG: e.filamentG, costEst: e.costEst, remoteName: e.remoteName });
-  refreshStats(db);
   return { updated: 1, id: open.id };
 }
 
@@ -446,4 +480,4 @@ function historyFor(db, modelId, { visible = () => true, limit = 200 } = {}) {
   return { rows: out, hiddenCount: hidden };
 }
 
-module.exports = { RULE_VERSION, recordStart, recordOutcome, importAudit, refreshStats, historyFor, effectiveLink, linkFor, genericName, jobName, modelOfContent, liveModel };
+module.exports = { RULE_VERSION, recordStart, recordOutcome, importAudit, refreshStats, refreshPrint, historyFor, effectiveLink, linkFor, genericName, jobName, modelOfContent, liveModel };

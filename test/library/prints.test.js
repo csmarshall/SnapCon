@@ -290,3 +290,27 @@ test("generic names: test prints and default object names are never linked by na
   for (const n of ["Assembly.gcode", "3DBenchy.gcode", "Benchy_PLA_45m.gcode", "plate_1.gcode", "Calibration Cube.gcode", "Part 3.gcode", "a.gcode"]) assert.ok(P.genericName(n), n);
   for (const n of ["Beardie (5h41m).gcode", "Flexi Factory Skeleton T-Rex.gcode", "Whites Tree Frog.gcode"]) assert.equal(P.genericName(n), null, n);
 });
+
+test("recording one job updates only its own link and Model, and agrees with a full recompute (M8)", t => {
+  const { db, group } = setup(t);
+  const sha = "f".repeat(64);
+  const k1 = file(db, { rel: "Owl.gcode", sha, objects: ["Owl.stl"] });
+  file(db, { rel: "Dragon.gcode", objects: ["Dragon.stl"] });
+  file(db, { rel: "A/Lamp.gcode", objects: ["Lamp shade.stl"] });
+  file(db, { rel: "B/Lamp.gcode", objects: ["Desk lamp arm.stl"] });
+  group();
+  const m = modelOf(db, "Owl.gcode");
+  let n = 0;
+  for (const e of [
+    { remoteName: "Owl.gcode", source: "library", via: "print", library: { contentKey: k1, model: m.uuid, variantKey: k1 } },
+    { remoteName: "Dragon.gcode", source: "external" }, { remoteName: "Lamp.gcode", source: "external" }, { remoteName: "Assembly.gcode", source: "external" },
+    { remoteName: "Owl.gcode", source: "queue", via: "queue", sha256: sha }, { remoteName: "Dragon.gcode", source: "external" },
+  ]) P.recordStart(db, { jobKey: "j" + (++n), printerId: "p" + (n % 2), startedAt: 1000 * n, ...e }, { now: 1000 * n });
+  P.recordOutcome(db, { printerId: "p0", remoteName: "Dragon.gcode", outcome: "completed", at: 9000 });
+  const snap = () => JSON.stringify([db.prepare("SELECT * FROM print_links ORDER BY print_id").all(), db.prepare("SELECT * FROM model_stats ORDER BY model_id").all()]);
+  const incremental = snap();
+  P.refreshStats(db);
+  assert.equal(incremental, snap());
+  assert.deepEqual(stats(db, "Owl.gcode"), [2, 2, 0]);
+  assert.deepEqual(stats(db, "Dragon.gcode"), [2, 0, 2]);
+});
