@@ -35,5 +35,8 @@
       "library/indexer-worker.js",
       "netfs/netfs-worker.js"
     ]
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }
