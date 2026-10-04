@@ -156,7 +156,9 @@ function linkFor(db, e, names) {
   if (e.library && e.library.contentKey) {
     return { content_key: e.library.contentKey, plate_no: e.library.plate == null ? null : e.library.plate, model_uuid_at_link: e.library.model || atLink(e.library.contentKey),
       link_method: "snapcon_variant", link_confidence: "exact",
-      evidence: { basis: "chosen in the Library", variant: short(e.library.variantKey || e.library.contentKey), sha256: short(e.library.sha256 || e.sha256), location: e.location || null } };
+      evidence: { basis: e.library.staged ? "sent from the Library, started later from the printer" : "chosen in the Library",
+        variant: short(e.library.variantKey || e.library.contentKey), sha256: short(e.library.sha256 || e.sha256), location: e.location || null,
+        ...(e.library.staged ? { printerCopyChecked: !!e.library.copyChecked } : {}) } };
   }
   if (e.sha256) {
     const f = db.prepare(`SELECT content_key FROM files WHERE entry_path = '' AND (sha256 = ? OR content_key = ?) ORDER BY state != 'present' LIMIT 1`).get(e.sha256, e.sha256);

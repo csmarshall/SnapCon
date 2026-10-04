@@ -632,6 +632,15 @@ async function resolvePrintPlate(p, fp, requested) {
   }
   return { plate };
 }
+// What a send that is finished later (deferred until the printer is free, or
+// uploaded now and started later from the printer) keeps so its Print can be
+// recorded as exactly what was sent (M7.1): the plate, the location, and the
+// Library Variant with its verified hash.
+const sendRef = (ref, ident, plate) => ({
+  plate: plate == null ? null : plate, location: ref.root + ":" + relOf(ref),
+  library: ident ? { contentKey: ident.contentKey, plate: ident.plate, model: ident.model, modelName: ident.modelName, variantKey: ident.variantKey, sha256: ident.sha256 } : null,
+});
+
 // What a queue item keeps of it: stable ids and names, never a folder path.
 const libraryQueueRef = id => ({ model: id.model, modelName: id.modelName, contentKey: id.contentKey, variantKey: id.variantKey, plate: id.plate, location: id.location });
 const libraryAudit = id => ({ model: id.model, modelName: id.modelName, location: String(id.location).split(":")[0], content: String(id.contentKey).slice(0, 16) });
@@ -1822,7 +1831,7 @@ app.post("/api/print", requireRegular, async (req, res) => {
   // there yet.
   if (disposition.action === "defer") {
     if (disposition.queue && await addQueueItem(false)) return res.json({ ok: true, mode: "queued", printer: p.name });
-    pendingLoad.set(printer, { file: fp, name, ts: Date.now(), tools, map, prefs, actor: actorFromReq(req), plate });
+    pendingLoad.set(printer, { file: fp, name, ts: Date.now(), tools, map, prefs, actor: actorFromReq(req), plate, send: sendRef(ref, ident, plate) });
     return res.json({ ok: true, mode: "pending", printer: p.name });
   }
 
@@ -1877,10 +1886,13 @@ app.post("/api/print", requireRegular, async (req, res) => {
       if (!start) {
         // The file is on the printer now. Surface it the same "ready to
         // print" way uploadNotifiedFile does once a deferred upload lands:
-        // one click away, not silently just stored. It keeps the plate for
-        // when it is started from there.
-        queuedFile.set(printer, { name, status: "ready", ts: Date.now(), plate });
+        // one click away, not silently just stored. It keeps what was sent
+        // (plate, Library Variant) for when it is started from there.
+        queuedFile.set(printer, { name, status: "ready", ts: Date.now(), plate, send: sendRef(ref, ident, plate), size: job.total || null });
         saveQueuedFiles();
+      } else if (queuedFile.get(printer) && queuedFile.get(printer).name === name) {
+        // This upload replaced the printer's copy of a file staged earlier.
+        queuedFile.delete(printer); saveQueuedFiles();
         // "Upload into queue": the item is added only after the bytes are
         // actually there, and carries alreadyUploaded so dispatch does not
         // send the same file a second time.
@@ -1986,8 +1998,28 @@ app.get("/api/printer-file-meta", requireAuth, async (req, res) => {
 // print-started notification) and the audit row must fire exactly once, and
 // never for a job that failed -- an audit trail claiming a print started when
 // it did not is worse than no trail at all.
-// plate: the plate to start (a Bambu project; M7.1).
-async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needsMapping, job, printerKey, plate = null }) {
+// The printer still holds the file SnapCon staged there: listed under that
+// name, the size SnapCon sent. Anything else — gone, another size — is a file
+// that merely has the name, and its Print is linked by name like any other.
+// A printer that cannot be asked keeps what SnapCon recorded, and says so.
+async function stagedCopyStillOurs(p, c, staged) {
+  if (!c.listFiles || staged.size == null) return { ...staged.send, copyChecked: false };
+  try {
+    const files = await c.listFiles(p);
+    const base = s => String(s || "").replace(/\\/g, "/").split("/").pop();
+    const f = (files || []).find(x => base(x.path || x.name) === staged.name);
+    if (!f || (f.size != null && f.size !== staged.size)) {
+      console.log(`[printfile] ${p.name}: "${staged.name}" on the printer is not the copy SnapCon staged; the Print is linked by name`);
+      return null;
+    }
+    return { ...staged.send, copyChecked: true };
+  } catch { return { ...staged.send, copyChecked: false }; }
+}
+
+// plate: the plate to start (a Bambu project). send: what SnapCon sent when
+// this file is the one it staged on this printer (M7.1) — the Print is then
+// recorded as that, not guessed from the file name.
+async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needsMapping, job, printerKey, plate = null, send = null }) {
   try {
     await withStartSequence(p, async () => {
       if (needsMapping) {
@@ -2003,10 +2035,13 @@ async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needs
     // Printing it is what "ready to print" was waiting for -- clear the badge.
     if (queuedFile.get(printerKey)?.name === filename) { queuedFile.delete(printerKey); saveQueuedFiles(); }
     ROUTE_STARTED_PRINT.add(p.url);
-    const auditRef = auditLog.log({ category: "job", event: "print-started", ...actor, printerId: p.id, printerName: p.name, detail: { file: filename } });
+    const lib = send && send.library;
+    const auditRef = auditLog.log({ category: "job", event: "print-started", ...actor, printerId: p.id, printerName: p.name,
+      detail: { file: filename, ...(lib ? { library: libraryAudit({ ...lib, location: send.location }), staged: true } : {}) } });
     const startedAt = Date.now();
     library.recordPrintStart({ jobKey: "printfile:" + p.id + ":" + startedAt, printerId: p.id, printerName: p.name, remoteName: filename,
-      source: "printer_storage", via: "print", user: actor, startedAt, auditRef });
+      source: lib ? "library" : "printer_storage", via: "print", user: actor, startedAt, auditRef, location: send ? send.location : null,
+      library: lib ? { ...lib, plate: plate != null ? plate : lib.plate, staged: true, copyChecked: !!send.copyChecked } : null });
     job.result = { printer: p.name, filename, mapped: tools.length };
     job.phase = "done"; job.done = true;
   } catch (e) {
@@ -2018,8 +2053,8 @@ async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needs
 app.post("/api/printfile", requireRegular, async (req, res) => {
   const { printer, filename, map, prefs } = req.body || {};
   const p = PRINTERS[printer];
-  // The file SnapCon staged on this printer, if this is it: its plate is
-  // used (M7.1).
+  // The file SnapCon staged on this printer, if this is it: its plate and
+  // what was sent are used, not reconstructed from the name (M7.1).
   const staged = (() => { const q = queuedFile.get(printer); return q && q.status === "ready" && q.name === filename ? q : null; })();
   if (!p) return res.status(400).json({ error: "Unknown printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer" });
@@ -2057,8 +2092,9 @@ app.post("/api/printfile", requireRegular, async (req, res) => {
   const job = { phase: needsMapping ? "mapping" : "starting", sent: 0, total: 0, done: false, error: null, result: null, ts: Date.now() };
   JOBS.set(jobId, job);
   res.json({ ok: true, jobId, printer: p.name, filename, mapped: tools.length });
+  const send = staged && staged.send ? await stagedCopyStillOurs(p, c, staged) : null;
   runPrintFileJob({ p, c, filename, tools, map, prefs, actor: actorFromReq(req), needsMapping, job, printerKey: printer,
-    plate: staged ? staged.plate : null });
+    plate: staged ? staged.plate : null, send });
 });
 
 // ---- Print control: pause / resume / cancel (standard Klipper macros) ----
@@ -2261,7 +2297,7 @@ function saveQueuedFiles() {
   for (const [idx, qf] of queuedFile) {
     if (qf.status !== "ready") continue;
     const p = PRINTERS[idx];
-    if (p && p.id) out[p.id] = { name: qf.name, ts: qf.ts, plate: qf.plate == null ? null : qf.plate };
+    if (p && p.id) out[p.id] = { name: qf.name, ts: qf.ts, plate: qf.plate == null ? null : qf.plate, send: qf.send || null, size: qf.size == null ? null : qf.size };
   }
   try { fs.writeFileSync(QUEUED_FILE_PATH, JSON.stringify(out, null, 2)); }
   catch (e) { console.error("[queued-files] save failed:", e.message); }
@@ -2272,7 +2308,7 @@ function loadQueuedFiles() {
   if (!saved || typeof saved !== "object") return;
   PRINTERS.forEach((p, idx) => {
     const entry = p.id && saved[p.id];
-    if (entry && entry.name) queuedFile.set(idx, { name: entry.name, status: "ready", ts: entry.ts || Date.now(), plate: entry.plate == null ? null : entry.plate });
+    if (entry && entry.name) queuedFile.set(idx, { name: entry.name, status: "ready", ts: entry.ts || Date.now(), plate: entry.plate == null ? null : entry.plate, send: entry.send || null, size: entry.size == null ? null : entry.size });
   });
 }
 loadQueuedFiles();
@@ -2358,6 +2394,11 @@ async function uploadNotifiedFile(idx, pl) {
   queuedFile.set(idx, { name: pl.name, status: "uploading", ts: Date.now() });
   saveQueuedFiles();
   try {
+    // A Library Variant is only sent while it is still that content.
+    if (pl.send && pl.send.library && pl.send.library.sha256) {
+      const h = await queueStore.computeFileHash(pl.file, { force: true });
+      if (h.sha256 !== pl.send.library.sha256) throw new Error(`"${pl.name}" changed since it was sent from the Library; it was not uploaded. Send it again from the model page.`);
+    }
     // This path fires when a previously-busy printer looks idle enough to
     // receive the deferred file. "Looks idle" is a sampled observation, so
     // re-check against the running job immediately before writing.
@@ -2368,7 +2409,8 @@ async function uploadNotifiedFile(idx, pl) {
     // head mapping an immediate upload would have gotten, now that the
     // printer that was busy is finally idle enough to receive it.
     if (c.applyHeadMapping && ((pl.tools && pl.tools.length) || printerHasAnyDefaultPref(p) || wantsAnyPref(pl.prefs))) await c.applyHeadMapping(p, pl.tools || [], pl.map, pl.prefs, { file: pl.name, plate: pl.plate });
-    queuedFile.set(idx, { name: pl.name, status: "ready", ts: Date.now(), plate: pl.plate == null ? null : pl.plate });
+    const sent = await netfs.stat(pl.file).then(s => s.size).catch(() => null);
+    queuedFile.set(idx, { name: pl.name, status: "ready", ts: Date.now(), plate: pl.plate == null ? null : pl.plate, send: pl.send || null, size: sent });
     saveQueuedFiles();
     // pl.actor is attached by whichever caller queued this (a web request's
     // actorFromReq(req), or userLabel:"CLI" for the --load/--snapcon hook) —
@@ -2673,7 +2715,7 @@ app.get("/api/fleet", requireAuth, async (req, res) => {
     // own status, or the client has no way to tell "already queued" from
     // "hasn't been queued yet" while the printer stays busy, and would just
     // keep re-showing the queue prompt on every poll.
-    if (qf) row.queuedFile = qf;
+    if (qf) row.queuedFile = { name: qf.name, status: qf.status, ts: qf.ts, ...(qf.error ? { error: qf.error } : {}), ...(qf.plate != null ? { plate: qf.plate } : {}) };
     else if (pl) row.queuedFile = { name: pl.name, status: "queued", ts: pl.ts };
     // Lightweight enough for every fleet-card poll — the full queue (files,
     // history, dispatch snapshots) is only ever fetched on demand via
