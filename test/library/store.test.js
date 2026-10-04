@@ -278,3 +278,30 @@ test("migration 3 (M6): actions, withdrawn Decisions and merged Models arrive on
   assert.ok(s.db.prepare("PRAGMA table_info(model_fts)").all().some(c => c.name === "search_terms"));
   s.close();
 });
+
+test("migration 4 (M7): how each Print was started, one row per job, the imports and print links arrive on a v3 database, and every Print is kept", () => {
+  const base = tmpBase();
+  // The v3 shape: today's schema without what migration 4 adds — with its
+  // comments, which is where a statement extractor tripped on "(#plate);".
+  const v3Authored = schema.AUTHORED_SQL
+    .replace(/audit_ref INTEGER,[^\n]*\n[\s\S]*?job_key TEXT\);[^\n]*/, "audit_ref INTEGER);")
+    .replace(/CREATE UNIQUE INDEX prints_job [^;]*;/, "").replace(/CREATE INDEX prints_audit [^;]*;/, "")
+    .replace(/CREATE TABLE print_imports \([\s\S]*?report_json TEXT NOT NULL\);/, "");
+  const v3Derived = schema.DERIVED_SQL.replace(/CREATE TABLE print_links \([\s\S]*?by_decision INTEGER NOT NULL DEFAULT 0\);/, "").replace(/CREATE INDEX print_links_model [^;]*;/, "");
+  assert.ok(!/job_key|print_imports|print_links|prints_job/.test(v3Authored + v3Derived), "the v3 shape really lacks them");
+  const v3 = open(base, { now: tick, schema: { ...schema, SCHEMA_VERSION: 3, AUTHORED_SQL: v3Authored, DERIVED_SQL: v3Derived }, migrations: {} });
+  seed(v3.db);
+  v3.close();
+  const s = open(base, { now: tick });
+  assert.equal(s.available, true, s.reason);
+  assert.equal(s.schemaVersion(), 4);
+  const p = s.db.prepare("SELECT * FROM prints").get();
+  assert.deepEqual([p.content_key, p.remote_name, p.via, p.job_key], ["q:abc", "b.gcode", null, null], "the existing Print is kept as it was");
+  for (const c of ["via", "location", "queue_item_id", "job_key"]) assert.ok(s.db.prepare("PRAGMA table_info(prints)").all().some(x => x.name === c), c);
+  s.db.prepare("INSERT INTO prints (printer_id, remote_name, source, link_method, link_confidence, job_key) VALUES ('p', 'x', 'send', 'none', 'none', 'k')").run();
+  assert.throws(() => s.db.prepare("INSERT INTO prints (printer_id, remote_name, source, link_method, link_confidence, job_key) VALUES ('p', 'x', 'send', 'none', 'none', 'k')").run(), /UNIQUE/, "one row per job");
+  assert.throws(() => s.db.prepare("INSERT INTO prints (printer_id, remote_name, source, link_method, link_confidence, via) VALUES ('p', 'x', 'send', 'none', 'none', 'fax')").run(), /CHECK/);
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM print_imports").get().n, 0);
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM print_links").get().n, 0, "derived: the next grouping fills it");
+  s.close();
+});

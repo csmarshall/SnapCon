@@ -463,9 +463,20 @@ CREATE TABLE prints (
   outcome TEXT NOT NULL DEFAULT 'printing'
     CHECK (outcome IN ('printing','completed','failed','cancelled','unknown')),
   elapsed_sec INTEGER, filament_g REAL, cost_est REAL,
-  audit_ref INTEGER);                        -- audit_log row id (observed or backfilled events)
+  audit_ref INTEGER,                         -- audit_log row id (observed or backfilled events)
+  via TEXT CHECK (via IN ('print','queue')), -- M7: how SnapCon started it; NULL = not by SnapCon, or not known
+  location TEXT,                             -- M7: 'root:rel_path' of the file SnapCon sent, when known
+  queue_item_id TEXT,                        -- M7: the queue item it came from
+  job_key TEXT);                             -- M7: one row per job, however many times it is reported
 CREATE INDEX prints_key  ON prints(content_key, started_at);
 CREATE INDEX prints_open ON prints(printer_id, remote_name, outcome);
+CREATE UNIQUE INDEX prints_job ON prints(job_key);
+CREATE INDEX prints_audit ON prints(audit_ref);
+
+CREATE TABLE print_imports (                 -- M7: each import of print history from the audit log (§9)
+  id INTEGER PRIMARY KEY, ran_at INTEGER NOT NULL,
+  from_ts INTEGER, to_ts INTEGER, created INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0,
+  report_json TEXT NOT NULL);
 
 CREATE TABLE review_items (                  -- shown as "Needs attention"
   id INTEGER PRIMARY KEY,
@@ -631,6 +642,14 @@ CREATE TABLE claims (
 CREATE INDEX claims_subject ON claims(subject_type, subject_key, relation);
 CREATE INDEX claims_object  ON claims(object_type, object_key);
 CREATE INDEX claims_state   ON claims(state, confidence);
+
+CREATE TABLE print_links (                   -- M7: each Print's current Model and Variant, resolved (§9)
+  print_id INTEGER PRIMARY KEY REFERENCES prints(id) ON DELETE CASCADE,
+  model_id INTEGER REFERENCES models(id) ON DELETE SET NULL,
+  variant_key TEXT,                          -- content key (#plate); NULL = linked to the Model only
+  confidence TEXT NOT NULL, method TEXT NOT NULL,
+  by_decision INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX print_links_model ON print_links(model_id);
 
 CREATE TABLE model_stats (                   -- recomputed from prints + resolution
   model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,

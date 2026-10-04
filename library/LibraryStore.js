@@ -45,6 +45,25 @@ const MIGRATIONS = {
     db.exec("DROP TABLE IF EXISTS model_fts");
     db.exec(stmt(SCHEMA.DERIVED_SQL, /CREATE VIRTUAL TABLE model_fts [\s\S]*?\);/));
   },
+  // 4 (M7): how each Print was started and from where, one row per job
+  // (job_key), the audit-log imports, and each Print's resolved Model
+  // (derived; the next grouping run fills it). Existing prints rows are kept.
+  4: db => {
+    // Comments go first: one of them holds "(#plate);", which would end a
+    // statement early.
+    const stmt = (sql, re) => { const m = re.exec(sql.replace(/--[^\n]*/g, "")); if (!m) throw new Error("schema statement not found: " + re); return m[0]; };
+    const has = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
+    const table = name => !!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name);
+    if (!has("prints", "via")) db.exec("ALTER TABLE prints ADD COLUMN via TEXT CHECK (via IN ('print','queue'))");
+    for (const col of ["location", "queue_item_id", "job_key"]) if (!has("prints", col)) db.exec(`ALTER TABLE prints ADD COLUMN ${col} TEXT`);
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS prints_job ON prints(job_key)");
+    db.exec("CREATE INDEX IF NOT EXISTS prints_audit ON prints(audit_ref)");
+    if (!table("print_imports")) db.exec(stmt(SCHEMA.AUTHORED_SQL, /CREATE TABLE print_imports \([\s\S]*?\);/));
+    if (!table("print_links")) {
+      db.exec(stmt(SCHEMA.DERIVED_SQL, /CREATE TABLE print_links \([\s\S]*?\);/));
+      db.exec(stmt(SCHEMA.DERIVED_SQL, /CREATE INDEX print_links_model [^;]*;/));
+    }
+  },
 };
 
 const BACKUP_KEEP = 7;
