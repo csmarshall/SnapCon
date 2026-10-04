@@ -54,7 +54,32 @@ const defaultFileIO = {
   },
 };
 
-function createQueueStore({ baseDir, degradedRetryMs = 15000, fileIO = defaultFileIO }) {
+// Windows: replacing (rename over) or copying over a file another process has
+// open fails at once with EPERM/EBUSY/EACCES, whatever share mode that process
+// used — MoveFileEx cannot replace an open file — until it closes it. Seen when
+// a script polled queue-data.json while SnapCon saved. A short, bounded,
+// synchronous retry rides out such a hold (persistence must stay synchronous:
+// see the header). Longer than that, the save fails exactly as before: the
+// intent is not applied, the store is marked degraded and retried. Retrying a
+// write never re-runs a transition, so it cannot duplicate a queue action.
+const TRANSIENT_FS_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const RETRY_DELAYS_MS = [10, 25, 50, 100, 200];   // at most 385 ms in all
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function withTransientRetry(op, label, { delays = RETRY_DELAYS_MS, sleep = sleepSync } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const out = op();
+      if (attempt) console.log(`[queue] ${label} succeeded after ${attempt} retr${attempt === 1 ? "y" : "ies"} (the file was held open)`);
+      return out;
+    } catch (e) {
+      if (!TRANSIENT_FS_CODES.has(e && e.code) || attempt >= delays.length) throw e;
+      sleep(delays[attempt]);
+    }
+  }
+}
+
+// fsImpl / retry: injectable for tests (default: node's fs, the delays above).
+function createQueueStore({ baseDir, degradedRetryMs = 15000, fileIO = defaultFileIO, fsImpl = fs, retry = {} }) {
   const dataDir = path.join(baseDir, "data");
   const PRIMARY_PATH = path.join(dataDir, "queue-data.json");
   const BAK_PATH = PRIMARY_PATH + ".bak";
@@ -90,17 +115,17 @@ function createQueueStore({ baseDir, degradedRetryMs = 15000, fileIO = defaultFi
       const json = JSON.stringify(candidateStore, null, 2);
       JSON.parse(json); // sanity check — throws before anything touches disk if this is somehow unserializable
 
-      fs.mkdirSync(dataDir, { recursive: true });
-      fs.writeFileSync(TMP_PATH, json);
+      fsImpl.mkdirSync(dataDir, { recursive: true });
+      withTransientRetry(() => fsImpl.writeFileSync(TMP_PATH, json), "queue save (temporary file)", retry);
 
       try {
-        fs.copyFileSync(PRIMARY_PATH, BAK_PATH);
+        withTransientRetry(() => fsImpl.copyFileSync(PRIMARY_PATH, BAK_PATH), "queue save (backup)", retry);
       } catch (e) {
         if (e.code !== "ENOENT") throw e; // exists but unreadable/uncopyable — fail closed, don't touch primary
         // ENOENT: no primary yet — nothing to back up, expected on first save.
       }
 
-      fs.renameSync(TMP_PATH, PRIMARY_PATH);
+      withTransientRetry(() => fsImpl.renameSync(TMP_PATH, PRIMARY_PATH), "queue save", retry);
 
       try {
         const fd = fs.openSync(dataDir, "r");
@@ -323,4 +348,4 @@ function createQueueStore({ baseDir, degradedRetryMs = 15000, fileIO = defaultFi
   };
 }
 
-module.exports = { createQueueStore, defaultPrinterState };
+module.exports = { createQueueStore, defaultPrinterState, _internal: { withTransientRetry, TRANSIENT_FS_CODES, RETRY_DELAYS_MS } };
