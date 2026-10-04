@@ -403,7 +403,8 @@ CREATE TABLE models (
   cover_content_key TEXT, cover_plate INTEGER,
   cover_source TEXT NOT NULL DEFAULT 'auto' CHECK (cover_source IN ('auto','user')),
   hidden INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT);
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT,
+  merged_into TEXT);                         -- M6: the surviving Model's uuid after a merge; the row is kept
 CREATE INDEX models_design ON models(design_model_id);
 CREATE INDEX models_grid   ON models(hidden, updated_at, id);   -- P3: keyset paging of the grid
 
@@ -412,6 +413,17 @@ CREATE TABLE model_anchors (                 -- last-known membership, used to r
   content_key TEXT NOT NULL, last_seen INTEGER NOT NULL,
   PRIMARY KEY (model_id, content_key));
 CREATE INDEX model_anchors_key ON model_anchors(content_key);
+
+CREATE TABLE actions (                      -- M6: what a person did in the Library: history and undo
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('merge','split','move','approve','reject','dismiss',
+    'hide','unhide','hide_file','unhide_file','rename','cover','set_printer')),
+  model_uuid TEXT, other_model_uuid TEXT,
+  detail_json TEXT NOT NULL,                 -- what changed: Decisions written and superseded, prior values
+  user_id TEXT, user_label TEXT,
+  created_at INTEGER NOT NULL,
+  undone_at INTEGER, undone_by TEXT);
+CREATE INDEX actions_model ON actions(model_uuid, created_at);
 
 CREATE TABLE decisions (
   id INTEGER PRIMARY KEY,
@@ -428,7 +440,9 @@ CREATE TABLE decisions (
   from_claim_key TEXT,                       -- the Claim this confirmed or rejected
   evidence_snapshot_json TEXT,               -- that Claim's Evidence at decision time
   created_by TEXT, created_at INTEGER NOT NULL,
-  superseded_by INTEGER REFERENCES decisions(id));   -- undo = supersede; history kept
+  superseded_by INTEGER REFERENCES decisions(id),    -- replaced by a later Decision; history kept
+  action_id INTEGER REFERENCES actions(id),          -- the M6 action that wrote it
+  withdrawn_at INTEGER);                     -- undone with no replacement; history kept
 CREATE INDEX decisions_subject ON decisions(subject_type, subject_key, relation);
 CREATE INDEX decisions_object  ON decisions(object_type, object_key);
 
@@ -641,7 +655,7 @@ CREATE TABLE thumbs (
   created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
 
 CREATE VIRTUAL TABLE model_fts USING fts5(name, designer, tags, collections, file_names,
-  object_names, project_titles, notes, tokenize='unicode61 remove_diacritics 2', prefix='2 3');
+  object_names, project_titles, notes, search_terms, tokenize='unicode61 remove_diacritics 2', prefix='2 3');
 ```
 
 **Size (measured in M0):** 39.7 MB at 10k files, 198 MB at 50k, 398 MB at 100k. Claims are 36% of

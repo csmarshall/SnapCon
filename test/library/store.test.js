@@ -256,3 +256,25 @@ test("a derived rebuild keeps the identity cache; the explicit reset empties onl
   assert.equal(s.db.prepare("SELECT count(*) AS n FROM decisions").get().n, decisions, "Decisions stay");
   s.close();
 });
+
+test("migration 3 (M6): actions, withdrawn Decisions and merged Models arrive on a v2 database, and nothing authored is lost", () => {
+  const base = tmpBase();
+  // The v2 shape: today's schema without what migration 3 adds.
+  const v2Authored = schema.AUTHORED_SQL
+    .replace(/CREATE TABLE actions \([\s\S]*?\);/, "").replace(/CREATE INDEX actions_model [^;]*;/, "")
+    .replace(/,\s*merged_into TEXT\);[^\n]*/, ");")
+    .replace(/,\s*-- replaced by a later Decision; history kept\s*action_id INTEGER REFERENCES actions\(id\),\s*-- the M6 action that wrote it\s*withdrawn_at INTEGER\);[^\n]*/, ");");
+  const v2Derived = schema.DERIVED_SQL.replace(", search_terms,", ",");
+  assert.ok(!/merged_into|withdrawn_at|CREATE TABLE actions|search_terms/.test(v2Authored + v2Derived), "the v2 shape really lacks them");
+  const v2 = open(base, { now: tick, schema: { ...schema, SCHEMA_VERSION: 2, AUTHORED_SQL: v2Authored, DERIVED_SQL: v2Derived }, migrations: {} });
+  seed(v2.db);
+  v2.close();
+  const s = open(base, { now: tick });
+  assert.equal(s.available, true);
+  assert.equal(s.schemaVersion(), schema.SCHEMA_VERSION);
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM decisions WHERE withdrawn_at IS NULL AND action_id IS NULL").get().n, 1, "the existing Decision is kept, active");
+  assert.equal(s.db.prepare("SELECT merged_into FROM models").get().merged_into, null);
+  assert.equal(s.db.prepare("SELECT count(*) AS n FROM actions").get().n, 0);
+  assert.ok(s.db.prepare("PRAGMA table_info(model_fts)").all().some(c => c.name === "search_terms"));
+  s.close();
+});

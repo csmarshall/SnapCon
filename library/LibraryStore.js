@@ -28,6 +28,23 @@ const MIGRATIONS = {
     db.prepare(`INSERT OR IGNORE INTO identity_cache (quick_fp, size, sha256, md5, verified_at)
       SELECT quick_fp, size, sha256, md5, ? FROM files WHERE sha256 IS NOT NULL AND entry_path = ''`).run(Date.now());
   },
+  // 3 (M6): the actions history (authored), Decisions an action wrote and
+  // an undo withdrew, merged Models kept with where they went, and a search
+  // column for normalised name forms (the derived search index is recreated
+  // empty; the next grouping run fills it).
+  3: db => {
+    const stmt = (sql, re) => { const m = re.exec(sql); if (!m) throw new Error("schema statement not found: " + re); return m[0]; };
+    const has = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'actions'").get()) {
+      db.exec(stmt(SCHEMA.AUTHORED_SQL, /CREATE TABLE actions \([\s\S]*?\);/));
+      db.exec(stmt(SCHEMA.AUTHORED_SQL, /CREATE INDEX actions_model [^;]*;/));
+    }
+    if (!has("models", "merged_into")) db.exec("ALTER TABLE models ADD COLUMN merged_into TEXT");
+    if (!has("decisions", "action_id")) db.exec("ALTER TABLE decisions ADD COLUMN action_id INTEGER REFERENCES actions(id)");
+    if (!has("decisions", "withdrawn_at")) db.exec("ALTER TABLE decisions ADD COLUMN withdrawn_at INTEGER");
+    db.exec("DROP TABLE IF EXISTS model_fts");
+    db.exec(stmt(SCHEMA.DERIVED_SQL, /CREATE VIRTUAL TABLE model_fts [\s\S]*?\);/));
+  },
 };
 
 const BACKUP_KEEP = 7;
