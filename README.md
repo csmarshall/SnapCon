@@ -1,4 +1,4 @@
-Version 0.7.2 includes a beta connector for Bambu Lab printers:
+Since version 0.7.2, SnapCon includes a beta connector for Bambu Lab printers:
 
 * On the printer: Settings → Network → LAN Only Mode on, then Developer Mode on. Without Developer Mode you get everything except printing, and the card tells you so.
 * In SnapCon: Settings → Printers → add one, connector Bambu Lab (beta), then IP, serial and access code from that same printer screen. Test connection should report the model and firmware.
@@ -428,6 +428,28 @@ planned but not implemented yet.)
 - A progress bar is shown for each printer during a multi-printer upload, indicating its individual status
 - Full Spectrum files are detected automatically and flagged with an "FS" badge wherever the filename
   appears (file list, job title, print-from-printer picker), along with which fork produced them
+
+### Model Library
+An indexed library of your model files, alongside the File Browser. Point it at the G-code folder and
+any other folders you keep models in — local disks or network shares — and it builds a browsable
+library from them. **The Library only reads and indexes your files: it never moves, renames,
+reorganises or deletes them, and your folders stay exactly as they are.**
+- **Automatic organisation** — related files (G-code, 3MF projects, sources) are grouped into Models
+  from what the files themselves contain, such as object names, project titles and identical content
+- **Understands G-code and 3MF** — project files, their plates, and which plates are sliced and printable
+- **Printer and variant awareness** — each printable file or plate shows which printer it was sliced
+  for, how sure SnapCon is, and which of your printers can take it
+- **Covers, search and filters** — by name, printer, location, type and material
+- **Needs Attention** — what SnapCon is unsure about (possible duplicates, files that fit several Models,
+  unknown printers, missing files), with an explanation of why every file is where it is
+- **You stay in charge** — merge, separate, move, hide, rename, choose the cover or correct the printer;
+  every change can be undone, and your choices survive rescans
+- **Print and Queue** from a Model through the same Send and Queue dialogs and checks; SnapCon verifies
+  the file is still the one shown before sending it
+- **Print history and counts** — every print recorded per Model, with confirmed prints kept apart
+  from ones only matched by file name; the last 90 days are filled in from the existing log
+- **Network and offline resilience** — a share that goes offline keeps its Models in the Library
+  (marked offline) and never slows down or freezes the rest of SnapCon
 
 ---
 
