@@ -881,7 +881,7 @@ still names it follows `merged_into` to the survivor.
 | `no_cover` | No image or embedded thumbnail | Choose cover → `models.cover_*` · Dismiss |
 | `file_changed` | Content changed **and** the File has Prints, Decisions or queued jobs | Accept new version → Decisions re-keyed to the new content key · Details |
 | `unreadable_file` | Corrupt or over-limit container, parse error | Rescan · Dismiss |
-| `unlinked_print` | Ambiguous or unknown filename | Link → `printed_as` affirm · Dismiss |
+| `unlinked_print` | A print whose name fits files of several Models (`low`), or a generic name with Library candidates (`none`, informational) | Link → `printed_as` affirm on the Print, to one of the Models offered (the `approve` action; undoable) · Dismiss |
 | `decision_unmatched` | A Decision's key is not found after a completed scan | Re-link → Decision re-keyed · Discard → Decision superseded |
 | `empty_model` | A Model with no present Files | Hide → `models.hidden` · Merge into… → `member_of` affirm · Keep → dismiss |
 
@@ -891,20 +891,47 @@ rebuilds. They auto-close, with the reason, when the condition clears.
 ---
 
 ## 9. Print history
-- **Links** (`printed_as`, stored on `prints`):
-  - `snapcon_variant` = `exact`;
-  - queue `sha256` = file `sha256` → `exact`;
-  - `content_fp` = `high`;
-  - a unique `filename` = `medium`, applied as unconfirmed;
-  - ambiguous = `low` → `unlinked_print`.
-- **Outcome hooks** sit next to the existing `notifyTick` audit calls.
-- **Backfill (D7):** 90 days of audit `print-*` events.
-  - At most `filename` / `medium`.
-  - Upgraded to `queue_sha256` where a queue item recorded the hash.
-  - Evidence: `audit_ref` + the comparison. The report states "matched N of M".
-- **Display (D10):** "17 prints · 13 confirmed · 4 matched by filename"; filename rows are marked.
-  Counts come from `model_stats`.
-- **Visibility (D6):** counts are global; rows are filtered by `printerVisibleTo`.
+A Print (`prints`, authored) is a fact: a job ran on a printer, at a time, with a file of some name.
+The row is written once, when the job starts (or when it is imported, below), and afterwards only
+gains how it ended. **One row per job:** `job_key` is unique (`print:<job id>`, `queue:<item id>`,
+`printfile:…`, `observed:…`, `audit:<audit row>`), and `audit_ref` keeps the audit row that reported
+it, so the same job reported twice changes nothing.
+
+- **Links** (`printed_as`, stored on `prints`, with method, confidence, Evidence and rule version):
+  | Method | Confidence | When |
+  |---|---|---|
+  | `snapcon_variant` | `exact` | Printed or queued from a Model page; the server checked the file is still that Variant (index key; size and modified time; sha256 known or computed before sending). |
+  | `queue_sha256` | `exact` | The queue's verified hash (at dispatch) is a Library file's. |
+  | `content_fp` | `high` | Sent from a file the index had read, unchanged since (location, size, modified time). |
+  | `filename` | `medium` | The only Library content with this file name, "matched by filename": never verified. Several files with the name, all in one Model: the Model only. |
+  | `filename` | `low` | The name fits files of several Models: **unlinked**, uncounted, an `unlinked_print` Review Item. |
+  | `none` | `none` | Not in the Library, or a **generic name** (`genericNames.js`, the title rules of §6.3: "Assembly", "Benchy", "… Stand", "… Body"): never linked by name; a Review Item (informational) when the Library has candidates. |
+  A person's `printed_as` Decision on the Print wins over all of it, and is undone like any action.
+- **Where it is now** (`print_links`, derived, recomputed after every grouping and every recorded
+  Print): the Model that holds the Print's content now, through the files that hold it. Rename, move
+  by Decision, merge and its undo therefore show the same Print in the right place without rewriting
+  it; `model_uuid_at_link` keeps which Model it was in when it ran ("Printed while it was part of …",
+  "Printed as …, since merged into this model"). A Model-only link follows `merged_into`.
+- **The copy sent:** `location` (`root:rel_path`) records the physical file SnapCon sent, when it
+  sent one, besides its content identity.
+- **Outcome hooks** sit next to the `notifyTick` audit calls. An outcome closes the job open on that
+  printer if the names match (compared without folder and extension) or it started within 3 days. A
+  new start ends a job still open on the printer as `unknown` — never guessed as completed.
+- **Import from the audit log (D7):** a minute after every start, and on request (Diagnostics
+  capability), the last 90 days of `print-started`, `queue-print-started`, `print-completed`,
+  `-cancelled`, `-error`. Starts are paired with the outcomes that follow on the same printer; an
+  outcome with no start in the window is a Print with an unknown start; a printer's last start stays
+  `printing` only if it began within 3 days. Links: by name at most `medium`; `queue_sha256` where
+  the queue's recent history recorded the hash. Repeating it adds nothing (each event is behind at
+  most one Print); it also fills in jobs from while the Library was down. Each run is kept in
+  `print_imports` with its report.
+- **Display (D10):** "17 prints · 13 confirmed · 4 matched by filename" on the Model page and a count
+  on the card; each row says Confirmed or Matched by filename, how it started (sent from SnapCon,
+  from the queue, from the printer's storage, started on the printer, found in the log) and the
+  outcome where it is known. Counts come from `model_stats` (confirmed = `exact`/`high`/a Decision).
+- **Visibility (D6):** counts are global; rows, and `unlinked_print` items, only for printers
+  `printerVisibleTo` the person (a printer since removed: admins only). Nothing says which or how many
+  other printers there are, beyond "Only prints on printers you can see are listed."
 
 ---
 
@@ -945,20 +972,36 @@ only.
   `model-hide-file`/`-unhide-file`, `model-rename`, `model-cover`, `model-set-printer`,
   `model-change-undone`, with the person, the action id and Model names — never folder paths.
 - Every M6 action checks its capability on the server (§7 table); undo needs the same one.
+- M7: a print or queue from the Library adds `library: { model, modelName, location (the location
+  id), content (key prefix) }` to the existing `print-started`, `queue-item-added`, `queue-bulk-send`
+  and `queue-print-started` events (the last also `relocated: { from, to }` location ids); linking an
+  unlinked print is `model-approve` with `print: { id, file }`; running the import is
+  `print-history-imported`. Stable ids and file names, never a folder path.
 - With users off, everything is implicitly admin.
 
 ---
 
 ## 12. Printing from any approved location
-- File references are `(rootId, relPath)`. They resolve only through `resolveWithinFolder` +
-  realpath containment, for enabled, reachable roots.
-- `/api/print`, `/api/map`, `/api/local-thumbnail` and queue items gain an **optional** `root`.
-  When it is absent the root is `gcode`, so existing callers and stored items are unchanged.
-  Queue items store `file.root`, and dispatch re-verifies from it.
+- File references are `(rootId, relPath)`. No root, or `gcode`, is the G-code folder exactly as
+  before (`safePath`). Any other location resolves through `resolveWithinFolder` **and** realpath
+  containment (a link or junction inside the location can't lead out of it), for enabled locations
+  that answer; using one needs `library.view`.
+- `/api/print`, `/api/map`, `/api/local-thumbnail`, `/api/queue/:printer/items` and `/api/queue/send`
+  take an **optional** `root`; print and queue requests also take `library: { key, plate }`, the
+  Variant chosen on a Model page. Queue items store `file.root` and `library` (Model uuid and name,
+  content and Variant key, plate, location — no folder path); retries keep both; accepting a changed
+  file drops `library` (it is other content now).
 - **Safety paths are unchanged:** `uploadDisposition`, `assertNotActiveJobFile`, `decideUpload`,
-  brand and Bambu checks (via the resolver, D15), maintenance mode, group visibility. The same
-  Send and Queue modals are used, plus a source line.
-- An offline root disables Print/Queue with an explanatory `title`.
+  brand and Bambu checks, maintenance mode, group visibility. The same Send and Queue dialogs are used,
+  with a "From the Library: Model · location" line.
+- **Plates:** SnapCon starts plate 1 of a project only (the Bambu connector sends `plate_1`), so a
+  Variant for another plate can't be printed from the Library (`plate_unsupported`).
+- **Dispatch** re-verifies every item from its own location, with the forced full hash. A file that
+  changed is refused (`file-changed` attention; nothing is printed). A file that moved is dispatched
+  from another present copy only after that copy's full hash matches, recorded with its location and
+  audited as `relocated`. A location that is offline, or whose folder does not answer at all, makes
+  the item wait first in the queue (never "missing"); one that answers but can't be used fails it with
+  the reason. While offline, Print/Queue are disabled with a `title` and direct requests answer 503.
 
 ---
 
@@ -1912,3 +1955,76 @@ other editing endpoint exists. The packaged Windows build (worker thread) behave
 
 **Search (M5 follow-up):** "trex", "t rex", "t-rex", "T-REX" find TinyTREX, Tiny TREX, Tiny T-REX,
 Skeleton T-Rex, T-Rex and the rest (9 Models on the real Library); display names unchanged.
+
+## 29. M7 results (2026-10-03)
+
+**Delivered:** printing and queueing from any Library location through the existing Send and Queue
+dialogs; every Print recorded with its identity (§9); the Model page's print history and counts;
+cards' counts; unlinked prints in Needs attention, linked by a person and undoable; the 90-day import.
+Nothing from M8 was started.
+
+**Schema 4** (§5): `prints.via`, `location`, `queue_item_id`, `job_key` (unique), index on `audit_ref`;
+`print_imports` (authored); `print_links` (derived). Migration 4 is idempotent. Found on the real
+database copy before it reached the live one: the migration's statement extraction stopped at a
+`(#plate);` inside a comment — fixed (comments are stripped first) with a v3→v4 regression test.
+
+**Real-Library checkpoint** (packaged build, worker thread, a copy of the live Library and audit log,
+two **simulator** printers only — no job was sent to a real printer; a "Test shelf" location of real
+files copied to a `subst` drive for rename/move/change/offline):
+
+| # | Case | Print → Variant/content → Model → method/confidence → location |
+|---|---|---|
+| 1 | Print, G-code folder | `print:…` → `2f4d1948…` → K1C → snapcon_variant/exact → gcode:K1C/K1C.gcode |
+| 2 | Queue, G-code folder | `queue:qi_6b5e…` → `2f4d1948…` → K1C → snapcon_variant/exact → gcode:K1C/K1C.gcode |
+| 3 | Print, "V3 PLUS" (NAS) | → `fd82fbb1…` → Shadow Dragon Box → exact → V3 PLUS:CraftyKid3D/[Biqu] Shadow Dragon Box (…).gcode; queue from the shelf likewise exact |
+| 4 | Beardie | the 9h28m Variant → `eec1bd49…` → Beardie → exact → gcode:I7/Beardie (9h28m).gcode; the page: "14 prints · 1 confirmed · 13 matched by filename" |
+| 5 | Restart | the queued item kept `library` and `file.root` in `queue-data.json`, dispatched after the restart as exact |
+| 6 | Rename + move on disk | after printing, the shelf file renamed and moved into a folder: same Model, same Print, still exact; location keeps where it was sent from |
+| 7 | Model rename | the same 14 rows, same counts; undone |
+| 8 | Merge + undo | 3 Prints shown through the survivor ("Printed as …, since merged"); undo: each Model its own; 705 Prints / 705 links before, after and after undo |
+| 9 | Duplicate content | `skelly.gcode` (byte-identical to `boat_pla_14m3s.gcode`) → location gcode:5M PRO/skelly.gcode; a shelf copy of Shadow Dragon Box → the shelf location |
+| 10 | Offline before dispatch | `subst` removed: the item waited first in the queue (no attention, no Print), the location went offline, the Model page showed "offline" with Print disabled, a direct print answered 503; SnapCon answered in ≤ 31 ms throughout; back online → dispatched, exact |
+| 11 | Changed content | a direct print with the stale Variant: 409 `library_file_changed` (and a rescan); a queued item: `file-changed` attention at dispatch, 0 Prints |
+| — | Moved before dispatch | the queued shelf file renamed away: dispatched from the NAS copy after its full hash matched; audited `relocated` |
+| 12 | Import examples | see below |
+| 13 | Ambiguous refused | a printer-storage start of `K1C.gcode` (two different K1C files, two Models): filename/low, uncounted, Review Item offering both; a person linked it (exact by Decision), undo unlinked it |
+| 14 | Counts | before the import every Model had none; after: 33 Models with counts (live) |
+
+**Import on the live Library** (schema 4 applied after a manual backup and the pre-migration
+snapshot): 1313 audit events (the log holds ~62 days) → 680 starts, 633 outcomes → **697 Prints**
+(17 known only by their outcome); 616 outcomes paired. Linked **159**: 2 exact (`queue_sha256`, the
+queue's recent history), 157 matched by filename; ambiguous 0 (no name in the real Library is shared
+by two Models); generic names refused 151 ("Assembly…", "Lupa-Back of Body", "Tree Stand", "Cube",
+"3DBenchy"); not in the Library 387 (e.g. Orca-renamed "MatMireMakes - Beardie (PLA_5h41m)" — not the
+Library's "Beardie (5h41m)", left unlinked rather than loosening the match); 11 Review Items (generic
+names with candidates: "Tree Stand" ×7, "Gnome Stand" ×3, "3DBenchy" ×1); outcomes 515 completed,
+110 cancelled, 8 failed, 50 unknown, 14 printing (all started today). Most counted: boat 20 (by
+filename: printed as `skelly.gcode`, the Library's byte-identical copy), Tiny Skeleton T-Rex 17,
+Ferret 17, Hippocampus 15, Beardie 13.
+
+**Rebuild and restart:** a derived rebuild (31 s rescan; identities from the cache) and a restart
+left the Prints, every `print_links` row, every count, the 3 active Decisions and the M6 merges
+identical; job keys unique; a Library item held in a paused queue across both kept its identity and
+printed as exact afterwards.
+
+**Permissions over HTTP:** signed out 401 everywhere; view: Library pages and `/api/map` on another
+location 200, print/queue 403, linking 403, the import report 403; regular: print/queue allowed on
+visible printers, 403 on a printer outside their groups; path traversal and unknown locations 404.
+Counts identical for everyone (3 / 14); rows only for visible printers ("Sim A" for regular, "Sim B"
+for the shop user, all for admin, who alone sees prints on printers since removed); `unlinked_print`
+items likewise (admin 12, regular 1, shop 0).
+
+**Performance** (index only; 707 Prints, 252 Models): grid with counts median 15 ms, Model page with
+21 Prints 15 ms, filtered for a regular user 14 ms, Needs attention 16 ms, overview 15 ms.
+
+**Found and fixed during M7:**
+- a queue retry rebuilt the item without its location, so it would have looked in the G-code folder
+  (regression test);
+- a Library location whose folder vanished (not a timeout) would have failed a queued item as
+  "missing" — it now waits as offline;
+- the migration statement extraction (above);
+- imported jobs with no outcome stayed "printing" for weeks — only a start within 3 days may.
+
+**Known, not changed in M7:** SnapCon starts plate 1 of a Bambu project whatever the Send dialog's
+plate picker shows (connector behaviour; recorded in docs/TODO.md); one Review Item per generic-named
+print, so a much-printed "Tree Stand" lists several.
