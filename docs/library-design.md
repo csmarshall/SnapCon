@@ -914,6 +914,15 @@ it, so the same job reported twice changes nothing.
   "Printed as …, since merged into this model"). A Model-only link follows `merged_into`.
 - **The copy sent:** `location` (`root:rel_path`) records the physical file SnapCon sent, when it
   sent one, besides its content identity.
+- **Sent now, started later (M7.1):** a send deferred until the printer is free, or uploaded now and
+  started later from the printer, keeps what was sent — plate, location, Library Variant and its
+  verified hash — through the deferred state, the printer's "ready" file (persisted across
+  restarts) and the start from the printer's storage. The Print is then `snapcon_variant`/`exact`
+  ("sent from the Library, started later from the printer"), unless the printer's copy is no longer
+  SnapCon's (gone, or another size: linked by name like any other); a printer that cannot list its
+  files keeps what SnapCon recorded and says it was not checked. A Variant whose file changed before
+  the deferred upload is not sent as that Variant. Another upload of the same name replaces the
+  staged entry.
 - **Outcome hooks** sit next to the `notifyTick` audit calls. An outcome closes the job open on that
   printer if the names match (compared without folder and extension) or it started within 3 days. A
   new start ends a job still open on the printer as `unknown` — never guessed as completed.
@@ -994,8 +1003,16 @@ only.
 - **Safety paths are unchanged:** `uploadDisposition`, `assertNotActiveJobFile`, `decideUpload`,
   brand and Bambu checks, maintenance mode, group visibility. The same Send and Queue dialogs are used,
   with a "From the Library: Model · location" line.
-- **Plates:** SnapCon starts plate 1 of a project only (the Bambu connector sends `plate_1`), so a
-  Variant for another plate can't be printed from the Library (`plate_unsupported`).
+- **Plates (M7.1):** a Bambu project holds one G-code per sliced plate, and `project_file` names the
+  one to run. The plate a print starts is resolved once, on the server, for the Send dialog and the
+  Library alike: the plate asked for (absent: the first sliced plate, which is what `/api/map` shows)
+  must be a sliced plate of the file (`no_such_plate`), and a plate other than 1 only goes to a
+  connector declaring `capabilities.plateSelect` (`plate_unsupported`). The same plate feeds the
+  filament mapping (trays chosen for one plate are never applied to another) and the start command,
+  and the Library Variant recorded is that plate's. `/api/map` marks used only the filaments the
+  plate's `slice_info` block lists, and the AMS mapping is indexed by the project's filament number
+  with -1 for unused ones (the printer's own report of a job: `"mapping": [65535, 3]`). The queue
+  starts plate 1 only, so a Variant for another plate is printed directly, not queued.
 - **Dispatch** re-verifies every item from its own location, with the forced full hash. A file that
   changed is refused (`file-changed` attention; nothing is printed). A file that moved is dispatched
   from another present copy only after that copy's full hash matches, recorded with its location and
@@ -2028,3 +2045,45 @@ items likewise (admin 12, regular 1, shop 0).
 **Known, not changed in M7:** SnapCon starts plate 1 of a Bambu project whatever the Send dialog's
 plate picker shows (connector behaviour; recorded in docs/TODO.md); one Review Item per generic-named
 print, so a much-printed "Tree Stand" lists several.
+
+## 30. M7.1 results (2026-10-03)
+
+Four operational issues found in M7, fixed before M8.
+
+**1. Bambu plates.** The Send dialog offered a plate picker and mapped the chosen plate's filaments,
+but the connector always started `Metadata/plate_1.gcode`. Selecting a plate is part of the protocol
+(`project_file`'s `param` names the plate's G-code; the printer reports the running one as
+`gcode_file`), so it is now done (§12): the plate travels from the request (and the "ready" file) to
+the mapping and the start command, and an impossible plate is refused before anything is sent. The
+AMS mapping is now indexed by filament number with -1 for unused filaments — evidenced by the P2S's
+own report — and identical to the hardware-verified array whenever a plate uses all of the project's
+filaments. The Library's plate-1 rule is gone for printing (the server decides per printer); the
+queue keeps it. Verified: connector tests (plate 3 sent as `plate_3`, trays for one plate refused for
+another, sparse mapping `[-1, 3, -1, 0]`), a two-plate project built from the owner's real
+`ams.gcode.3mf` over real HTTP (plate 2 maps only filament 2; plate 2 to a printer that cannot choose
+plates and plate 9 refused with nothing sent; plate 1 printed and recorded as plate 1, exact). **Not
+verified on hardware:** no multi-plate sliced Bambu file exists in the Library and no print was sent
+to a Bambu printer.
+
+**2. A root that is gone.** A G-code folder that vanished at once (not a timeout) made dispatch fail
+every queued file as missing. Now, for the G-code folder and Library locations alike, a root that
+does not answer means nothing is claimed — the item keeps its place — and the Library checks the root;
+when it answers, validation is as before, and a file really absent from a root that answers is
+"missing". Checkpoint: G-code folder removed (`subst`) → item waited 16 s in place, folder shown
+offline, the fleet API answered in ≤ 17 ms; folder back → dispatched; a file renamed away in a folder
+that answers → `file-missing`.
+
+**3. Queue saves on Windows.** Replacing `queue-data.json` fails with EPERM while any other process
+has it open — measured here: a Node reader holding it open blocks the rename, not a copy from it.
+The atomic temp-file + rename design is kept; each step now retries a transient EPERM/EBUSY/EACCES
+briefly (10, 25, 50, 100, 200 ms; at most 385 ms, synchronously, as all queue persistence is).
+Checkpoint on the packaged server: a 150 ms hold → the action succeeded after 3 retries (logged); a
+2 s hold → 503 `queue_save_failed`, the store degraded, the file still the last valid queue; once
+released, a save recovered and the action succeeded. A retry never re-runs a transition.
+
+**4. Deferred Library sends** (§9). Checkpoint: K1C sent from the Library to a printing simulator →
+pending → uploaded when free → the "ready" entry persisted with its Variant and hash → restart →
+started from the printer → Print `snapcon_variant`/`exact`, "sent from the Library, started later from
+the printer", audit `staged: true`.
+
+No job was sent to a real printer; every print above went to a simulator.
