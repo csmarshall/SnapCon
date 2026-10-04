@@ -152,3 +152,15 @@ test("Needs attention links each item to the Models it is about; the grid's filt
   assert.deepEqual(sugg.models.map(m => m.name).sort(), ["Kraken", "Kraken"]);
   assert.deepEqual(V.listModels(db, { attention: true }).models.map(m => m.name).sort(), ["Kraken", "Kraken"], "information alone does not flag a Model");
 });
+
+test("search finds camel-case and punctuated names however they are typed (search forms; names unchanged)", t => {
+  const { db, group } = setup(t);
+  file(db, { rel: "TinyTREX.gcode", family: "snapmaker-u1", objects: ["a.stl"] });
+  file(db, { rel: "Skeleton T-Rex.gcode", family: "snapmaker-u1", objects: ["b.stl"] });
+  file(db, { rel: "Big T Rex.gcode", family: "snapmaker-u1", objects: ["c.stl"] });
+  file(db, { rel: "Rex the dog.gcode", family: "snapmaker-u1", objects: ["d.stl"] });
+  group();
+  const names = q => V.listModels(db, { q }).models.map(c => c.name).sort();
+  for (const q of ["trex", "t rex", "t-rex", "T-REX"]) assert.deepEqual(names(q), ["Big T Rex", "Skeleton T-Rex", "TinyTREX"], q);
+  assert.deepEqual(names("rex"), ["Big T Rex", "Rex the dog", "Skeleton T-Rex"]);
+});

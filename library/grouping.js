@@ -26,6 +26,7 @@ const PrinterIdentity = require("../public/printer-identity");
 const { normalizeTitle, compareTitles, displayTitle, RULE_VERSION: TITLE_RULE_VERSION } = require("./titles");
 const { genericObject, commonObjects } = require("./genericNames");
 const { nameKey } = require("./folders");
+const { searchForms } = require("./searchTerms");
 
 // 1  §4.4/§7 as written: a folders-mode model folder is structural (auto alone)
 // 2  after the first real-library run (§26): a folders-mode folder is medium
@@ -613,6 +614,13 @@ function refreshQueryCaches(db) {
       coalesce((SELECT group_concat(DISTINCT p.title) FROM projects p JOIN files f ON f.id = p.file_id WHERE f.model_id = m.id), ''),
       coalesce(m.notes, '')
     FROM models m WHERE EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id)`).run();
+  // Extra word forms (camelCase split, adjacent words joined) so "trex" finds
+  // "TinyTREX" and "T-Rex". Search only: never Evidence, never a display name.
+  const up = db.prepare("UPDATE model_fts SET search_terms = ? WHERE rowid = ?");
+  for (const r of db.prepare("SELECT rowid, name, file_names, project_titles FROM model_fts").all()) {
+    const stems = String(r.file_names || "").split(/\.(?:gcode|gco|g|bgcode|3mf|stl|obj|step|stp)\b/i);
+    up.run(searchForms([r.name, r.project_titles, ...stems]), r.rowid);
+  }
 }
 
 function modelIdByUuid(D, uuid) { for (const m of D.models.values()) if (m.uuid === uuid) return m.id; return null; }

@@ -112,12 +112,10 @@ const TYPES = {
   project: "m.id IN (SELECT f.model_id FROM files f JOIN projects p ON p.file_id = f.id WHERE f.entry_path = '')",
   source: "m.id IN (SELECT model_id FROM files WHERE role = 'source' AND entry_path = '')",
 };
-// Words, each a prefix: "skel rex" finds "Skeleton T-Rex". FTS5 syntax is
-// never passed through from the user.
-function ftsQuery(q) {
-  const toks = String(q || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
-  return toks.slice(0, 8).map(t => `"${t}"*`).join(" ");
-}
+// Words, each a prefix ("skel rex" finds "Skeleton T-Rex"), or joined
+// ("t rex" finds "TinyTREX"): see searchTerms.js. FTS5 syntax typed by a
+// person is never passed through.
+const { ftsQuery } = require("./searchTerms");
 
 function listModels(db, { q = "", family = "", root = "", type = "", material = "", attention = false, sort = "name", cursor = null, limit = 60 } = {}) {
   const where = ["m.hidden = 0", "EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')"];
