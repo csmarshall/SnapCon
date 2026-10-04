@@ -287,7 +287,7 @@
       <span class="lib-well">${coverHtml(m.cover,m.name)}<span class="lib-badges">${att}${off}</span></span>
       <span class="lib-card-body">
         <span class="lib-name" title="${esc(m.name)}">${esc(m.name)}</span>
-        <span class="lib-meta">${esc(meta)}${m.materials.length?` · ${esc(m.materials.slice(0,3).join(", "))}`:""}</span>
+        <span class="lib-meta">${esc(meta)}${m.materials.length?` · ${esc(m.materials.slice(0,3).join(", "))}`:""}${m.prints?` · <span title="${esc(printsLine(m.prints))}">${esc(tn("library.n_prints",m.prints.count))}</span>`:""}</span>
         <span class="lib-fams">${familyChips(m.families,2)}</span>
       </span></a>`;
   }
@@ -327,6 +327,7 @@
           <div class="lib-model-facts">
             <h1 class="lib-model-name">${esc(m.name)}</h1>
             <div class="lib-model-sub">${esc(summaryLine(m))}${m.nameSource==="user"?` · <span title="${esc(t("library.named_by_person_title"))}">${esc(t("library.named_by_person"))}</span>`:""}</div>
+            ${m.prints?`<div class="lib-model-sub lib-printed" title="${esc(t("library.prints_count_title"))}">${esc(printsLine(m.prints))}</div>`:""}
             ${m.hidden?`<div class="lib-bar is-warn"><span>${esc(t("library.hidden_banner"))}</span>${can("hide")?`<button type="button" class="btn ghost btn-sm" id="libUnhide">${esc(t("library.unhide_model"))}</button>`:""}</div>`:""}
             ${m.coverMissing?`<p class="settings-help lib-warn-text">${esc(t("library.cover_missing"))}</p>`:""}
             ${toolsHtml(m)}
@@ -347,6 +348,7 @@
           <div class="lib-others">${m.hiddenFiles.map(f=>`<div class="lib-other"><span class="lib-var-thumb">${f.thumb?`<img loading="lazy" alt="" src="${thumbUrl(f.thumb)}">`:`<span class="lib-noimg is-sm"></span>`}</span>
             <div><div class="lib-var-title"><span class="lib-fname" title="${esc(f.name)}">${esc(stem(f.name))}</span></div><div class="lib-var-where">${esc(f.rootName)} · ${esc(f.path)}</div>
             ${can("hide")?`<button type="button" class="btn ghost btn-sm lib-unhide-file" data-ck="${esc(f.contentKey)}" data-name="${esc(stem(f.name))}">${esc(t("library.unhide_file"))}</button>`:""}</div></div>`).join("")}</div></section>`:""}
+        ${printHistoryHtml(m)}
         ${historyHtml(m)}
         <div class="lib-selbar" id="libSelBar" hidden></div>
         ${isAdmin()?`<p class="settings-help lib-diag-link"><a href="/library-diagnostics.html" target="_blank" rel="noopener">${esc(t("library.diagnostics_link"))}</a></p>`:""}
@@ -357,8 +359,10 @@
       $("libHeroWell").innerHTML=`<img class="lib-cover-img" alt="" src="${thumbUrl(b.dataset.thumb)}">`;
     }));
     $("libBody").querySelectorAll("[data-model]").forEach(a=>a.addEventListener("click",e=>{ e.preventDefault(); go("/library/m/"+a.dataset.model); }));
-    $("libBody").querySelectorAll(".lib-print").forEach(b=>b.addEventListener("click",()=>printVia(b.dataset.path,"print")));
-    $("libBody").querySelectorAll(".lib-queue").forEach(b=>b.addEventListener("click",()=>printVia(b.dataset.path,"queue")));
+    $("libBody").querySelectorAll(".lib-print").forEach(b=>b.addEventListener("click",()=>printVia(b,"print")));
+    $("libBody").querySelectorAll(".lib-queue").forEach(b=>b.addEventListener("click",()=>printVia(b,"queue")));
+    const more=$("libPrintsMore");
+    if(more) more.addEventListener("click",()=>{ $("libBody").querySelectorAll(".lib-print-row[hidden]").forEach(r=>{ r.hidden=false; }); more.remove(); });
     wireModelTools(m);
   }
   function fitLine(x){
@@ -414,9 +418,12 @@
     const plate=v.plate!=null?`<span class="lib-plate">${esc(t("library.plate_n",{n:v.plate}))}${v.plateName?" · "+esc(v.plateName):""}</span>`:"";
     const canAct_=canAct();
     const s=v.send;
-    const why=!canAct_?t("library.print_view_only"):s.ok?"":s.reason==="location"?t("library.print_location_title",{name:f.rootName}):t("library.print_unavailable_"+s.reason);
-    const pbtn=`<button type="button" class="btn primary btn-sm lib-print" ${s.ok&&canAct_?`data-path="${esc(s.path)}"`:`disabled title="${esc(why)}"`}>${esc(t("library.print"))}</button>`;
-    const qbtn=(typeof QUEUE_MANAGEMENT_ENABLED!=="undefined"&&QUEUE_MANAGEMENT_ENABLED)?`<button type="button" class="btn ghost btn-sm lib-queue" ${s.ok&&canAct_?`data-path="${esc(s.path)}"`:`disabled title="${esc(why)}"`}>${esc(t("library.queue"))}</button>`:"";
+    const why=!canAct_?t("library.print_view_only"):s.ok?"":t("library.print_unavailable_"+s.reason);
+    // What the server checks before sending: this file, in this location,
+    // still being the Variant shown here (M7).
+    const data=s.ok&&canAct_?`data-root="${esc(s.root)}" data-path="${esc(s.path)}" data-key="${esc(v.key)}" data-plate="${v.plate==null?"":esc(v.plate)}"`:`disabled title="${esc(why)}"`;
+    const pbtn=`<button type="button" class="btn primary btn-sm lib-print" ${data}>${esc(t("library.print"))}</button>`;
+    const qbtn=(typeof QUEUE_MANAGEMENT_ENABLED!=="undefined"&&QUEUE_MANAGEMENT_ENABLED)?`<button type="button" class="btn ghost btn-sm lib-queue" ${data}>${esc(t("library.queue"))}</button>`:"";
     return `<div class="lib-var${f.availability!=="ok"?" is-unavailable":""}">
       <span class="lib-var-thumb">${v.thumb?`<img loading="lazy" alt="" src="${thumbUrl(v.thumb)}">`:`<span class="lib-noimg is-sm"></span>`}</span>
       <div class="lib-var-main">
@@ -516,18 +523,22 @@
       <div class="lib-var-where">${esc(o.container?t("library.inside",{name:o.container}):o.rootName+" · "+o.path)} · ${esc(t("library.role_"+o.role))}</div></div></div>`;
   }
 
-  // Print/Queue: the File Browser's own path, so every existing check applies
-  // (brand and model, active-file, plate choice, colours). Only files in the
-  // G-code folder can be sent today; other locations come with root-aware
-  // printing (§12).
-  async function printVia(path, how){
+  // Print/Queue: the File Browser's own Send and Queue dialogs, so every
+  // existing check applies (brand and model, active-file, plate choice,
+  // colours), from any location (§12). The request names the location and
+  // the Variant; the server checks the file is still that Variant and records
+  // the print as it (M7).
+  async function printVia(el, how){
+    const path=el.dataset.path, root=el.dataset.root||"gcode";
     if(!path) return;
+    const m=L.model||{};
+    const rootName=(L.overview&&(L.overview.roots.find(r=>r.id===root)||{}).name)||root;
+    const library={ key:el.dataset.key, plate:el.dataset.plate===""?null:Number(el.dataset.plate) };
     if(how==="queue"){
-      SELECTED_FILES.clear(); SELECTED_FILES.add(path);
-      openSendQueueModal();
+      openSendQueueModal([{ path, root, library, modelName:m.name, rootName }]);
       return;
     }
-    await selectFile(path);
+    await selectFile(path, { root, rootName, model:m.uuid, modelName:m.name, library });
     if(L.open) hideFleet(true);    // selectFile shows the job header behind the Library
     if(SELECTED===path&&MAP) openSendModal();
     else alert(t("library.print_open_failed"));
@@ -591,6 +602,11 @@
       case "decision_unmatched": text=t("library.it_unmatched",{file:where(d.lastSeenAt||i.location)}); break;
       case "empty_model": text=t("library.it_empty"); break;
       case "source_may_match": text=t("library.it_source"); break;
+      case "unlinked_print": {
+        const when=d.at?(typeof fmtTime==="function"?fmtTime(d.at):new Date(d.at).toLocaleString()):"";
+        text=t(d.generic?"library.it_unlinked_generic":"library.it_unlinked",{file:stem(d.file||""),printer:d.printer||"",when,n:(d.candidates||[]).length});
+        break;
+      }
       default: text=i.kind;
     }
     return `<li class="lib-item lib-item-${i.level}"><span class="lib-item-dot" aria-hidden="true"></span><div><div>${esc(text)}</div>${models?`<div class="lib-item-models">${models}</div>`:""}${itemActionsHtml(i)}</div></li>`;
@@ -714,13 +730,14 @@
     const h=m.history||[];
     if(!h.length) return "";
     return `<section class="lib-sec"><h2>${esc(t("library.sec_history"))}</h2><ul class="lib-items lib-history">${h.map(a=>`<li class="lib-item">
-      <span class="lib-item-dot" aria-hidden="true"></span><div><div>${esc(KIND_TEXT(a.kind))}${historyDetail(a)}</div>
+      <span class="lib-item-dot" aria-hidden="true"></span><div><div>${esc(a.kind==="approve"&&a.summary&&a.summary.print?t("library.change_link_print"):KIND_TEXT(a.kind))}${historyDetail(a)}</div>
       <div class="lib-var-where">${esc([a.by||t("library.someone"), typeof fmtTime==="function"?fmtTime(a.at):new Date(a.at).toLocaleString()].join(" · "))}${a.undoneAt?" · "+esc(t("library.undone_by",{who:a.undoneBy||t("library.someone")})):""}</div>
       ${a.undoable&&can(KIND_CAP[a.kind])?`<button type="button" class="btn ghost btn-sm lib-undo" data-action="${esc(a.id)}">${esc(t("library.undo"))}</button>`:""}</div></li>`).join("")}</ul></section>`;
   }
   function historyDetail(a){
     const s=a.summary||{};
     const n=x=>x&&x.name?"“"+x.name+"”":"";
+    if(a.kind==="approve"&&s.print) return esc(": "+t("library.hist_link_print",{file:stem(s.print.file||""),into:n({name:s.name})}));
     if(a.kind==="merge"||a.kind==="approve") return esc(": "+t("library.hist_merge",{from:n(s.from),into:n(s.into)}));
     if(a.kind==="move") return esc(": "+t("library.hist_move",{files:(s.files||[]).join(", "),to:n(s.to)}));
     if(a.kind==="split") return esc(": "+t("library.hist_split",{files:(s.files||[]).join(", "),to:n(s.to)}));
@@ -729,6 +746,46 @@
     if(a.kind==="reject") return esc(": "+n(s.a)+" / "+n(s.b));
     if(a.kind==="hide_file"||a.kind==="unhide_file") return esc(": "+(s.file||""));
     return "";
+  }
+  // ---- print history (M7, §9) ----
+  // "17 prints · 13 confirmed · 4 matched by filename": everyone's counts.
+  function printsLine(p){
+    const parts=[tn("library.n_prints",p.count)];
+    if(p.confirmed) parts.push(t("library.n_confirmed",{n:p.confirmed}));
+    if(p.filename) parts.push(t("library.n_by_filename",{n:p.filename}));
+    return parts.join(" · ");
+  }
+  const PRINTS_SHOWN=20;
+  // The rows: only printers this person may see (the server leaves out the
+  // rest). Each says how SnapCon knows it was this Model.
+  function printHistoryHtml(m){
+    const h=m.printHistory||{ rows:[] };
+    if(!m.prints&&!h.rows.length) return "";
+    const rows=h.rows.map((p,i)=>printRowHtml(p,i>=PRINTS_SHOWN)).join("");
+    return `<section class="lib-sec"><h2>${esc(t("library.sec_prints"))}${m.prints?` <span class="lib-sec-n">${m.prints.count}</span>`:""}</h2>
+      ${m.prints?`<p class="settings-help">${esc(printsLine(m.prints))}</p>`:""}
+      ${h.rows.length?`<ul class="lib-items lib-prints">${rows}</ul>`:""}
+      ${h.rows.length>PRINTS_SHOWN?`<button type="button" class="btn ghost btn-sm" id="libPrintsMore">${esc(t("library.show_all_prints",{n:h.rows.length}))}</button>`:""}
+      ${h.someNotShown?`<p class="settings-help">${esc(t("library.prints_some_hidden"))}</p>`:""}</section>`;
+  }
+  const OUTCOME_CLASS={ completed:"is-ok", failed:"is-bad", cancelled:"is-dim", printing:"is-warn", unknown:"is-dim" };
+  function printRowHtml(p, hidden){
+    const when=p.startedAt||p.endedAt;
+    const how=p.via==="queue"?t("library.print_via_queue"):p.source==="external"?t("library.print_via_printer"):p.source==="printer_storage"?t("library.print_via_storage")
+      :p.via==="print"?t("library.print_via_snapcon"):t("library.print_via_log");
+    const confirmed=p.link.byDecision||p.link.confidence==="exact"||p.link.confidence==="high";
+    const linkTitle=p.link.byDecision?t("library.print_link_decision"):t("library.print_link_"+(p.link.method||"none"));
+    const link=confirmed?`<span class="lib-conf is-ok" title="${esc(linkTitle)}">${esc(t("library.print_confirmed"))}</span>`
+      :`<span class="lib-conf is-warn" title="${esc(linkTitle)}">${esc(t("library.print_by_filename"))}</span>`;
+    const file=p.file?stem(p.file.name)+(p.file.plate!=null?" · "+t("library.plate_n",{n:p.file.plate}):""):t("library.print_file_unknown");
+    const out=`<span class="lib-conf ${OUTCOME_CLASS[p.outcome]||"is-dim"}">${esc(t("library.outcome_"+p.outcome))}</span>`;
+    const facts=[p.elapsedSec?fmtDuration(p.elapsedSec):null, p.user?t("library.print_by",{who:p.user}):null].filter(Boolean);
+    return `<li class="lib-item lib-print-row"${hidden?" hidden":""}><span class="lib-item-dot" aria-hidden="true"></span><div>
+      <div class="lib-print-head"><span>${esc(when?(typeof fmtTime==="function"?fmtTime(when):new Date(when).toLocaleString()):t("library.print_when_unknown"))}</span>
+        <span class="lib-print-printer">${esc(p.printer||"")}</span>${out}${link}</div>
+      <div class="lib-var-where"><span class="lib-fname" title="${esc(p.remoteName||"")}">${esc(file)}</span> · ${esc(how)}${facts.length?" · "+esc(facts.join(" · ")):""}</div>
+      ${p.wasIn?`<div class="lib-var-where">${esc(t(p.wasIn.merged?"library.print_was_in_merged":"library.print_was_in",{name:p.wasIn.name}))}</div>`:""}
+    </div></li>`;
   }
   const printerLabel=k=>{ const f=(window.PrinterIdentity&&PrinterIdentity.FAMILIES||[]).find(x=>x.key===k); return f?f.label:k; };
 
@@ -869,6 +926,7 @@
     if(i.kind==="suggested_match"&&can("grouping")) out.push(`<button type="button" class="btn primary btn-sm lib-approve" data-review="${i.id}">${esc(t("library.merge_btn"))}</button>`,
       `<button type="button" class="btn ghost btn-sm lib-reject" data-review="${i.id}">${esc(t("library.keep_apart_btn"))}</button>`);
     if(i.kind==="ambiguous_grouping"&&i.detail.variant==="file"&&i.detail.owner&&can("grouping")) out.push(`<button type="button" class="btn ghost btn-sm lib-choose" data-review="${i.id}">${esc(t("library.choose_btn"))}</button>`);
+    if(i.kind==="unlinked_print"&&(i.detail.candidates||[]).some(c=>c.live)&&can("grouping")) out.push(`<button type="button" class="btn ghost btn-sm lib-link-print" data-review="${i.id}">${esc(t("library.link_print_btn"))}</button>`);
     if(i.kind==="empty_model"&&i.models[0]&&can("hide")) out.push(`<button type="button" class="btn ghost btn-sm lib-hide-empty" data-model="${esc(i.models[0].uuid)}" data-name="${esc(i.models[0].name)}">${esc(t("library.hide_model_btn"))}</button>`);
     if(can("review")) out.push(`<button type="button" class="btn ghost btn-sm lib-dismiss" data-review="${i.id}">${esc(t("library.dismiss_btn"))}</button>`);
     return out.length?`<div class="lib-actions">${out.join("")}</div>`:"";
@@ -881,6 +939,17 @@
     on(".lib-dismiss",async el=>{ try{ await act({ kind:"dismiss", review:Number(el.dataset.review) }, t("library.done_dismiss")); }catch(e){ L.flash={ text:errText(e), error:true }; renderBars(); } });
     on(".lib-hide-empty",el=>dialog({ title:t("library.hide_title",{name:el.dataset.name}), confirm:t("library.hide_ok"), body:`<p>${esc(t("library.hide_help"))}</p>`,
       onConfirm:()=>act({ kind:"hide", model:el.dataset.model }, t("library.done_hide",{name:el.dataset.name})) }));
+    // An unlinked print (M7): which of the Models it could be. The print
+    // itself is never rewritten; the choice is a Decision, and can be undone.
+    on(".lib-link-print",el=>{
+      const it=items.find(x=>x.id===Number(el.dataset.review)); if(!it) return;
+      const d=it.detail, cands=(d.candidates||[]).filter(c=>c.live);
+      let pick=null;
+      dialog({ title:t("library.link_print_title",{file:stem(d.file||"")}), confirm:t("library.link_print_ok_pick"), okEnabled:false,
+        body:`<p>${esc(t("library.link_print_help",{printer:d.printer||""}))}</p><div class="lib-pick">${cands.map(c=>`<label class="lib-pick-row"><input type="radio" name="libLinkPrint" class="lib-pick-radio" value="${esc(c.uuid)}" data-name="${esc(c.name)}"><span class="lib-pick-txt"><span class="lib-fname">${esc(c.name)}</span></span></label>`).join("")}</div>`,
+        wire:(dl,ok)=>dl.querySelectorAll("input[name=libLinkPrint]").forEach(r=>r.addEventListener("change",()=>{ pick={ uuid:r.value, name:r.dataset.name }; ok.disabled=false; ok.textContent=t("library.link_print_ok",{model:pick.name}); })),
+        onConfirm:()=>act({ kind:"approve", review:it.id, model:pick.uuid }, r=>t("library.done_link_print",{model:r.name})) });
+    });
     on(".lib-choose",el=>{
       const it=items.find(x=>x.id===Number(el.dataset.review)); if(!it) return;
       const d=it.detail, cands=(d.candidates||[]).filter(c=>c.uuid&&c.uuid!==d.owner.uuid);

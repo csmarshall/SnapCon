@@ -55,18 +55,38 @@ function createAuditLog({ baseDir, retentionDaysFn = () => 90 }) {
     }
   }
 
+  // Returns the new row's id (the Library's print history keeps it as the
+  // Print's audit_ref), or null when nothing was written.
   function log({ category, event, userId = null, userLabel = null, printerId = null, printerName = null, detail = null }) {
-    if (unavailable) return;
+    if (unavailable) return null;
     try {
-      db.prepare(
+      const r = db.prepare(
         "INSERT INTO audit_log (ts, category, event, userId, userLabel, printerId, printerName, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       ).run(
         Date.now(), String(category), String(event),
         userId, userLabel, printerId, printerName,
         detail != null ? JSON.stringify(detail) : null
       );
+      return Number(r.lastInsertRowid);
     } catch (e) {
       console.error("[audit] log failed:", e.message);
+      return null;
+    }
+  }
+
+  // Every row of the given events in [from, to], oldest first: what the
+  // Library imports print history from (M7). Event names are bound, never
+  // interpolated.
+  function events({ from, to, names = [] } = {}) {
+    if (unavailable || !names.length) return [];
+    try {
+      return db.prepare(
+        `SELECT id, ts, category, event, userId, userLabel, printerId, printerName, detail FROM audit_log
+         WHERE category = 'job' AND ts >= ? AND ts <= ? AND event IN (SELECT value FROM json_each(?)) ORDER BY ts, id`
+      ).all(Number(from) || 0, Number(to) || Date.now(), JSON.stringify(names.map(String)));
+    } catch (e) {
+      console.error("[audit] events failed:", e.message);
+      return [];
     }
   }
 
@@ -114,7 +134,7 @@ function createAuditLog({ baseDir, retentionDaysFn = () => 90 }) {
   }
 
   return {
-    log, query, prune,
+    log, query, prune, events,
     isAvailable: () => !unavailable,
     unavailableReason: () => unavailableReason
   };

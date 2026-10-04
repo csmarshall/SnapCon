@@ -57,6 +57,15 @@ function printOptsHtml(caps, prefs, idPrefix) {
   }).join("");
 }
 let FILES = [], FOLDERS = [], CURRENT_SUB = "", SELECTED = null, MAP = null, FLEET = [], MAPSEL = {};
+// Where SELECTED is when it was chosen on a Library Model page (M7): { root,
+// rootName, model, modelName, library: { key, plate } }. null = the G-code
+// folder, as chosen in the file browser. SELECTED is then a path inside that
+// Library location, and every request about it says which location.
+let SEND_SOURCE = null;
+const sendRootQ = () => (SEND_SOURCE && SEND_SOURCE.root && SEND_SOURCE.root !== "gcode" ? "&root=" + encodeURIComponent(SEND_SOURCE.root) : "");
+// The file browser's row is "the selected file" only when the selection came
+// from the G-code folder.
+const isSelectedFile = fp => SELECTED === fp && !(SEND_SOURCE && SEND_SOURCE.root && SEND_SOURCE.root !== "gcode");
 // Multi-select state for the file manager (shift/ctrl-click, Explorer-style)
 // — keyed by the same "/"-joined relative path used everywhere else
 // (CURRENT_SUB+"/"+name), so a selected file is unambiguous even once a
@@ -2828,10 +2837,10 @@ function renderList(){
   shown.forEach((f,i)=>{
     const filePath=shownPaths[i];
     const b=document.createElement("div");
-    b.className="job"+(SELECTED===filePath?" active":"")+(SELECTED_FILES.has(filePath)?" multi-selected":"");
+    b.className="job"+(isSelectedFile(filePath)?" active":"")+(SELECTED_FILES.has(filePath)?" multi-selected":"");
     b.draggable=true; b.dataset.file=filePath;
     b.tabIndex=0; b.setAttribute("role","button");
-    const fsBadge=(SELECTED===filePath&&MAP&&MAP.isFS)?` <img src="/fs-badge.svg" class="fs-badge" title="${esc(t("files.full_spectrum_title"))}">`:``;
+    const fsBadge=(isSelectedFile(filePath)&&MAP&&MAP.isFS)?` <img src="/fs-badge.svg" class="fs-badge" title="${esc(t("files.full_spectrum_title"))}">`:``;
     b.innerHTML=`<div class="jn" title="${esc(f.name)}">${esc(stripExt(f.name))}${fsBadge}</div>`+
       `<div class="jm">${fileKindBadge(f)} ${fmtTime(f.mtime)} · ${fmtSize(f.size)}</div>`;
     b.addEventListener("click",e=>fileRowClick(e,filePath,shownPaths));
@@ -2849,8 +2858,8 @@ function renderSearchResults(){
   if(!shown.length){ list.innerHTML=`<div class="empty-list">${esc(t("files.empty_no_search_matches"))}</div>`; return; }
   shown.forEach(f=>{
     const filePath=f.sub?f.sub+"/"+f.name:f.name;
-    const b=document.createElement("button"); b.className="job"+(SELECTED===filePath?" active":"");
-    const fsBadge=(SELECTED===filePath&&MAP&&MAP.isFS)?` <img src="/fs-badge.svg" class="fs-badge" title="${esc(t("files.full_spectrum_title"))}">`:``;
+    const b=document.createElement("button"); b.className="job"+(isSelectedFile(filePath)?" active":"");
+    const fsBadge=(isSelectedFile(filePath)&&MAP&&MAP.isFS)?` <img src="/fs-badge.svg" class="fs-badge" title="${esc(t("files.full_spectrum_title"))}">`:``;
     const where=f.sub?`<span class="jm-path">${esc(f.sub)}/</span>`:``;
     b.innerHTML=`<div class="jn">${where}${esc(stripExt(f.name))}${fsBadge}</div><div class="jm">${fmtTime(f.mtime)} · ${fmtSize(f.size)}</div>`;
     b.addEventListener("click",()=>selectFile(filePath));
@@ -2915,8 +2924,15 @@ function splitFilePath(fp){
   const idx=fp.lastIndexOf("/");
   return idx===-1 ? {sub:"",name:fp} : {sub:fp.slice(0,idx), name:fp.slice(idx+1)};
 }
-function openSendQueueModal(){
-  SEND_QUEUE_ITEMS=[...SELECTED_FILES].map(fp=>{ const {sub,name}=splitFilePath(fp); return {path:fp, name, sub, quantity:1}; });
+// preset (M7): items from a Library Model page — { path, root, library,
+// modelName, rootName } — instead of the file browser's selection.
+function openSendQueueModal(preset){
+  SEND_QUEUE_ITEMS=Array.isArray(preset)
+    ? preset.map(it=>{ const {sub,name}=splitFilePath(it.path); return {path:it.path, name, sub, root:it.root, library:it.library, quantity:1}; })
+    : [...SELECTED_FILES].map(fp=>{ const {sub,name}=splitFilePath(fp); return {path:fp, name, sub, quantity:1}; });
+  const src=Array.isArray(preset)&&preset[0];
+  $("sendQueueSource").hidden=!src;
+  $("sendQueueSource").textContent=src?t("library.send_source",{model:src.modelName||"",location:src.rootName||""}):"";
   renderSendQueueFiles();
   $("sendQueuePool").innerHTML=PRINTER_POOLS.length
     ? PRINTER_POOLS.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")
@@ -2979,7 +2995,7 @@ async function doSendQueue(startImmediately){
   st.className="pstatus work"; st.textContent=t("queue.sending");
   try{
     const r=checkAuthFailure(await postJSON("/api/queue/send",{
-      files: SEND_QUEUE_ITEMS.map(it=>({name:it.name, sub:it.sub, quantity:it.quantity})),
+      files: SEND_QUEUE_ITEMS.map(it=>({name:it.name, sub:it.sub, quantity:it.quantity, ...(it.root?{root:it.root}:{}), ...(it.library?{library:it.library}:{})})),
       poolId, mode, startImmediately
     }));
     const d=await r.json(); if(!r.ok||d.error) throw new Error(queueErrorText(d,d.error||("HTTP "+r.status)));
@@ -4844,15 +4860,17 @@ async function uploadLocalFiles(fileList){
   loadFiles(CURRENT_SUB);
 }
 
-async function selectFile(name){
-  SELECTED=name; MAPSEL={}; SEND_PLATE=1; renderList();
+// source: where a Library Model page found the file (see SEND_SOURCE); the
+// file browser passes none.
+async function selectFile(name, source){
+  SELECTED=name; SEND_SOURCE=source||null; MAPSEL={}; SEND_PLATE=1; renderList();
   // Orca mode hides this section permanently (init() sets it inline) — don't
   // fight that override here.
   if(!URL_PRINTER_FILTER) $("jobsechead").style.display="";
   $("jlname").textContent=t("files.opening_status",{name});
   $("jobloading").classList.add("show");
   $("jobcard").classList.remove("show");
-  try{ const m=await getJSON("/api/map?file="+encodeURIComponent(name));
+  try{ const m=await getJSON("/api/map?file="+encodeURIComponent(name)+sendRootQ());
     $("jobloading").classList.remove("show");
     if(m.error){ MAP=null; if(!URL_PRINTER_FILTER) $("jobsechead").style.display="none"; return; }
     MAP=m; renderJob(); renderList(); renderFleet();
@@ -4866,7 +4884,7 @@ async function selectFile(name){
 async function loadMap(name,{plate}={}){
   if(!name) return;
   try{
-    const m=await getJSON("/api/map?file="+encodeURIComponent(name)+(plate?"&plate="+plate:""));
+    const m=await getJSON("/api/map?file="+encodeURIComponent(name)+(plate?"&plate="+plate:"")+sendRootQ());
     if(m.error) return;
     MAP=m; MAPSEL={};
     renderJob(); renderFleet(); renderSendList();
@@ -4987,7 +5005,7 @@ function renderJob(){
   thumb.style.display="none";
   thumb.onerror=()=>{ thumb.style.display="none"; };
   thumb.onload=()=>{ thumb.style.display="block"; };
-  thumb.src="/api/local-thumbnail?file="+encodeURIComponent(SELECTED);
+  thumb.src="/api/local-thumbnail?file="+encodeURIComponent(SELECTED)+sendRootQ();
   if(thumb.complete && thumb.naturalWidth>0) thumb.style.display="block";
   const need=neededColors();
   $("needcount").textContent=tn("fleet.job.needed_colors",need.length);
@@ -6514,7 +6532,8 @@ async function pushTo(printer, start, extraUI, prefs, onProgress, plate){
   PUSHES++;
   let ok=false;
   try{
-    const r=await postJSON("/api/print",{file:SELECTED,printer,start,map,prefs,plate});
+    const src=SEND_SOURCE?{root:SEND_SOURCE.root,library:SEND_SOURCE.library}:{};
+    const r=await postJSON("/api/print",{file:SELECTED,printer,start,map,prefs,plate,...src});
     const d=await r.json(); if(!r.ok||d.error||(!d.jobId&&d.mode!=="pending")) throw new Error(d.error||("HTTP "+r.status));
     if(d.mode==="pending"){
       // Printer's busy — server queued the file instead of racing an upload
@@ -6690,7 +6709,7 @@ async function pollJob(jobId, st, start, mapped, btn, extraUI, prefs, printerId,
 
 // ---- Eject / deselect job ----
 function clearJobSelection(){
-  SELECTED=null; MAP=null; MAPSEL={};
+  SELECTED=null; SEND_SOURCE=null; MAP=null; MAPSEL={};
   $('jobcard').classList.remove('show');
   $('jobsechead').style.display='none';
   $('needcount').textContent='';
@@ -6730,6 +6749,9 @@ function openSendModal(){
   if(!SELECTED) return;
   const name=SELECTED.split(/[/\\]/).pop();
   $('sendfilename').textContent=name;
+  // From a Library Model page: which Model and location this is (M7).
+  $('sendSource').hidden=!SEND_SOURCE;
+  $('sendSource').textContent=SEND_SOURCE?t("library.send_source",{model:SEND_SOURCE.modelName||"",location:SEND_SOURCE.rootName||""}):"";
   $('sendtitle').textContent=t("fleet.modal.send.title");
   SEND_PREFS={autoLevel:false, flowCalibrate:false, timelapse:false};
   renderSendList();

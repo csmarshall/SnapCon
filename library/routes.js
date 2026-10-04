@@ -72,9 +72,9 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
       q: str(req.query.q), family: str(req.query.printer, 80), root: str(req.query.location, 80), type: str(req.query.type, 20),
       material: str(req.query.material, 40), attention: req.query.attention === "1", hidden: req.query.hidden === "1", sort: str(req.query.sort, 10) || "name",
       cursor: str(req.query.cursor, 400) || null, limit: Math.max(1, Math.min(120, parseInt(req.query.limit, 10) || 60)),
-    })));
-  app.get("/api/library/models/:uuid", requireAuth, need("library.view"), (req, res) => send(res, () => library.model(req.params.uuid)));
-  app.get("/api/library/attention", requireAuth, need("library.view"), (req, res) => send(res, () => library.attention()));
+    }, req.user)));
+  app.get("/api/library/models/:uuid", requireAuth, need("library.view"), (req, res) => send(res, () => library.model(req.params.uuid, req.user)));
+  app.get("/api/library/attention", requireAuth, need("library.view"), (req, res) => send(res, () => library.attention(req.user)));
 
   // M6: every change to the Library goes through these two. Each action's own
   // capability (library.edit.grouping / .metadata / .cover, library.hide,

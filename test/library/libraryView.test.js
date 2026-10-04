@@ -103,11 +103,14 @@ test("a file in an offline location is offline — never missing — and cannot 
   assert.equal(card("gecko").missing, 0);
   const g = V.modelDetail(db, modelUuid(db, "Gecko.gcode")).printables[0];
   assert.equal(g.file.availability, "offline");
-  assert.deepEqual(g.send, { ok: false, reason: "location" });
+  assert.deepEqual(g.send, { ok: false, reason: "offline" }, "M7: an unreachable location can't print, and says why");
   const o = V.modelDetail(db, modelUuid(db, "Owl.gcode")).printables[0];
   assert.equal(o.file.availability, "missing");
   assert.deepEqual(o.send, { ok: false, reason: "missing" });
-  assert.deepEqual(V.modelDetail(db, modelUuid(db, "Frog.gcode")).printables[0].send, { ok: true, path: "Frog.gcode" }, "only the G-code folder can use the existing Send dialog");
+  assert.deepEqual(V.modelDetail(db, modelUuid(db, "Frog.gcode")).printables[0].send, { ok: true, root: "gcode", path: "Frog.gcode" });
+  // M7 (§12): any location that answers can print, through the same dialogs.
+  db.prepare("UPDATE roots SET status = 'ok' WHERE id = 'nas'").run();
+  assert.deepEqual(V.modelDetail(db, modelUuid(db, "Gecko.gcode")).printables[0].send, { ok: true, root: "nas", path: "Gecko.gcode" });
 });
 
 test("cover order: the owner's choice, then a Model image, then a plate picture, then the largest G-code thumbnail", t => {

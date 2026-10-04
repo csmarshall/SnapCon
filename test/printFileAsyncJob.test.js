@@ -58,7 +58,9 @@ function harness({ mapFails = false, startFails = false, hold = false } = {}) {
     queuedFile: new Map([["20", { name: FILE, status: "ready", ts: 1 }]]),
     saveQueuedFiles: () => calls.push("saveQueuedFiles"),
     ROUTE_STARTED_PRINT: new Set(),
-    auditLog: { log: e => calls.push("audit:" + e.event) }
+    auditLog: { log: e => { calls.push("audit:" + e.event); return 42; } },
+    // Print history (M7): one row per started job, never for a failed one.
+    library: { recordPrintStart: e => { calls.push("library:" + e.source + ":" + e.auditRef); return Promise.resolve(null); } }
   };
   vm.createContext(env);
   // runPrintFileJob wraps its work in the start-sequence guard (9i). Supplied
@@ -122,6 +124,7 @@ test("success bookkeeping happens exactly once", async () => {
   assert.equal(h.calls.filter(c => c === "saveQueuedFiles").length, 1);
   assert.equal(h.env.queuedFile.has("20"), false, "printing the staged file clears the Loaded badge");
   assert.ok(h.env.ROUTE_STARTED_PRINT.has(P.url), "suppresses notifyTick's duplicate print-started");
+  assert.deepEqual(h.calls.filter(c => c.startsWith("library:")), ["library:printer_storage:42"], "one Print, from the printer's storage, with its audit row");
 });
 
 test("a mapping failure becomes job.error and never reports a start", async () => {
@@ -145,6 +148,7 @@ test("a failed job leaves no bookkeeping — no audit row, no badge clear", asyn
   await run(h);
   assert.equal(h.calls.some(c => c.startsWith("audit:")), false,
     "an audit trail claiming a print started would be a lie");
+  assert.equal(h.calls.some(c => c.startsWith("library:")), false, "and so would a Print in the history");
   assert.equal(h.env.ROUTE_STARTED_PRINT.size, 0);
   assert.equal(h.env.queuedFile.has("20"), true, "the staged file is still staged — nothing printed it");
 });

@@ -19,6 +19,7 @@ const gcodeExtract = require("./gcodeExtract");
 const threemfExtract = require("./threemfExtract");
 const grouping = require("./grouping");
 const actions = require("./actions");
+const prints = require("./prints");
 
 const dbs = new Map();   // dbPath -> connection, opened on first use
 function dbFor(dbPath) {
@@ -85,6 +86,10 @@ const handlers = {
     if (reportPath) grouping.writeReport(reportPath, report);
     return result;
   },
+  // M7: print history. Each in one transaction; none of them touches a file.
+  "prints.start": ({ dbPath, event, now }) => indexStore.inTransaction(dbFor(dbPath), () => prints.recordStart(dbFor(dbPath), event, { now })),
+  "prints.outcome": ({ dbPath, event, now }) => indexStore.inTransaction(dbFor(dbPath), () => prints.recordOutcome(dbFor(dbPath), event, { now })),
+  "prints.import": ({ dbPath, events, queueHistory, from, to, now }) => indexStore.inTransaction(dbFor(dbPath), () => prints.importAudit(dbFor(dbPath), { events, queueHistory, from, to, now })),
   "index.group": ({ dbPath, now, reportPath }) => {
     const db = dbFor(dbPath);
     const { report, ...out } = indexStore.inTransaction(db, () => grouping.run(db, { now }));

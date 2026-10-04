@@ -46,5 +46,10 @@ test("/api/print's queue item is built from the real location, not a bare name",
   const route = serverSrc.slice(serverSrc.indexOf('app.post("/api/print"'));
   const body = route.slice(0, route.indexOf("\napp."));
   assert.doesNotMatch(body, /sub:\s*""/, "a hard-coded empty sub drops the subfolder");
-  assert.match(body, /queueFileRef\(fp, FOLDER\)/);
+  // M7: relative to the folder the file was resolved in — the G-code folder,
+  // or the Library location it came from, which the item then names as root.
+  assert.match(body, /queueFileRef\(fp, ref\.dir\)/);
+  assert.match(body, /ref\.root !== GCODE_ROOT \? \{ root: ref\.root \}/);
+  const resolver = serverSrc.slice(serverSrc.indexOf("async function resolveFileRef("));
+  assert.match(resolver.slice(0, resolver.indexOf("\n}")), /return fp \? \{ fp, root: GCODE_ROOT, dir: FOLDER \} : null;/, "no root: the G-code folder, exactly as before");
 });

@@ -1424,6 +1424,7 @@
     <div class="modalbox" style="max-width:440px">
       <div class="modalhdr"><span id="sendtitle" data-i18n="fleet.modal.send.title">Send to printers</span><button class="modalx" id="sendmodalx">✕</button></div>
       <div style="font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);word-break:break-all" id="sendfilename"></div>
+      <div class="settings-help" id="sendSource" hidden></div>
       <div style="display:flex;align-items:center;gap:10px;margin-top:10px;margin-bottom:2px">
         <span style="font-size:12px;color:var(--ink-faint)" data-i18n="settings.tabs.printers">Printers</span>
         <button class="btn ghost" id="sendSelectAll" style="padding:3px 9px;font-size:11px" data-i18n="fleet.toolbar.select_all">Select all</button>
@@ -1445,6 +1446,7 @@
   <div class="modal" id="sendQueueModal">
     <div class="modalbox" style="max-width:560px">
       <div class="modalhdr"><span data-i18n="queue.send_modal_title">Send to Queue</span><button class="modalx" id="sendQueueX">✕</button></div>
+      <div class="settings-help" id="sendQueueSource" hidden style="margin-bottom:6px"></div>
       <div id="sendQueueFiles" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px"></div>
       <div class="maint-field" style="margin-bottom:10px">
         <label class="fl" for="sendQueuePool" data-i18n="queue.printer_pool_label">Printer Pool</label>

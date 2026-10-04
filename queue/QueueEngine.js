@@ -175,7 +175,11 @@ function buildRetryItem(original) {
     id: newQueueItemId(),
     status: "queued",
     alreadyUploaded: false,
-    file: { name: original.file.name, sub: original.file.sub, sizeBytes: original.file.sizeBytes, sha256: original.file.sha256 },
+    // root: the Library location the file was queued from (absent = the
+    // G-code folder). A retry dispatches from the same place, and keeps the
+    // Library Variant it was queued as (M7).
+    file: { name: original.file.name, sub: original.file.sub, ...(original.file.root ? { root: original.file.root } : {}), sizeBytes: original.file.sizeBytes, sha256: original.file.sha256 },
+    ...(original.library ? { library: original.library } : {}),
     map: original.map, prefs: original.prefs,
     createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
     queuedBy: original.queuedBy,
@@ -241,9 +245,12 @@ function acceptFileChange(state, { sizeBytes, sha256, actor }) {
   if (state.queueState !== "queue_attention_required" || state.attentionReason !== "file-changed") {
     throw new Error("acceptFileChange: not a file-changed attention state");
   }
-  const original = state.currentItem;
+  // The accepted file is different content: it is no longer the Library
+  // Variant the item was queued as (M7), so that identity goes with it.
+  const { library, ...original } = state.currentItem;
   const updatedItem = {
     ...original,
+    ...(library ? { libraryReplaced: { model: library.model, modelName: library.modelName } } : {}),
     status: "queued",
     file: {
       ...original.file,

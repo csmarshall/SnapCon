@@ -232,7 +232,8 @@ function apply(db, a, { actor = {}, now = Date.now() } = {}) {
       return ctx.finish({ model: into.uuid, from: { uuid: from.uuid, name: from.name }, into: { uuid: into.uuid, name: into.name }, files: n });
     }
     case "approve": {
-      const r = openReview(db, a.review, ["suggested_match"]);
+      const r = openReview(db, a.review, ["suggested_match", "unlinked_print"]);
+      if (r.kind === "unlinked_print") return linkPrint(db, r, a, { actor, now });
       const x = modelByUuid(db, r.model_uuid), y = modelByUuid(db, r.other_model_uuid);
       const survivor = a.survivor === x.uuid ? x : a.survivor === y.uuid ? y : fail(400, "bad_survivor", "Choose which model to keep.");
       const absorbed = survivor === x ? y : x;
@@ -352,6 +353,26 @@ function apply(db, a, { actor = {}, now = Date.now() } = {}) {
     }
     default: fail(400, "unknown_action", "Unknown action.");
   }
+}
+
+// An unlinked Print (M7, §8): a person says which Model it was. Written as a
+// printed_as Decision on the Print; the Print row itself is never rewritten,
+// so undo withdraws the Decision and the Print is unlinked again. The choice
+// is one of the Models the Review Item offered.
+function linkPrint(db, r, a, { actor, now }) {
+  const ev = (() => { try { return JSON.parse(r.evidence_json || "{}"); } catch { return {}; } })();
+  const offered = new Set((ev.candidates || []).map(c => c.uuid));
+  if (!a.model || !offered.has(String(a.model))) fail(400, "bad_choice", "Choose one of the models offered.");
+  const m = modelByUuid(db, a.model, { allowMerged: true });
+  const live = (() => { let x = m; for (let i = 0; i < 10 && x && x.merged_into; i++) x = db.prepare("SELECT * FROM models WHERE uuid = ?").get(x.merged_into); return x; })();
+  if (!live) fail(409, "model_not_found", "That model no longer exists.");
+  const p = r.print_id ? db.prepare("SELECT id, remote_name, printer_name, started_at, ended_at FROM prints WHERE id = ?").get(r.print_id) : null;
+  if (!p) fail(409, "print_not_found", "That print is no longer recorded.");
+  const ctx = begin(db, "approve", { modelUuid: live.uuid, actor, now });
+  const id = ctx.decide({ subject_type: "print", subject_key: String(p.id), relation: "printed_as", polarity: "affirm", object_type: "model", object_key: live.uuid,
+    subject_hint: p.remote_name, reason: "linked by hand", evidence_snapshot_json: r.evidence_json });
+  ctx.closeReview(r, "resolved", id, "linked");
+  return ctx.finish({ model: live.uuid, name: live.name, print: { id: p.id, file: p.remote_name, at: p.started_at || p.ended_at }, reviewKind: "unlinked_print" });
 }
 
 function undo(db, actionId, { actor = {}, now = Date.now() } = {}) {

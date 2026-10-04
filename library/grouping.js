@@ -27,6 +27,7 @@ const { normalizeTitle, compareTitles, displayTitle, RULE_VERSION: TITLE_RULE_VE
 const { genericObject, commonObjects } = require("./genericNames");
 const { nameKey } = require("./folders");
 const { searchForms } = require("./searchTerms");
+const { refreshStats } = require("./prints");
 
 // 1  §4.4/§7 as written: a folders-mode model folder is structural (auto alone)
 // 2  after the first real-library run (§26): a folders-mode folder is medium
@@ -629,6 +630,9 @@ function refreshQueryCaches(db) {
     const stems = String(r.file_names || "").split(/\.(?:gcode|gco|g|bgcode|3mf|stl|obj|step|stp)\b/i);
     up.run(searchForms([r.name, r.project_titles, ...stems]), r.rowid);
   }
+  // Print counts and each Print's current Model (M7): grouping may just have
+  // moved the content they were linked by.
+  refreshStats(db);
 }
 
 // A Model merged into another answers for the survivor (a chain is followed).

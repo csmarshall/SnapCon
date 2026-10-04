@@ -17,6 +17,7 @@ const { diagnosticsRaw } = require("./diagnosticsRaw");
 const { diagnosticsGrouping, stableExport } = require("./diagnosticsGrouping");
 const libraryView = require("./libraryView");
 const libraryActions = require("./actions");
+const libraryPrints = require("./prints");
 
 const GCODE_ROOT = "gcode";
 const NAME_MAX = 60;
@@ -38,6 +39,9 @@ function createLibraryService({
   // absent the process-wide instance is used. uploadsActive(): true while
   // SnapCon is sending a file to a printer, which pauses all Library reads.
   indexing = true, netfs = null, uploadsActive = () => false, scanBudget,
+  // M7: may this user see this printer (groupAccess.printerVisibleTo)? Print
+  // history rows on other printers are not shown to them (§9 D6).
+  printerVisible = () => true,
 }) {
   const store = createLibraryStore({ baseDir, now, log }).open();
   const authz = store.available ? createAuthorizer(store.db) : null;
@@ -204,10 +208,85 @@ function createLibraryService({
   function auditSummary(r) {
     const out = {};
     for (const k of ["model", "name", "before", "after", "family", "fileSays", "plate", "reviewKind"]) if (r[k] != null) out[k] = r[k];
+    if (r.print) out.print = { id: r.print.id, file: r.print.file };
     for (const k of ["from", "into", "to", "a", "b"]) if (r[k]) out[k] = { uuid: r[k].uuid, name: r[k].name };
     if (r.files != null) out.files = r.files;
     if (r.file != null) out.file = r.file;
     return out;
+  }
+
+  // ---- M7: printing from the Library, and print history ----
+
+  // A location a file is printed or queued from. The G-code folder is open to
+  // whoever may print; any other location needs library.view. Answers its
+  // folder for the route to resolve the file inside (lexically there, then by
+  // realpath through netfs).
+  // system: queue dispatch, for an item whose permission was checked when it
+  // was queued.
+  function printLocation(user, rootId, { system = false } = {}) {
+    requireAvailable();
+    const r = store.roots.get(String(rootId || ""));
+    if (!r) throw new LibraryError(404, "location_not_found", "That Library location no longer exists.");
+    if (!system && r.id !== GCODE_ROOT && !(authz && authz.can(user, "library.view"))) throw new LibraryError(403, "forbidden", "You don't have permission to use the Library.");
+    if (!r.enabled) throw new LibraryError(409, "location_disabled", `The location "${r.name}" is switched off.`);
+    if (r.status === "offline") throw new LibraryError(503, "location_offline", `The location "${r.name}" is unreachable. SnapCon keeps checking and will use it again as soon as it answers.`);
+    // Answers, but can't be used (its folder is gone, or overlaps another).
+    if (r.status === "error") throw new LibraryError(409, "location_error", `The location "${r.name}" can't be used right now${r.last_error ? ": " + r.last_error : ""}.`);
+    return { id: r.id, name: r.name, path: r.path, realPath: stateOf(r.id).realPath || null };
+  }
+
+  // What the Library knows about the file a person chose to print: the
+  // Variant they saw (key) must still be the file's. Answers the identity the
+  // print is recorded with; the route still checks the file on disk.
+  function printIdentity({ rootId, rel, key, plate }) {
+    requireAvailable();
+    const db = store.db;
+    const f = db.prepare("SELECT * FROM files WHERE root_id = ? AND rel_path = ? AND entry_path = ''").get(String(rootId), String(rel || ""));
+    if (!f || f.state !== "present") throw new LibraryError(409, "library_file_missing", "The Library no longer has this file there. Reload the model.");
+    const p = plate == null || plate === "" ? null : Number(plate);
+    // SnapCon starts a project's first plate only (the Bambu connector sends
+    // plate_1); another plate would print something other than what was chosen.
+    if (p != null && p !== 1) throw new LibraryError(400, "plate_unsupported", "SnapCon can only start plate 1 of a project. Slice the plate you want on its own, or print it from the slicer.");
+    const v = db.prepare(`SELECT plate_no FROM variants WHERE file_id = ? AND ${p == null ? "plate_no IS NULL" : "plate_no = ?"}`).get(...(p == null ? [f.id] : [f.id, p]));
+    if (!v) throw new LibraryError(409, "library_variant_missing", "That printable file or plate is no longer there. Reload the model.");
+    const canon = k => { const ck = String(k || "").split("#")[0]; return (db.prepare("SELECT content_key FROM content_aliases WHERE alias = ?").get(ck) || {}).content_key || ck; };
+    if (key && canon(key) !== canon(f.content_key)) throw new LibraryError(409, "library_file_changed", "This file changed since the model page was opened. Reload it before printing.");
+    const m = f.model_id ? db.prepare("SELECT uuid, name FROM models WHERE id = ?").get(f.model_id) : null;
+    return { contentKey: f.content_key, sha256: f.sha256 || null, size: f.size, mtimeMs: f.mtime_ms, plate: p, variantKey: p == null ? f.content_key : f.content_key + "#" + p,
+      model: m ? m.uuid : null, modelName: m ? m.name : null, location: f.root_id + ":" + f.rel_path, fileName: f.name };
+  }
+
+  // Present files with this verified content, in locations that answer: where
+  // a queued job's file may have moved to (§12). The caller hashes the
+  // candidate before using it.
+  function locateContent(sha256) {
+    if (!store.available || !sha256) return [];
+    return store.db.prepare(`SELECT f.root_id, f.rel_path, r.path AS root_path FROM files f JOIN roots r ON r.id = f.root_id
+      WHERE f.entry_path = '' AND f.state = 'present' AND f.sha256 = ? AND r.enabled = 1 AND r.status != 'offline' ORDER BY f.root_id != 'gcode', f.root_id, f.rel_path`).all(String(sha256))
+      .map(r => ({ rootId: r.root_id, rel: r.rel_path, rootPath: r.root_path }));
+  }
+
+  // Recording never holds up printing: a failure is logged, and the import
+  // from the audit log fills the gap later from the same events.
+  function recordPrintStart(event) {
+    if (!store.available || !worker) return Promise.resolve(null);
+    return worker.request("prints.start", { dbPath: store.dbPath, event, now: now() }).catch(e => { log.error("[library] print not recorded: " + e.message); return null; });
+  }
+  function recordPrintOutcome(event) {
+    if (!store.available || !worker) return Promise.resolve(null);
+    return worker.request("prints.outcome", { dbPath: store.dbPath, event, now: now() }).catch(e => { log.error("[library] print outcome not recorded: " + e.message); return null; });
+  }
+  async function importPrintHistory({ events, queueHistory, from, to }) {
+    requireAvailable();
+    if (!worker) throw new LibraryError(503, "worker_down", "The Library worker is not running.");
+    const rep = await worker.request("prints.import", { dbPath: store.dbPath, events, queueHistory, from, to, now: now() });
+    log.log(`[library] print history: ${rep.events} audit events, ${rep.created} prints added, ${rep.closed} closed, ${rep.alreadyRecorded} already recorded`);
+    return rep;
+  }
+  function lastPrintImport() {
+    if (!store.available) return null;
+    const r = store.db.prepare("SELECT * FROM print_imports ORDER BY id DESC LIMIT 1").get();
+    return r ? { id: r.id, ranAt: r.ran_at, from: r.from_ts, to: r.to_ts, created: r.created, updated: r.updated, report: JSON.parse(r.report_json) } : null;
   }
 
   function logScan(root, s) {
@@ -545,13 +624,20 @@ function createLibraryService({
       return exportView ? stableExport(d) : { ...d, lastRun: lastGrouping };
     },
     // M5: the Library itself, from the index alone (never a file read).
-    browse: opts => { requireAvailable(); return libraryView.listModels(store.db, opts || {}); },
+    browse: (opts, user) => { requireAvailable(); return libraryView.listModels(store.db, { ...(opts || {}), printerVisible: pid => printerVisible(user, pid) }); },
     facets: () => { requireAvailable(); return libraryView.facets(store.db); },
-    model: uuid => {
+    model: (uuid, user) => {
       requireAvailable();
-      const m = libraryView.modelDetail(store.db, String(uuid || ""));
+      const m = libraryView.modelDetail(store.db, String(uuid || ""), { printerVisible: pid => printerVisible(user, pid) });
       if (!m) throw new LibraryError(404, "model_not_found", "No such model.");
-      if (!m.mergedInto) m.history = libraryActions.history(store.db, m.uuid);
+      if (!m.mergedInto) {
+        m.history = libraryActions.history(store.db, m.uuid);
+        // Counts are everyone's (§9 D6); the rows only for printers this
+        // user may see, and nothing about how many others there are.
+        const id = store.db.prepare("SELECT id FROM models WHERE uuid = ?").get(m.uuid).id;
+        const h = libraryPrints.historyFor(store.db, id, { visible: pid => printerVisible(user, pid) });
+        m.printHistory = { rows: h.rows, someNotShown: h.hiddenCount > 0 };
+      }
       return m;
     },
     // M6: a person's change to the Library. The capability is checked here,
@@ -559,7 +645,7 @@ function createLibraryService({
     // against the current state and answers 409 when it no longer applies.
     act: (user, actor, action) => runAction(user, actor, action),
     undo: (user, actor, actionId) => runUndo(user, actor, actionId),
-    attention: () => { requireAvailable(); return libraryView.attentionList(store.db); },
+    attention: user => { requireAvailable(); return libraryView.attentionList(store.db, { printerVisible: pid => printerVisible(user, pid) }); },
     // What every Library page shows at the top: each location's state (never
     // its folder), whether indexing is running, and the attention counts.
     overview: user => {
@@ -575,11 +661,12 @@ function createLibraryService({
         roots,
         indexing: ix ? { scanning: ix.scanning ? { rootId: ix.scanning.rootId, phase: ix.scanning.phase, done: ix.scanning.done, total: ix.scanning.total } : null,
           queued: ix.queue.length, hashing: ix.hashing ? { hashed: ix.hashing.hashed, remaining: ix.hashing.remaining } : null } : null,
-        attention: libraryView.attentionCounts(store.db),
+        attention: libraryView.attentionCounts(store.db, { printerVisible: pid => printerVisible(user, pid) }),
         can,
       };
     },
     thumbFile,
+    printLocation, printIdentity, locateContent, recordPrintStart, recordPrintOutcome, importPrintHistory, lastPrintImport,
     _store: store, _checkRoot: checkRoot, _tick: tick, _requestScan: requestScan, _group: runGrouping,
     // Tests: resolves once the indexer has nothing running.
     _idle: async () => { while (runLoop) await runLoop.catch(() => {}); },

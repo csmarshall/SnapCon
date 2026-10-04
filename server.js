@@ -29,7 +29,7 @@ const u1Firmware = require("./connectors/snapmaker-u1-firmware");
 const firmwareImage = require("./connectors/firmwareImage");
 const { createRemoteAccessService } = require("./remote-access/RemoteAccessService");
 const { createAuditLog } = require("./audit/AuditLog");
-const { createLibraryService } = require("./library/LibraryService");
+const { createLibraryService, LibraryError, GCODE_ROOT } = require("./library/LibraryService");
 const { checkReachable, netfsFsp } = require("./library/locations");
 // Every filesystem call that can touch the G-code folder (often a NAS share)
 // goes through netfs: it runs in dedicated worker threads, so a dead NAS can
@@ -467,8 +467,43 @@ const library = createLibraryService({
   checkFn: (p, o) => checkReachable(p, { ...o, fsp: netfsFsp(netfs) }),
   netfs, uploadsActive: () => UPLOADS_ACTIVE > 0,
   audit: (event, actor, detail) => auditLog.log({ category: "library", event, ...actor, detail }),
+  // Print history rows follow printer visibility (§9 D6). A printer since
+  // removed from SnapCon is visible to admins only.
+  printerVisible: (user, printerId) => {
+    const p = PRINTERS.find(x => x.id === printerId);
+    return p ? printerVisibleTo(user, p) : (!user || user.role === "admin" || !!user.implicit);
+  },
 });
 registerLibraryRoutes(app, { library, requireAuth, actorFromReq });
+
+// Print history from the audit log (M7, §9 D7): the last 90 days at most (the
+// log keeps no more by default), with the queue's recent history, whose
+// verified hashes link a queued job exactly. Safe to repeat: what a Print
+// already records is not added again.
+const PRINT_HISTORY_EVENTS = ["print-started", "queue-print-started", "print-completed", "print-cancelled", "print-error"];
+async function importPrintHistory() {
+  if (!library.available) return null;
+  const to = Date.now();
+  const from = to - Math.min(90, Number(CFG.auditRetentionDays) || 90) * 24 * 3600 * 1000;
+  const events = auditLog.events({ from, to, names: PRINT_HISTORY_EVENTS });
+  const queueHistory = {};
+  for (const p of PRINTERS) {
+    const st = queueStore.getPrinterState(p.id);
+    queueHistory[p.id] = [...(st.recentHistory || []), ...(st.currentItem ? [st.currentItem] : [])].map(i => ({ id: i.id, file: { name: i.file && i.file.name, sha256: i.file && i.file.sha256 }, dispatchedAt: i.dispatchedAt || null }));
+  }
+  return library.importPrintHistory({ events, queueHistory, from, to });
+}
+// The import's report (and running it again): for those who may see Library
+// Diagnostics. It names printers and file names, so it is not for everyone.
+const needLibraryDiagnostics = (req, res, next) => (library.can(req.user, "library.diagnostics") ? next() : res.status(403).json({ error: "forbidden", code: "forbidden" }));
+app.get("/api/library/print-history/import", requireAuth, needLibraryDiagnostics, (req, res) => res.json(library.lastPrintImport() || {}));
+app.post("/api/library/print-history/import", requireAuth, needLibraryDiagnostics, async (req, res) => {
+  try {
+    const rep = await importPrintHistory();
+    auditLog.log({ category: "library", event: "print-history-imported", ...actorFromReq(req), detail: rep ? { created: rep.created, closed: rep.closed, events: rep.events } : null });
+    res.json(rep || {});
+  } catch (e) { res.status(e.status || 500).json({ error: e.message, code: e.code || null }); }
+});
 
 // Explicit index route so the UI is served even when running from a packaged
 // binary (where express.static from the snapshot can be unreliable).
@@ -530,6 +565,56 @@ function replyIfNasDown(res, e) {
 // (NAS_UNREACHABLE), never a quiet "no". Checked on every use: the breaker
 // only short-circuits a known outage, it never stands in for this check.
 const fileExists = fp => netfs.exists(fp);
+
+// M7 (docs/library-design.md §12): a file named by a Library location and its
+// path inside it. No root, or "gcode", is the G-code folder exactly as before
+// (safePath). Any other location resolves inside its own folder, then by real
+// path: a location can be any folder on any share, and a link or junction in
+// it must not lead out of it. Answers { fp, root, dir } or null (no such
+// file); throws a LibraryError (no permission, switched off, unreachable) or
+// NAS_UNREACHABLE. `system`: dispatch of an item already checked when queued.
+async function resolveFileRef(user, root, file, { system = false } = {}) {
+  if (root == null || root === "" || root === GCODE_ROOT) {
+    const fp = safePath(file);
+    return fp ? { fp, root: GCODE_ROOT, dir: FOLDER } : null;
+  }
+  const loc = library.printLocation(user, String(root), { system });
+  const fp = resolveWithinFolder(file, loc.path);
+  if (!fp) return null;
+  let real, realRoot;
+  try { [real, realRoot] = await Promise.all([netfs.realpath(fp), netfs.realpath(loc.path)]); }
+  catch (e) { if (e && e.code === "NAS_UNREACHABLE") throw e; return null; }
+  if (!isPathWithinFolder(real, realRoot)) return null;
+  return { fp, root: loc.id, dir: loc.path };
+}
+const relOf = ref => path.relative(ref.dir, ref.fp).split(path.sep).join("/");
+// The answer when a file reference can't be used. true when it answered.
+function replyFileRefError(res, e, root) {
+  if (e && e.code === "NAS_UNREACHABLE" && root && root !== GCODE_ROOT) {
+    res.status(503).json({ error: "That Library location is unreachable. SnapCon keeps checking and will use it again as soon as it answers.", code: "location_unreachable" });
+    return true;
+  }
+  if (replyIfNasDown(res, e)) return true;
+  if (e instanceof LibraryError) { res.status(e.status).json({ error: e.message, code: e.code }); return true; }
+  return false;
+}
+// M7: a print chosen in the Library is recorded as exactly that Variant, so the
+// file must still be the one the Library indexed (same size and modified
+// time; the Variant the person saw) and its content is known by hash — the
+// Library's, or computed now when the Library has not hashed it yet.
+async function libraryPrintIdentity(ref, lib) {
+  const id = library.printIdentity({ rootId: ref.root, rel: relOf(ref), key: lib && lib.key, plate: lib && lib.plate });
+  const st = await netfs.stat(ref.fp);
+  if (st.size !== id.size || Math.abs(st.mtimeMs - id.mtimeMs) >= 1) {
+    library.rescan(ref.root).catch(() => {});
+    throw new LibraryError(409, "library_file_changed", "This file changed since the Library last read it. SnapCon is reading it again; try again in a moment.");
+  }
+  const sha256 = id.sha256 || (await queueStore.computeFileHash(ref.fp)).sha256;
+  return { ...id, sha256 };
+}
+// What a queue item keeps of it: stable ids and names, never a folder path.
+const libraryQueueRef = id => ({ model: id.model, modelName: id.modelName, contentKey: id.contentKey, variantKey: id.variantKey, plate: id.plate, location: id.location });
+const libraryAudit = id => ({ model: id.model, modelName: id.modelName, location: String(id.location).split(":")[0], content: String(id.contentKey).slice(0, 16) });
 
 
 app.get("/api/printers", requireAuth, (req, res) => {
@@ -1312,8 +1397,9 @@ app.post("/api/files/upload", requireRegular, rawGcodeBody, async (req, res) => 
 });
 
 app.get("/api/map", requireAuth, async (req, res) => {
-  const fp = safePath(req.query.file);
   try {
+    const ref = await resolveFileRef(req.user, req.query.root, req.query.file);
+    const fp = ref && ref.fp;
     if (!fp || !(await fileExists(fp))) return res.status(404).json({ error: "File not found" });
     // A Bambu .3mf is a zip: its sliced gcode — with the ordinary header
     // comments this parser already reads — is one entry inside it. Read as
@@ -1359,15 +1445,16 @@ app.get("/api/map", requireAuth, async (req, res) => {
     }
     res.json(result);
   } catch (e) {
-    if (replyIfNasDown(res, e)) return;
+    if (replyFileRefError(res, e, req.query.root)) return;
     res.status(500).json({ error: e.message });
   }
 });
 
 // ---- Local gcode thumbnail (base64 PNG/JPG embedded by Orca in the header) ----
 app.get("/api/local-thumbnail", requireAuth, async (req, res) => {
-  const fp = safePath(req.query.file);
   try {
+    const ref = await resolveFileRef(req.user, req.query.root, req.query.file);
+    const fp = ref && ref.fp;
     if (!fp || !(await fileExists(fp))) return res.status(404).send("Not found");
     // A Bambu .3mf keeps its preview as a real PNG inside the archive rather
     // than base64 in a gcode comment.
@@ -1592,15 +1679,20 @@ async function decideUpload(p, name, localPath) {
 }
 
 app.post("/api/print", requireRegular, async (req, res) => {
-  const { file, printer, start, map, prefs } = req.body || {};
+  // root (M7, §12): the Library location the file is in; absent = the G-code
+  // folder. library: { key, plate } — the Variant chosen on a Model page.
+  const { file, printer, start, map, prefs, root, library: lib } = req.body || {};
   const p = PRINTERS[printer];
   if (!p) return res.status(400).json({ error: "Unknown printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer" });
   if (p.maintenanceMode) return res.status(409).json({ error: p.name + " is in maintenance mode — take it off maintenance before printing." });
-  const fp = safePath(file);
-  if (!fp) return res.status(404).json({ error: "File not found" });
-  try { if (!(await fileExists(fp))) return res.status(404).json({ error: "File not found" }); }
-  catch (e) { if (replyIfNasDown(res, e)) return; return res.status(500).json({ error: e.message }); }
+  let ref, ident = null;
+  try {
+    ref = await resolveFileRef(req.user, root, file);
+    if (!ref || !(await fileExists(ref.fp))) return res.status(404).json({ error: "File not found" });
+    if (lib) ident = await libraryPrintIdentity(ref, lib);
+  } catch (e) { if (replyFileRefError(res, e, root)) return; return res.status(500).json({ error: e.message }); }
+  const fp = ref.fp;
   // Before anything is uploaded: a file this printer could never start is
   // refused here rather than after a multi-megabyte transfer.
   const typeRefusal = fileTypeRefusal(getCapabilities(p.connector, p), path.basename(fp), p.name);
@@ -1656,18 +1748,20 @@ app.post("/api/print", requireRegular, async (req, res) => {
     let hash;
     try { hash = await queueStore.computeFileHash(fp); } catch { return false; }
     if (!hash) return false;
+    if (ident && hash.sha256 !== ident.sha256) return false;
     const result = queueStore.applyIntent(p.id, (state) => ({
       ...state,
       queue: [...state.queue, {
         id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: !!uploaded,
-        file: { ...queueFileRef(fp, FOLDER), sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
+        file: { ...queueFileRef(fp, ref.dir), ...(ref.root !== GCODE_ROOT ? { root: ref.root } : {}), sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
+        ...(ident ? { library: libraryQueueRef(ident) } : {}),
         map, prefs, createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
         queuedBy: actor, retryOfItemId: null, dispatchSnapshot: null
       }],
       updatedAt: Date.now()
     }));
     if (!result.ok) return false;
-    auditLog.log({ category: "job", event: "queue-item-added", ...actor, printerId: p.id, printerName: p.name, detail: { count: 1, viaLegacyUpload: true } });
+    auditLog.log({ category: "job", event: "queue-item-added", ...actor, printerId: p.id, printerName: p.name, detail: { count: 1, viaLegacyUpload: true, ...(ident ? { library: libraryAudit(ident) } : {}) } });
     return true;
   };
 
@@ -1698,6 +1792,10 @@ app.post("/api/print", requireRegular, async (req, res) => {
 
   (async () => {
     try {
+      // What the Library compares a plain send against (content_fp, §9): the
+      // file's size and modified time as it went out.
+      let sentStat = null;
+      if (start && !ident) { try { const s = await netfs.stat(fp); sentStat = { size: s.size, mtimeMs: s.mtimeMs }; } catch {} }
       if (plan.action === "skip") {
         job.skippedUpload = true;
         console.log(`[print] ${p.name}: "${name}" already on the printer, upload skipped`);
@@ -1738,7 +1836,17 @@ app.post("/api/print", requireRegular, async (req, res) => {
       job.result = { printer: p.name, started: !!start, mapped: tools.length };
       job.phase = "done"; job.done = true;
       if (start) ROUTE_STARTED_PRINT.add(p.url);
-      auditLog.log({ category: "job", event: start ? "print-started" : "file-uploaded", ...actor, printerId: p.id, printerName: p.name, detail: { file: name } });
+      const auditRef = auditLog.log({ category: "job", event: start ? "print-started" : "file-uploaded", ...actor, printerId: p.id, printerName: p.name,
+        detail: { file: name, ...(ident ? { library: libraryAudit(ident) } : {}) } });
+      // Print history (M7): this job, as the Variant chosen in the Library or
+      // as the file sent from where it is.
+      if (start) {
+        library.recordPrintStart({
+          jobKey: "print:" + jobId, printerId: p.id, printerName: p.name, remoteName: name, source: ident ? "library" : "send", via: "print",
+          user: actor, startedAt: Date.now(), auditRef, location: ref.root + ":" + relOf(ref), stat: sentStat,
+          library: ident ? { contentKey: ident.contentKey, plate: ident.plate, model: ident.model, variantKey: ident.variantKey, sha256: ident.sha256 } : null,
+        });
+      }
     } catch (e) {
       console.log(`[print] ${p.name}: FAILED at phase "${job.phase}" — ${e.message}`);
       job.error = e.message; job.done = true; job.phase = "error";
@@ -1841,7 +1949,10 @@ async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needs
     // Printing it is what "ready to print" was waiting for -- clear the badge.
     if (queuedFile.get(printerKey)?.name === filename) { queuedFile.delete(printerKey); saveQueuedFiles(); }
     ROUTE_STARTED_PRINT.add(p.url);
-    auditLog.log({ category: "job", event: "print-started", ...actor, printerId: p.id, printerName: p.name, detail: { file: filename } });
+    const auditRef = auditLog.log({ category: "job", event: "print-started", ...actor, printerId: p.id, printerName: p.name, detail: { file: filename } });
+    const startedAt = Date.now();
+    library.recordPrintStart({ jobKey: "printfile:" + p.id + ":" + startedAt, printerId: p.id, printerName: p.name, remoteName: filename,
+      source: "printer_storage", via: "print", user: actor, startedAt, auditRef });
     job.result = { printer: p.name, filename, mapped: tools.length };
     job.phase = "done"; job.done = true;
   } catch (e) {
@@ -2250,6 +2361,32 @@ function redactQueueStateForResponse(state) {
 // happens here, exactly once per claim, and records the real-world outcome
 // back through QueueEngine's Category-B functions (onDispatchSuccess/
 // Failure) via queueStore.applyObserved.
+// Does a Library location's folder answer at all? (A missing file inside one
+// that answers is a missing file; a folder that is not there is a location
+// that is offline or gone.)
+async function locationAnswers(dir) {
+  if (!dir) return false;
+  try { return await netfs.exists(dir); } catch { return false; }
+}
+
+// A queued file no longer where it was: the Library's other present copies of
+// the same content (by sha256), each hashed again now. The first identical one
+// is used; nothing is guessed from a name. null when there is none.
+async function relocateQueuedFile(item) {
+  if (!item.file.sha256) return null;
+  for (const c of library.locateContent(item.file.sha256)) {
+    try {
+      const ref = await resolveFileRef(null, c.rootId, c.rel, { system: true });
+      if (!ref || !(await fileExists(ref.fp))) continue;
+      const h = await queueStore.computeFileHash(ref.fp, { force: true });
+      if (h.sha256 !== item.file.sha256) continue;
+      console.log(`[queue] "${item.file.name}" moved: dispatching the identical file at ${c.rootId}:${c.rel}`);
+      return { fp: ref.fp, root: ref.root, rel: relOf(ref) };
+    } catch { /* unreachable or unreadable: try the next copy */ }
+  }
+  return null;
+}
+
 async function attemptQueueDispatch(printerId) {
   const p = PRINTERS.find(pr => pr.id === printerId);
   if (!p || !p.printerPoolId) return;
@@ -2261,17 +2398,39 @@ async function attemptQueueDispatch(printerId) {
   const idx = PRINTERS.indexOf(p);
   if (pendingLoad.has(idx)) return;
   if (!(await isPrinterIdle(p))) return;
-  // While the G-code folder is known to be unreachable nothing is claimed:
-  // the items wait in order and dispatch resumes on the first tick after the
-  // folder answers again. Only a shortcut — the forced check below still
-  // decides, because "online" is not proof the file is there.
-  if (netfs.availability(FOLDER).status !== "online") return;
+  // While the folder the next item is in is known to be unreachable nothing
+  // is claimed: the items wait in order and dispatch resumes on the first
+  // tick after it answers again. Only a shortcut — the forced check below
+  // still decides, because "online" is not proof the file is there. The next
+  // item's folder is the G-code folder, or the Library location it was
+  // queued from (M7, §12).
+  const next = queueStore.getPrinterState(printerId).queue[0];
+  const nextRoot = (next && next.file && next.file.root) || GCODE_ROOT;
+  let nextDir = FOLDER;
+  if (nextRoot !== GCODE_ROOT) {
+    try { nextDir = library.printLocation(null, nextRoot, { system: true }).path; }
+    catch (e) { if (e instanceof LibraryError && e.status === 503) return; nextDir = null; }   // offline: wait; removed or off: fails below
+  }
+  if (nextDir && netfs.availability(nextDir).status !== "online") return;
 
   const claim = queueStore.claimNextForDispatch(printerId);
   if (!claim.claimed) return;
   const item = claim.item;
   const c = getConnector(p.connector);
-  const fp = safePath((item.file.sub ? item.file.sub + "/" : "") + item.file.name);
+  const rel = (item.file.sub ? item.file.sub + "/" : "") + item.file.name;
+  let ref = null, fp = null, relocated = null;
+  try { ref = await resolveFileRef(null, item.file.root, rel, { system: true }); fp = ref && ref.fp; }
+  catch (e) {
+    if (e && (e.code === "NAS_UNREACHABLE" || (e instanceof LibraryError && e.status === 503))) {
+      queueStore.applyObserved(printerId, QueueEngine.onDispatchDeferred, item.id);
+      return;
+    }
+    if (!(e instanceof LibraryError)) throw e;
+    // The location was removed or switched off: like a missing file, the
+    // item waits for a person (the same attention state, with the reason).
+    queueStore.applyObserved(printerId, QueueEngine.onFileVerificationFailed, item.id, "missing", { code: "file-missing", message: e.message + " (" + item.file.name + ")" });
+    return;
+  }
 
   // Mandatory pre-dispatch file-identity check (design doc Part B/D6,
   // round-3 issue #4, round-4 issue #7) — forced, uncached hash, since this
@@ -2280,7 +2439,22 @@ async function attemptQueueDispatch(printerId) {
   let verified = false;
   try {
     if (!fp || !(await fileExists(fp))) {
-      queueStore.applyObserved(printerId, QueueEngine.onFileVerificationFailed, item.id, "missing", { code: "file-missing", message: "File no longer exists: " + item.file.name });
+      // A Library location that does not answer at all is offline, not a
+      // missing file (§12, M7): the item goes back to the front and waits,
+      // and the Library checks the location now. Once it is known offline
+      // nothing is claimed until it answers again.
+      if (nextRoot !== GCODE_ROOT && !(await locationAnswers(nextDir))) {
+        console.log(`[queue] ${p.name}: "${item.file.name}" not dispatched — its Library location does not answer; it stays first in the queue`);
+        library.rescan(nextRoot).catch(() => {});
+        queueStore.applyObserved(printerId, QueueEngine.onDispatchDeferred, item.id);
+        return;
+      }
+      // Moved (§12, M7): the same content, verified now by its full hash, at
+      // another place the Library knows. Dispatched from there and recorded
+      // as such; anything else waits for a person.
+      relocated = await relocateQueuedFile(item);
+      if (relocated) { fp = relocated.fp; verified = true; }
+      else queueStore.applyObserved(printerId, QueueEngine.onFileVerificationFailed, item.id, "missing", { code: "file-missing", message: "File no longer exists: " + item.file.name });
     } else {
       const hash = await queueStore.computeFileHash(fp, { force: true });
       if (hash.sha256 !== item.file.sha256) {
@@ -2329,7 +2503,15 @@ async function attemptQueueDispatch(printerId) {
     // Same dedup convention /api/print already uses — notifyTick's own
     // newJob detection would otherwise double-log this print's start.
     ROUTE_STARTED_PRINT.add(p.url);
-    auditLog.log({ category: "job", event: "queue-print-started", printerId: p.id, printerName: p.name, detail: { file: name, retryOf: item.retryOfItemId || undefined } });
+    const auditRef = auditLog.log({ category: "job", event: "queue-print-started", printerId: p.id, printerName: p.name,
+      detail: { file: name, retryOf: item.retryOfItemId || undefined, ...(item.library ? { library: libraryAudit(item.library) } : {}), ...(relocated ? { relocated: { from: item.file.root || GCODE_ROOT, to: relocated.root } } : {}) } });
+    // Print history (M7): the queued Variant, or the queue's verified hash.
+    library.recordPrintStart({
+      jobKey: "queue:" + item.id, printerId: p.id, printerName: p.name, remoteName: name, source: item.library ? "library" : "queue", via: "queue",
+      queueItemId: item.id, user: item.queuedBy || null, startedAt: Date.now(), auditRef, sha256: item.file.sha256,
+      location: relocated ? relocated.root + ":" + relocated.rel : (item.file.root || GCODE_ROOT) + ":" + rel,
+      library: item.library ? { contentKey: item.library.contentKey, plate: item.library.plate, model: item.library.model, variantKey: item.library.variantKey, sha256: item.file.sha256 } : null,
+    });
   } catch (e) {
     queueStore.applyObserved(printerId, QueueEngine.onDispatchFailure, item.id, { code: "dispatch-error", message: e.message });
     auditLog.log({ category: "job", event: "queue-dispatch-failed", printerId: p.id, printerName: p.name, detail: { file: name, error: e.message } });
@@ -4584,6 +4766,29 @@ app.get("/api/queue/:printerId", requireAuth, (req, res) => {
   res.json({ printerId: p.id, printerPoolId: p.printerPoolId || null, ...redactQueueStateForResponse(queueStore.getPrinterState(p.id)) });
 });
 
+// One file of a queue request (M7, §12): resolved in its location, hashed,
+// and — when it was chosen on a Library Model page — checked to still be that
+// Variant. null when it answered the request with the reason.
+async function resolveQueuedFile(req, res, f, name, sub) {
+  const root = (f || {}).root;
+  let ref, hash, ident = null;
+  try {
+    ref = name ? await resolveFileRef(req.user, root, sub ? sub + "/" + name : name) : null;
+    if (!ref || !(await fileExists(ref.fp))) { res.status(400).json({ error: "File not found: " + name }); return null; }
+    if (f.library) ident = await libraryPrintIdentity(ref, f.library);
+    hash = await queueStore.computeFileHash(ref.fp);
+  } catch (e) {
+    if (replyFileRefError(res, e, root)) return null;
+    res.status(400).json({ error: "Could not read file: " + name });
+    return null;
+  }
+  if (ident && hash.sha256 !== ident.sha256) {
+    res.status(409).json({ error: "This file changed since the Library last read it. Reload the model and try again.", code: "library_file_changed" });
+    return null;
+  }
+  return { root: ref.root, hash, ident };
+}
+
 app.post("/api/queue/:printerId/items", requireRegular, async (req, res) => {
   const p = printerById(req.params.printerId);
   if (!p) return res.status(400).json({ error: "Unknown printer", code: "unknown_printer" });
@@ -4599,20 +4804,13 @@ app.post("/api/queue/:printerId/items", requireRegular, async (req, res) => {
     const name = String((f || {}).name || "").trim();
     const sub = String((f || {}).sub || "");
     const qty = Math.max(1, Math.min(50, parseInt(f.quantity, 10) || 1));
-    const fp = safePath(sub ? sub + "/" + name : name);
-    if (!name || !fp) return res.status(400).json({ error: "File not found: " + name });
-    let hash;
-    try {
-      if (!(await fileExists(fp))) return res.status(400).json({ error: "File not found: " + name });
-      hash = await queueStore.computeFileHash(fp);
-    } catch (e) {
-      if (replyIfNasDown(res, e)) return;
-      return res.status(400).json({ error: "Could not read file: " + name });
-    }
+    const r = await resolveQueuedFile(req, res, f, name, sub);
+    if (!r) return;
     for (let i = 0; i < qty; i++) {
       items.push({
         id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: false,
-        file: { name, sub, sizeBytes: hash.sizeBytes, sha256: hash.sha256 },
+        file: { name, sub, ...(r.root !== GCODE_ROOT ? { root: r.root } : {}), sizeBytes: r.hash.sizeBytes, sha256: r.hash.sha256 },
+        ...(r.ident ? { library: libraryQueueRef(r.ident) } : {}),
         map: f.map || {}, prefs: f.prefs || {},
         createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
         queuedBy: actor, retryOfItemId: null, dispatchSnapshot: null
@@ -4622,7 +4820,8 @@ app.post("/api/queue/:printerId/items", requireRegular, async (req, res) => {
 
   const result = queueStore.applyIntent(p.id, (state) => ({ ...state, queue: [...state.queue, ...items], updatedAt: Date.now() }));
   if (!result.ok) return res.status(503).json({ error: "Could not save the queue right now — " + (result.reason || "unknown error"), code: "queue_save_failed", detail: result.reason || null });
-  auditLog.log({ category: "job", event: "queue-item-added", ...actor, printerId: p.id, printerName: p.name, detail: { count: items.length } });
+  const libs = items.filter(i => i.library).map(i => libraryAudit(i.library));
+  auditLog.log({ category: "job", event: "queue-item-added", ...actor, printerId: p.id, printerName: p.name, detail: { count: items.length, ...(libs.length ? { library: libs[0] } : {}) } });
   if (b.startImmediately) attemptQueueDispatch(p.id).catch(e => console.error("[queue] immediate dispatch error:", e.message));
   res.json({ ok: true, added: items.length, state: redactQueueStateForResponse(result.nextState) });
 });
@@ -4850,23 +5049,16 @@ app.post("/api/queue/send", requireRegular, async (req, res) => {
     const name = String((f || {}).name || "").trim();
     const sub = String((f || {}).sub || "");
     const qty = Math.max(1, Math.min(50, parseInt(f.quantity, 10) || 1));
-    const fp = safePath(sub ? sub + "/" + name : name);
-    if (!name || !fp) return res.status(400).json({ error: "File not found: " + name });
-    let hash;
-    try {
-      if (!(await fileExists(fp))) return res.status(400).json({ error: "File not found: " + name });
-      hash = await queueStore.computeFileHash(fp);
-    } catch (e) {
-      if (replyIfNasDown(res, e)) return;
-      return res.status(400).json({ error: "Could not read file: " + name });
-    }
-    resolved.push({ name, sub, qty, sizeBytes: hash.sizeBytes, sha256: hash.sha256, map: f.map || {}, prefs: f.prefs || {} });
+    const r = await resolveQueuedFile(req, res, f, name, sub);
+    if (!r) return;
+    resolved.push({ name, sub, root: r.root, qty, sizeBytes: r.hash.sizeBytes, sha256: r.hash.sha256, ident: r.ident, map: f.map || {}, prefs: f.prefs || {} });
   }
 
   const actor = actorFromReq(req);
   const makeItem = (f) => ({
     id: QueueEngine.newQueueItemId(), status: "queued", alreadyUploaded: false,
-    file: { name: f.name, sub: f.sub, sizeBytes: f.sizeBytes, sha256: f.sha256 },
+    file: { name: f.name, sub: f.sub, ...(f.root !== GCODE_ROOT ? { root: f.root } : {}), sizeBytes: f.sizeBytes, sha256: f.sha256 },
+    ...(f.ident ? { library: libraryQueueRef(f.ident) } : {}),
     map: f.map, prefs: f.prefs, createdAt: Date.now(), dispatchedAt: null, finishedAt: null,
     queuedBy: actor, retryOfItemId: null, dispatchSnapshot: null
   });
@@ -4887,7 +5079,8 @@ app.post("/api/queue/send", requireRegular, async (req, res) => {
     return updates;
   });
   if (!result.ok) return res.status(503).json({ error: "Could not save the queue right now", code: "queue_save_failed" });
-  auditLog.log({ category: "job", event: "queue-bulk-send", ...actor, detail: { poolId, mode, fileCount: resolved.length, totalItems: expanded.length, printerCount: targetPrinters.length } });
+  const libs = resolved.filter(f => f.ident).map(f => libraryAudit(f.ident));
+  auditLog.log({ category: "job", event: "queue-bulk-send", ...actor, detail: { poolId, mode, fileCount: resolved.length, totalItems: expanded.length, printerCount: targetPrinters.length, ...(libs.length ? { library: libs } : {}) } });
   if (b.startImmediately) targetPrinters.forEach(p => attemptQueueDispatch(p.id).catch(e => console.error("[queue] bulk-send dispatch error:", e.message)));
   res.json({ ok: true, printers: targetPrinters.map(p => p.id), totalItems: expanded.length });
 });
@@ -5175,7 +5368,11 @@ async function notifyTick() {
     // directly on the printer's own screen.
     if (newJob) {
       if (!ROUTE_STARTED_PRINT.delete(p.url)) {
-        auditLog.log({ category: "job", event: "print-started", printerId: p.id, printerName: p.name, detail: { file: st.filename } });
+        const auditRef = auditLog.log({ category: "job", event: "print-started", printerId: p.id, printerName: p.name, detail: { file: st.filename } });
+        // Print history (M7): a job SnapCon did not start, linked by name.
+        const startedAt = Date.now();
+        library.recordPrintStart({ jobKey: "observed:" + p.id + ":" + startedAt, printerId: p.id, printerName: p.name, remoteName: st.filename || "",
+          source: "external", via: null, startedAt, auditRef });
       }
     } else if (st.state !== prev.state) {
       if (st.state === "complete") {
@@ -5195,6 +5392,7 @@ async function notifyTick() {
         const eCost = (CFG.electricityRate > 0 && hours) ? CFG.electricityRate * hours : 0;
         const costEst = (fCost + eCost) > 0 ? Math.round((fCost + eCost) * 100) / 100 : null;
         auditLog.log({ category: "job", event: "print-completed", printerId: p.id, printerName: p.name, detail: { file: st.filename, elapsedSec, filamentUsedMm, filamentGramsEst, costEst } });
+        library.recordPrintOutcome({ printerId: p.id, remoteName: st.filename, outcome: "completed", at: Date.now(), elapsedSec, filamentG: filamentGramsEst, costEst });
       } else if (st.state === "error" || st.state === "cancelled") {
         // A "cancelled" state can be the direct downstream result of a
         // printer error the 30s poll interval never caught as its own
@@ -5211,6 +5409,7 @@ async function notifyTick() {
         if (st.message) detail.reason = st.message;
         if (st.errorCode) detail.errorCode = st.errorCode;
         auditLog.log({ category: "job", event: "print-" + st.state, printerId: p.id, printerName: p.name, detail });
+        library.recordPrintOutcome({ printerId: p.id, remoteName: st.filename, outcome: st.state === "error" ? "failed" : "cancelled", at: Date.now() });
       }
     }
 
@@ -5682,6 +5881,10 @@ const httpServer = app.listen(PORT, () => {
   remoteAccess.startupInit().catch(e => console.error("[remote-access] startupInit failed:", e.message));
   reconcileQueuesOnStartup().catch(e => console.error("[queue] startup reconciliation failed:", e.message));
   library.start();
+  // Print history (M7, §9 D7): imported from the audit log a minute after
+  // start, once the Library worker is up. Every run adds only what no Print
+  // records yet, so this also fills in jobs from while the Library was down.
+  setTimeout(() => importPrintHistory().catch(e => console.error("[library] print history import failed:", e.message)), 60 * 1000).unref();
 });
 
 // Graceful shutdown — new to this codebase (previously nothing here handled

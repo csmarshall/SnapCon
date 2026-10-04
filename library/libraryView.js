@@ -26,6 +26,9 @@ function levelOf(r) {
     case "decision_unmatched": case "file_changed": case "unreadable_file": return "action";
     case "suggested_match": case "unknown_printer": case "missing_file": case "source_offline": case "source_may_match": return "review";
     case "ambiguous_grouping": return /^ambiguous:(generic|nested):/.test(r.subject_key) ? "info" : "review";
+    // M7: a print whose name fits several Models asks a person; one with a
+    // generic name ("Assembly") is only recorded, with the Models it could be.
+    case "unlinked_print": return r.confidence === "none" ? "info" : "review";
     default: return "info";   // folder_disagrees, possible_duplicate, empty_model
   }
 }
@@ -33,8 +36,13 @@ const LEVEL_RANK = { action: 0, review: 1, info: 2 };
 
 // Which Models an open Review Item is about: by uuid, by the content it
 // names, by the location it names, or by the files its Evidence lists.
-function attentionIndex(db) {
-  const reviews = db.prepare("SELECT * FROM review_items WHERE status = 'open' ORDER BY priority, kind, subject_key").all();
+// printerVisible(printerId): an item about a Print on a printer this person
+// may not see is not theirs to see at all (§9 D6).
+function attentionIndex(db, { printerVisible = () => true } = {}) {
+  const reviews = db.prepare(`SELECT r.*, p.printer_id AS print_printer, p.printer_name AS print_printer_name, p.remote_name AS print_file,
+      coalesce(p.started_at, p.ended_at) AS print_at
+    FROM review_items r LEFT JOIN prints p ON p.id = r.print_id WHERE r.status = 'open' ORDER BY r.priority, r.kind, r.subject_key`).all()
+    .filter(r => r.kind !== "unlinked_print" || (r.print_printer != null && printerVisible(r.print_printer)));
   const models = new Map(db.prepare("SELECT id, uuid, name FROM models WHERE merged_into IS NULL").all().map(m => [m.uuid, m]));
   const byKey = new Map(), byLoc = new Map();
   for (const f of db.prepare("SELECT root_id, rel_path, content_key, model_id FROM files WHERE entry_path = '' AND model_id IS NOT NULL").all()) {
@@ -50,6 +58,7 @@ function attentionIndex(db) {
     for (const l of [r.location, r.other_location]) if (l && byLoc.has(l)) ids.add(byLoc.get(l));
     const ev = json(r.evidence_json);
     if (ev && Array.isArray(ev.files)) for (const l of ev.files) if (byLoc.has(l)) ids.add(byLoc.get(l));
+    if (r.kind === "unlinked_print" && ev && Array.isArray(ev.candidates)) for (const c of ev.candidates) if (models.has(c.uuid)) ids.add(models.get(c.uuid).id);
     const item = { ...r, level: levelOf(r), evidence: ev, modelIds: [...ids] };
     for (const id of ids) { if (!perModel.has(id)) perModel.set(id, []); perModel.get(id).push(item); }
     return item;
@@ -120,7 +129,7 @@ const TYPES = {
 // person is never passed through.
 const { ftsQuery } = require("./searchTerms");
 
-function listModels(db, { q = "", family = "", root = "", type = "", material = "", attention = false, hidden = false, sort = "name", cursor = null, limit = 60 } = {}) {
+function listModels(db, { q = "", family = "", root = "", type = "", material = "", attention = false, hidden = false, sort = "name", cursor = null, limit = 60, printerVisible } = {}) {
   // A merged-away Model is never listed (its files are in the survivor); a
   // hidden one only when hidden Models are asked for (M6, recoverable).
   const where = ["m.merged_into IS NULL", hidden ? "m.hidden = 1" : "m.hidden = 0", "EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')"];
@@ -135,9 +144,8 @@ function listModels(db, { q = "", family = "", root = "", type = "", material = 
       WHERE upper(json_extract(j.value, '$.type')) = upper(?))`);
     args.push(material);
   }
-  let att = null;
+  const att = attentionIndex(db, { printerVisible });
   if (attention) {
-    att = attentionIndex(db);
     const ids = [...att.perModel.entries()].filter(([, rs]) => rs.some(r => r.level !== "info")).map(([id]) => id);
     where.push("m.id IN (SELECT value FROM json_each(?))"); args.push(JSON.stringify(ids));
   }
@@ -171,6 +179,8 @@ function cards(db, rows, att) {
       sum(f.role = 'sliced') AS sliced, sum(f.role = 'project') AS projects, sum(f.role = 'source') AS sources,
       sum(f.state = 'missing') AS missing, sum(f.state = 'unreadable') AS unreadable, group_concat(DISTINCT f.root_id) AS roots
     FROM files f WHERE f.entry_path = '' AND f.model_id IN (SELECT value FROM json_each(?)) GROUP BY f.model_id`).all(idsJson).map(r => [r.id, r]));
+  const printed = new Map(db.prepare("SELECT model_id, print_count, print_count_confirmed, print_count_filename, last_printed_at FROM model_stats WHERE model_id IN (SELECT value FROM json_each(?))")
+    .all(idsJson).map(r => [r.model_id, r]));
   const variants = new Map(db.prepare(`SELECT f.model_id AS id, count(*) AS n FROM variants v JOIN files f ON f.id = v.file_id
     WHERE f.entry_path = '' AND f.model_id IN (SELECT value FROM json_each(?)) GROUP BY f.model_id`).all(idsJson).map(r => [r.id, r.n]));
   const fams = new Map();
@@ -199,9 +209,13 @@ function cards(db, rows, att) {
       offline: offlineRoots.length ? (offlineRoots.length === rootIds.length ? "all" : "some") : null,
       missing: c.missing || 0, unreadable: c.unreadable || 0,
       attention: items.length ? { count: items.filter(i => i.level !== "info").length, info: items.filter(i => i.level === "info").length, level: worst } : null,
+      prints: printsOf(printed.get(r.id)),
     };
   });
 }
+
+// Print counts (§9 D10): everyone's, whichever printers ran them.
+const printsOf = s => (s && s.print_count ? { count: s.print_count, confirmed: s.print_count_confirmed, filename: s.print_count_filename, lastAt: s.last_printed_at } : null);
 
 // Facets for the filters, over the whole visible Library.
 function facets(db) {
@@ -257,7 +271,7 @@ function membershipOf(db, f, modelUuid) {
   return { kind: "single" };
 }
 
-function modelDetail(db, uuid) {
+function modelDetail(db, uuid, { printerVisible } = {}) {
   const m = db.prepare("SELECT * FROM models WHERE uuid = ?").get(uuid);
   if (!m) return null;
   // A merged Model answers with where it went, so an old link still lands.
@@ -266,7 +280,7 @@ function modelDetail(db, uuid) {
   const files = db.prepare(`SELECT f.*, ft.original AS title_original FROM files f LEFT JOIN file_titles ft ON ft.file_id = f.id
     WHERE f.model_id = ? ORDER BY f.entry_path != '', f.role, f.root_id, f.rel_path, f.entry_path`).all(m.id);
   const top = files.filter(f => !f.entry_path);
-  const att = attentionIndex(db);
+  const att = attentionIndex(db, { printerVisible });
   const where = f => ({ root: f.root_id, rootName: (roots.get(f.root_id) || {}).name || f.root_id, path: f.rel_path, name: f.name });
   const projectByFile = new Map(db.prepare(`SELECT * FROM projects WHERE file_id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(top.map(f => f.id))).map(p => [p.file_id, p]));
   const platesByProject = new Map();
@@ -296,9 +310,10 @@ function modelDetail(db, uuid) {
       profile: { printer: v.printer_settings_id || v.printer_model || null, print: v.print_settings_id || null },
       slicer: v.slicer || null, slicerVersion: v.slicer_version || null,
       filaments: fil, estSeconds: v.est_seconds, weightG: v.weight_g, copies: v.copies, colors: v.color_count, layerHeight: v.layer_height, nozzle: v.nozzle,
-      // Print/Queue go through the existing Send and Queue dialogs, which
-      // know only the G-code folder; other locations come with M7 (§12).
-      send: f.root_id !== "gcode" ? { ok: false, reason: "location" } : avail !== "ok" ? { ok: false, reason: avail } : { ok: true, path: f.rel_path },
+      // Print/Queue go through the existing Send and Queue dialogs, from any
+      // location (§12). SnapCon starts plate 1 of a project only.
+      send: avail !== "ok" ? { ok: false, reason: avail } : v.plate_no != null && v.plate_no !== 1 ? { ok: false, reason: "plate" }
+        : { ok: true, root: f.root_id, path: f.rel_path },
     });
   }
   const projects = top.filter(f => projectByFile.has(f.id) && !f.hidden).map(f => {
@@ -351,6 +366,7 @@ function modelDetail(db, uuid) {
     hiddenFiles: top.filter(f => f.hidden).map(f => fileView(f)),
     counts: { files: top.filter(f => !f.hidden).length, printables: printables.length, projects: projects.length, others: others.length, hidden: top.filter(f => f.hidden).length },
     printables, projects, others, suggestions, attention,
+    prints: printsOf(db.prepare("SELECT * FROM model_stats WHERE model_id = ?").get(m.id)),
     locations: [...new Set(top.map(f => f.root_id))].map(id => ({ id, name: (roots.get(id) || {}).name || id, offline: !!(roots.get(id) || {}).offline })),
   };
 }
@@ -390,6 +406,8 @@ function reviewView(r, att) {
       break;
     }
     case "possible_duplicate": Object.assign(detail, { basis: ev.basis }); break;
+    case "unlinked_print": Object.assign(detail, { file: ev.name || r.print_file, printer: r.print_printer_name || null, at: r.print_at || null, generic: !!ev.generic,
+      candidates: (ev.candidates || []).map(c => { const m = att.byUuid.get(c.uuid); return { uuid: c.uuid, name: m ? m.name : c.name, live: !!m }; }) }); break;
     case "decision_unmatched": case "file_changed": Object.assign(detail, { relation: ev.relation, lastSeenAt: ev.lastSeenAt || r.location }); break;
     default: break;
   }
@@ -397,16 +415,19 @@ function reviewView(r, att) {
     models: r.modelIds.map(model).filter(Boolean).slice(0, 8), modelCount: r.modelIds.length, detail, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 
-function attentionList(db) {
-  const att = attentionIndex(db);
+function attentionList(db, { printerVisible } = {}) {
+  const att = attentionIndex(db, { printerVisible });
   const items = att.items.map(i => reviewView(i, att)).sort((a, b) => (LEVEL_RANK[a.level] - LEVEL_RANK[b.level]) || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
   const counts = { action: 0, review: 0, info: 0 };
   for (const i of items) counts[i.level]++;
   return { counts, items };
 }
-function attentionCounts(db) {
+function attentionCounts(db, { printerVisible = () => true } = {}) {
   const counts = { action: 0, review: 0, info: 0 };
-  for (const r of db.prepare("SELECT kind, subject_key FROM review_items WHERE status = 'open'").all()) counts[levelOf(r)]++;
+  for (const r of db.prepare("SELECT r.kind, r.subject_key, r.confidence, p.printer_id FROM review_items r LEFT JOIN prints p ON p.id = r.print_id WHERE r.status = 'open'").all()) {
+    if (r.kind === "unlinked_print" && !(r.printer_id != null && printerVisible(r.printer_id))) continue;
+    counts[levelOf(r)]++;
+  }
   return counts;
 }
 

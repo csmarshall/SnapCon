@@ -128,7 +128,10 @@ test("queue: an item whose file could not be checked goes back to the front, unv
 test("queue dispatch: skips claiming while the folder is down, and an outage found by the check defers rather than fails", () => {
   const i = serverSrc.indexOf("async function attemptQueueDispatch(printerId) {");
   const fn = serverSrc.slice(i, serverSrc.indexOf("\n}\n", i));
-  const gate = fn.indexOf('if (netfs.availability(FOLDER).status !== "online") return;');
+  // M7: the folder is the next item's — the G-code folder, or the Library
+  // location it was queued from.
+  const gate = fn.indexOf('if (nextDir && netfs.availability(nextDir).status !== "online") return;');
+  assert.match(fn, /let nextDir = FOLDER;/, "the G-code folder unless the item names a Library location");
   const claim = fn.indexOf("queueStore.claimNextForDispatch(printerId)");
   assert.ok(gate > 0 && gate < claim, "the availability shortcut runs before anything is claimed");
   assert.match(fn, /await queueStore\.computeFileHash\(fp, \{ force: true \}\)/, "the forced identity check still runs every time");

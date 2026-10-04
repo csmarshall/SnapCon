@@ -186,6 +186,29 @@ test("acceptFileChange: records both the original expected hash and the accepted
   assert.equal(typeof requeued.file.replacementAcceptedAt, "number");
 });
 
+// M7: a retry dispatches from the Library location the item was queued from,
+// as the same Variant. Rebuilt without them, it looked in the G-code folder.
+test("a retry keeps the item's Library location and the Variant it was queued as", () => {
+  const library = { model: "m-1", modelName: "Beardie", contentKey: "k", variantKey: "k", plate: null, location: "nas:A/Beardie.gcode" };
+  const original = item("i1", { status: "failed", file: { name: "Beardie.gcode", sub: "A", root: "nas", sizeBytes: 100, sha256: "h" }, library });
+  const state = baseState({ queueState: "queue_attention_required", attentionReason: "dispatch-failed", currentItem: original });
+  const retry = E.resolveAttention(state, "retry").queue[0];
+  assert.equal(retry.file.root, "nas");
+  assert.equal(retry.file.sub, "A");
+  assert.deepEqual(retry.library, library);
+  const plain = E.resolveAttention(baseState({ queueState: "queue_attention_required", attentionReason: "dispatch-failed", currentItem: item("i2", { status: "failed" }) }), "retry").queue[0];
+  assert.equal("root" in plain.file, false, "a G-code folder item stays exactly as it was");
+  assert.equal("library" in plain, false);
+});
+
+test("accepting a changed file drops the Library Variant: it is different content now", () => {
+  const original = item("i1", { status: "dispatching", file: { name: "a.gcode", sub: "", root: "nas", sizeBytes: 100, sha256: "old" }, library: { model: "m-1", modelName: "Frog", contentKey: "old" } });
+  const next = E.acceptFileChange(baseState({ queueState: "queue_attention_required", attentionReason: "file-changed", currentItem: original }), { sizeBytes: 200, sha256: "new", actor: { userLabel: "alice" } });
+  assert.equal(next.queue[0].library, undefined);
+  assert.deepEqual(next.queue[0].libraryReplaced, { model: "m-1", modelName: "Frog" });
+  assert.equal(next.queue[0].file.root, "nas", "still the same place");
+});
+
 // ---- profile reassignment ----
 test("onPoolReassigned: clears pool-invalid attention, no-op for any other reason", () => {
   const invalid = baseState({ queueState: "queue_attention_required", attentionReason: "pool-invalid" });
