@@ -2153,7 +2153,9 @@ function wireUI(){
   // dashboard, clicking it again while open closes it — there's no separate
   // close/X button now that this is a full-page view, not a modal.
   $("queueBtn").addEventListener("click", ()=>{
-    if($("queueDashboard").classList.contains("show")) closeQueueDashboard();
+    // Back to Fleet re-renders at once, as cycleViewMode() does, rather than
+    // leaving the fleet empty until the next poll.
+    if($("queueDashboard").classList.contains("show")){ closeQueueDashboard(); renderFleet(); }
     else openQueueDashboard();
   });
   $("healthBtn").addEventListener("click", ()=>{
@@ -3067,10 +3069,11 @@ function openQueueDashboard(){
   // (the dedicated queueBtn, or the alternate-display cycle button when
   // configured to include Print Farm) — this is the one place both paths
   // funnel through, so the cycle button's own icon/title always reflects
-  // reality no matter how the dashboard got opened.
+  // reality no matter how the dashboard got opened. applyViewMode() (not a
+  // bare assignment) so the previous view's body class and Camera View
+  // sessions don't outlive it.
   VIEW_MODE='printfarm';
-  syncViewModeButtonIcon();
-  updateTopbarViewLabel();
+  applyViewMode();
   refreshQueueDashboard();
   if(!QUEUE_VIEW_TIMER) QUEUE_VIEW_TIMER=setInterval(refreshQueueDashboard, 5000);
 }
@@ -3080,8 +3083,8 @@ function closeQueueDashboard(){
   $("queueDashboard").classList.remove("show");
   document.querySelectorAll(".main > .sechead, .main > .jobcard, .main > .jobloading, #fleet-wrap").forEach(el=>el.style.display="");
   $("queueBtn").title=t("settings.tabs.queue");
-  if(VIEW_MODE==='printfarm'){ VIEW_MODE='regular'; syncViewModeButtonIcon(); }
-  updateTopbarViewLabel();
+  if(VIEW_MODE==='printfarm') VIEW_MODE='regular';
+  applyViewMode();
   // applyRoleUI() is the authority for filesBtn/gear/queueBtn/jobSend (role +
   // canAct() + whether Settings is open + Queue Management's own enablement)
   // — restoring those by hand here would regress a View-role user or a
