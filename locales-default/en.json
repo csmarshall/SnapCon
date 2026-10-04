@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 73,
+    "version": 74,
     "snapconVersion": "0.8.0",
     "updated": "2026-10-04"
   },
@@ -671,7 +671,9 @@
       "menu_aria": "Menu",
       "sheet_heat": "Heat printers",
       "view_heading": "View",
-      "next_done_in": "Next done in {time}"
+      "next_done_in": "Next done in {time}",
+      "brand_back_aria": "SnapCon, back to printers",
+      "brand_single_printer": "Showing a single printer"
     },
     "sort": {
       "option_none": "None",

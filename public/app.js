@@ -1054,6 +1054,9 @@ function applyFilesOpen(){
 // CSS mode like the other four — see openQueueDashboard()/closeQueueDashboard()
 // for how entering/leaving it is kept in sync with this same VIEW_MODE.
 let VIEW_MODE = 'regular'; // 'regular' | 'compact' | 'camera' | 'list' | 'printfarm'
+// The last fleet view (anything but Print farm), so the brand cell can
+// return there from the Queue dashboard. Kept by applyViewMode().
+let LAST_FLEET_VIEW = 'regular';
 const VIEW_NAME_KEYS = { compact:'global.topbar.view_name_compact', regular:'global.topbar.view_name_regular', camera:'global.topbar.view_name_camera', list:'global.topbar.view_name_list', printfarm:'global.topbar.view_name_printfarm' };
 // All four fleet display modes (regular, compact, camera, list) share the
 // same toolbar (status tabs, tag filter, checkbox multi-select, bulk
@@ -1065,6 +1068,7 @@ const VIEW_NAME_KEYS = { compact:'global.topbar.view_name_compact', regular:'glo
 // hidden outright while it's open regardless of this function's answer.
 function gridToolbarActive(){ return VIEW_MODE==='camera' || VIEW_MODE==='list' || VIEW_MODE==='regular' || VIEW_MODE==='compact'; }
 function applyViewMode(){
+  if(VIEW_MODE!=='printfarm') LAST_FLEET_VIEW=VIEW_MODE;
   // Camera View is the only view that holds live sessions; leaving it
   // (or entering any other) releases every one of them.
   if(VIEW_MODE!=='camera') closeAllCamRtc();
@@ -1100,6 +1104,40 @@ function chooseView(mode){
 }
 
 // ---- Top bar ----
+// Where a click on the brand cell ("back to printers") goes. Pure.
+// - single-printer link (/orca/<name>): nowhere;
+// - already on the fleet: just scroll it to the top;
+// - from Settings, Health, Library or the Queue dashboard: back to the
+//   fleet in the current view, or, coming from Print farm, the last fleet
+//   view (Full if there was none).
+function brandTarget(s){
+  if(s.deepLink) return { action:'none' };
+  const fromPrintFarm = s.queueOpen || s.viewMode==='printfarm';
+  if(!fromPrintFarm && !s.settingsOpen && !s.healthOpen && !s.libraryOpen) return { action:'scrollTop' };
+  const fleetViews=['regular','compact','camera','list'];
+  const view = fromPrintFarm ? (fleetViews.includes(s.lastFleetView) ? s.lastFleetView : 'regular')
+                             : (fleetViews.includes(s.viewMode) ? s.viewMode : 'regular');
+  return { action:'fleet', view, closeSettings:!!s.settingsOpen };
+}
+function goToFleetFromBrand(){
+  const target=brandTarget({
+    deepLink: !!URL_PRINTER_FILTER,
+    settingsOpen: $("setup").classList.contains("show"),
+    healthOpen: $("healthPage").classList.contains("show"),
+    libraryOpen: !!(window.LibraryPage && LibraryPage.isOpen()),
+    queueOpen: $("queueDashboard").classList.contains("show"),
+    viewMode: VIEW_MODE, lastFleetView: LAST_FLEET_VIEW,
+  });
+  if(target.action==='none') return;
+  closeTopbarPopup(false);
+  if(target.action==='scrollTop'){ $("fleet-wrap").scrollTop=0; return; }
+  // Settings closes the way its own cell's "Back" does.
+  if(target.closeSettings){ $("gear").click(); if($("setup").classList.contains("show")) return; }
+  // chooseView() closes Health, the Library and the Queue dashboard through
+  // their own close paths, then applies the view (which re-syncs the bar).
+  chooseView(target.view);
+}
+
 // Which cells show. Pure: state in, one boolean per cell out. Settings (and
 // first-run setup, which is Settings opened for you) hides the fleet
 // controls; the /orca/<name> single-printer deep link hides the ones that
@@ -1141,6 +1179,10 @@ function applyTopbarVisibility(){
     signedIn: !!(USERS_ENABLED && CURRENT_USER),
   });
   for(const [key,ids] of Object.entries(TB_CELLS)) for(const id of ids){ const el=$(id); if(el) el.hidden=!vis[key]; }
+  // The brand is "back to printers", which means nothing on the
+  // single-printer link: disabled there, with the reason as its title.
+  const brand=$("tbBrandBtn");
+  if(brand){ brand.disabled=!!URL_PRINTER_FILTER; if(URL_PRINTER_FILTER) brand.title=t("global.topbar.brand_single_printer"); else brand.removeAttribute("title"); }
   // A menu whose cell just went away closes with it.
   if(TB_POPUP && TB_POPUP.btn.closest("[hidden]")) closeTopbarPopup(false);
 }
@@ -1267,6 +1309,7 @@ function wireTopbarPopups(){
   new ResizeObserver(()=>{ if(TB_POPUP && TB_POPUP.btn.offsetParent===null) closeTopbarPopup(false); }).observe($("topbar"));
   wireTopbarSearch();
   wireTopbarSheet();
+  $("tbBrandBtn").addEventListener("click", goToFleetFromBrand);
 }
 
 // Tablet and narrower: search is a magnifier until tapped. It stays open

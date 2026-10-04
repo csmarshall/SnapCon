@@ -77,13 +77,14 @@
        applyTopbarVisibility() in app.js; which one is active, in
        syncTopbarActive(). -->
   <div class="topbar" id="topbar">
-    <div class="tb-cell tb-brand">
+    <!-- The brand is "back to printers" (goToFleetFromBrand()). -->
+    <button type="button" class="tb-cell tb-brand" id="tbBrandBtn" data-i18n-aria-label="global.topbar.brand_back_aria" aria-label="SnapCon, back to printers">
       <svg class="tb-logo" width="21" height="21" aria-hidden="true"><use href="#tb-logo"/></svg>
       <span class="tb-brand-text">
         <span class="tb-name">Snap<span class="tb-name-con">Con</span></span>
         <span class="vbadge" id="vbadge"></span>
       </span>
-    </div>
+    </button>
     <button class="tb-cell" id="filesBtn" data-i18n-title="global.topbar.files_show_title" title="Show file list" data-i18n-aria-label="global.topbar.files_alt" aria-label="Files"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-files"/></svg><span class="tb-label" data-i18n="global.topbar.files_alt">Files</span></button>
     <div class="tb-wrap" id="tbViewWrap">
       <button class="tb-cell" id="viewBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu" data-i18n-title="global.topbar.view_button_title" title="Choose view"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-view"/></svg><span class="tb-word" data-i18n="global.topbar.view_prefix">View:</span><span class="tb-value" id="viewValue"></span><svg class="tb-caret" width="8" height="8" aria-hidden="true"><use href="#tb-caret"/></svg></button>

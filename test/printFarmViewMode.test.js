@@ -58,7 +58,7 @@ function load(startMode) {
   };
   vm.createContext(sandbox);
   vm.runInContext(
-    "var VIEW_MODE=" + JSON.stringify(startMode) + "; var QUEUE_VIEW_TIMER=null; var CAM_TAB='all'; var CAM_TAG_FILTER='';\n" +
+    "var VIEW_MODE=" + JSON.stringify(startMode) + "; var LAST_FLEET_VIEW='regular'; var QUEUE_VIEW_TIMER=null; var CAM_TAB='all'; var CAM_TAG_FILTER='';\n" +
     ["gridToolbarActive", "applyViewMode", "openQueueDashboard", "closeQueueDashboard"].map(fnSource).join("\n"),
     sandbox
   );

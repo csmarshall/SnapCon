@@ -4,7 +4,8 @@
 //   topbarActiveCells()  which cell looks active for each page, menu and the
 //                        file list (the design mockup left a cell active after
 //                        another page took over);
-//   fleetStatusSummary() the fleet-wide status pills and "next done".
+//   fleetStatusSummary() the fleet-wide status pills and "next done";
+//   brandTarget()        where a click on the brand ("back to printers") goes.
 //
 // Each is loaded from public/app.js into a sandbox.
 const test = require("node:test");
@@ -20,7 +21,7 @@ function fnSource(name) {
   return m[0];
 }
 const sandbox = vm.createContext({});
-vm.runInContext(["topbarVisibility", "topbarActiveCells", "camBucket", "printRemaining", "fleetStatusSummary"].map(fnSource).join("\n"), sandbox);
+vm.runInContext(["topbarVisibility", "topbarActiveCells", "camBucket", "printRemaining", "fleetStatusSummary", "brandTarget"].map(fnSource).join("\n"), sandbox);
 const call = (name, arg) => JSON.parse(JSON.stringify(vm.runInContext(name, sandbox)(arg)));
 
 const shown = vis => Object.keys(vis).filter(k => vis[k]).sort();
@@ -130,6 +131,34 @@ test("next done is the soonest estimate the time-remaining sort can make", () =>
 test("nothing printing: no next done", () => {
   assert.equal(call("fleetStatusSummary", [printer({}), printer({ online: false })]).nextDone, null);
   assert.equal(call("fleetStatusSummary", []).nextDone, null);
+});
+
+// ---- the brand: "back to printers" ----
+
+const where = { deepLink: false, settingsOpen: false, healthOpen: false, libraryOpen: false, queueOpen: false, viewMode: "regular", lastFleetView: "regular" };
+const brand = s => call("brandTarget", { ...where, ...s });
+
+test("from a page, the brand goes back to the fleet in the current view", () => {
+  assert.deepEqual(brand({ healthOpen: true, viewMode: "camera" }), { action: "fleet", view: "camera", closeSettings: false });
+  assert.deepEqual(brand({ libraryOpen: true, viewMode: "list" }), { action: "fleet", view: "list", closeSettings: false });
+  assert.deepEqual(brand({ settingsOpen: true, viewMode: "compact" }), { action: "fleet", view: "compact", closeSettings: true },
+    "Settings closes the way its own Back does");
+});
+
+test("from Print farm, the brand returns to the last fleet view, or Full", () => {
+  assert.deepEqual(brand({ queueOpen: true, viewMode: "printfarm", lastFleetView: "list" }), { action: "fleet", view: "list", closeSettings: false });
+  assert.deepEqual(brand({ queueOpen: true, viewMode: "printfarm", lastFleetView: "printfarm" }).view, "regular",
+    "launched straight into Print farm: there is no earlier fleet view");
+  assert.deepEqual(brand({ queueOpen: true, viewMode: "printfarm", lastFleetView: undefined }).view, "regular");
+});
+
+test("already on the fleet, the brand only scrolls it to the top", () => {
+  for (const viewMode of ["regular", "compact", "camera", "list"]) assert.deepEqual(brand({ viewMode }), { action: "scrollTop" });
+});
+
+test("on the single-printer link the brand does nothing, whatever is open", () => {
+  assert.deepEqual(brand({ deepLink: true }), { action: "none" });
+  assert.deepEqual(brand({ deepLink: true, healthOpen: true, queueOpen: true, viewMode: "printfarm" }), { action: "none" });
 });
 
 // ---- the cell maps name real elements ----

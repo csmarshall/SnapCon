@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 73,
+    "version": 74,
     "snapconVersion": "0.8.0",
     "updated": "2026-10-04"
   },
@@ -671,7 +671,9 @@
       "menu_aria": "Menú",
       "sheet_heat": "Calentar impresoras",
       "view_heading": "Vista",
-      "next_done_in": "Próxima en terminar: {time}"
+      "next_done_in": "Próxima en terminar: {time}",
+      "brand_back_aria": "SnapCon, volver a las impresoras",
+      "brand_single_printer": "Mostrando una sola impresora"
     },
     "sort": {
       "option_none": "Ninguno",

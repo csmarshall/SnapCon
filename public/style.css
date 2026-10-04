@@ -961,7 +961,7 @@
   .tb-cell.is-active{background:var(--tb-active-bg); color:var(--tb-active-text); box-shadow:inset 0 -2px 0 var(--tb-accent);}
   .tb-cell.is-active .tb-word, .tb-cell.is-active .tb-value, .tb-cell.is-active .tb-label, .tb-cell.is-active .tb-caret{color:var(--tb-active-text);}
   @media (hover:hover) and (pointer:fine){
-    button.tb-cell:hover, .tb-search:hover{background:var(--tb-hover);}
+    button.tb-cell:not(:disabled):hover, .tb-search:hover{background:var(--tb-hover);}
     button.tb-cell.is-active:hover{background:var(--tb-active-bg);}
     .topbar .sort-opt:hover{background:var(--tb-hover); color:var(--tb-text);}
     .topbar .sort-opt[aria-checked="true"]:hover{background:var(--tb-active-bg); color:var(--tb-active-text);}
@@ -977,7 +977,9 @@
   .tb-value > span:not(.is-current){visibility:hidden;}
   .tb-caret{color:var(--tb-text-2);}
 
-  .tb-brand{gap:9px;}
+  .tb-brand{gap:9px; text-align:left;}
+  /* Single-printer link: the brand goes nowhere, so it doesn't look clickable. */
+  .tb-brand:disabled{cursor:default;}
   .tb-brand-text{display:flex; flex-direction:column; justify-content:center; gap:1px; line-height:1.1;}
   .tb-name{font-size:13.5px; font-weight:700; color:var(--tb-text); letter-spacing:-0.01em;}
   .tb-name-con{color:var(--tb-accent);}
