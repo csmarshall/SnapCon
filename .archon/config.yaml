@@ -1,0 +1,18 @@
+# Archon repo configuration for SnapCon
+# Global defaults live in ~/.archon/config.yaml; this file overrides them for this repo.
+
+# AI assistant used for workflow nodes in this repo
+assistant: claude
+
+worktree:
+  # Workflows run in isolated worktrees branched from here
+  baseBranch: main
+
+  # Git-ignored files copied from the main checkout into each new worktree.
+  # (Tracked files are already present; ".archon" is copied automatically.)
+  copyFiles:
+    - CLAUDE.md        # project engineering rules — workflow agents must see these
+    - docs/TODO.md     # cross-session backlog
+    - .claude          # project subagents (backend/connector/frontend/security/test reviewers) + skills
+    - config.json      # local fleet/printer config
+    - users.json       # local accounts (needed when usersEnabled is on)
