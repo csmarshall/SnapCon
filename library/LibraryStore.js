@@ -263,6 +263,18 @@ function createLibraryStore({ baseDir, now = Date.now, log = console, schema = S
       seedRoleDefaults(db);   // new capabilities get their role defaults; revoked ones stay allow=0
     } catch (e) {
       try { db.close(); } catch {}
+      // Damage the open probe did not reach (a page first read while preparing
+      // — measured on a real backup with one damaged page): the same recovery
+      // as at open, then prepare again. Once only: a second failure leaves the
+      // Library unavailable.
+      if (existed && isCorruption(e) && !state.recovery) {
+        const quarantined = quarantine();
+        const restored = restoreNewestBackup();
+        state.recovery = { at: now(), quarantined, restoredFrom: restored, fresh: !restored, error: e.message };
+        log.error(`[library] library.db was corrupt (${e.message}); quarantined as ${quarantined.join(", ")}; ` +
+          (restored ? "restored " + restored : "no usable backup, starting a new empty library"));
+        return open();
+      }
       return unavailable("cannot prepare library.db: " + e.message);
     }
     state.db = db; state.available = true; state.reason = null;

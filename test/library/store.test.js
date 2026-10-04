@@ -92,6 +92,29 @@ test("a corrupt database is quarantined and the newest good backup restored", ()
   b.close();
 });
 
+test("damage the open probe does not reach, found while preparing, is recovered the same way (M8)", () => {
+  // Measured on a copy of a real backup: one damaged page inside a database
+  // whose header and schema read fine — opening succeeded, preparing failed
+  // with "malformed", and the Library stayed unavailable beside a good backup.
+  const base = tmpBase();
+  const dbPath = path.join(base, "library-data", "library.db");
+  const a = open(base, { now: tick }); seed(a.db); a.close();
+  runBackup({ DatabaseSync, dbPath, backupsDir: path.join(base, "library-data", "backups"), reason: "nightly", now: tick });
+  // Damage the root page of the table preparing reads first (role defaults).
+  const d = new DatabaseSync(dbPath);
+  const page = d.prepare("SELECT rootpage FROM sqlite_schema WHERE name = 'permission_grants'").get().rootpage;
+  const size = d.prepare("PRAGMA page_size").get().page_size;
+  d.exec("PRAGMA journal_mode = DELETE"); d.close();
+  const fd = fs.openSync(dbPath, "r+"); fs.writeSync(fd, Buffer.alloc(size, 0x5a), 0, size, (page - 1) * size); fs.closeSync(fd);
+  const b = open(base, { now: tick });
+  assert.equal(b.available, true, b.reason);
+  assert.ok(b.recovery && b.recovery.restoredFrom, "restored from the good backup");
+  assert.match(b.recovery.error, /malformed|corrupt/i);
+  assert.equal(b.db.prepare("SELECT name FROM models").get().name, "Beardie");
+  assert.ok(fs.readdirSync(path.join(base, "library-data")).some(f => f.startsWith("library.db.corrupt-")), "the damaged file is kept");
+  b.close();
+});
+
 test("a corrupt database with no backup starts empty, says so, and keeps the corrupt file", () => {
   const base = tmpBase();
   fs.mkdirSync(path.join(base, "library-data"), { recursive: true });
