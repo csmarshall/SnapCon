@@ -73,6 +73,107 @@
   </div>
 </div>
 <div class="shell">
+  <!-- Top bar: one row of cells. Which cells show is decided in one place,
+       applyTopbarVisibility() in app.js; which one is active, in
+       syncTopbarActive(). -->
+  <div class="topbar" id="topbar">
+    <div class="tb-cell tb-brand">
+      <svg class="tb-logo" width="21" height="21" aria-hidden="true"><use href="#tb-logo"/></svg>
+      <span class="tb-brand-text">
+        <span class="tb-name">Snap<span class="tb-name-con">Con</span></span>
+        <span class="vbadge" id="vbadge"></span>
+      </span>
+    </div>
+    <button class="tb-cell" id="filesBtn" data-i18n-title="global.topbar.files_show_title" title="Show file list" data-i18n-aria-label="global.topbar.files_alt" aria-label="Files"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-files"/></svg><span class="tb-label" data-i18n="global.topbar.files_alt">Files</span></button>
+    <div class="tb-wrap" id="tbViewWrap">
+      <button class="tb-cell" id="viewBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu" data-i18n-title="global.topbar.view_button_title" title="Choose view"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-view"/></svg><span class="tb-word" data-i18n="global.topbar.view_prefix">View:</span><span class="tb-value" id="viewValue"></span><svg class="tb-caret" width="8" height="8" aria-hidden="true"><use href="#tb-caret"/></svg></button>
+      <div class="sort-menu left tb-menu" id="viewMenu" role="menu" data-i18n-aria-label="global.topbar.view_menu_aria" aria-label="View">
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="compact"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_compact">Compact</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="regular"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_regular">Full</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="camera"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_camera">Camera</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="list"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_list">List</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="printfarm"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_printfarm">Print farm</span></button>
+      </div>
+    </div>
+    <div class="tb-wrap sort-wrap" id="tbSortWrap">
+      <button class="tb-cell" id="sortBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="sortMenu" data-i18n-title="global.topbar.sort_button_title" title="Sort printers"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-sort"/></svg><span class="tb-word" data-i18n="global.topbar.sort_prefix">Sort:</span><span class="tb-value" id="sortValue"></span><svg class="tb-caret" width="8" height="8" aria-hidden="true"><use href="#tb-caret"/></svg></button>
+      <div class="sort-menu left tb-menu" id="sortMenu" role="menu" data-i18n-aria-label="global.topbar.sort_menu_aria" aria-label="Sort">
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="none"><span class="sort-check" id="sc-none"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_none">No sort</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="status"><span class="sort-check" id="sc-status"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_status">By status</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="time"><span class="sort-check" id="sc-time"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_time">By time remaining</span></button>
+      <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="name"><span class="sort-check" id="sc-name"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_name">By name</span></button>
+      </div>
+    </div>
+    <button class="tb-cell tb-health" id="healthBtn" data-i18n-title="global.topbar.health_title" title="Printer health" data-i18n-aria-label="global.topbar.health_title" aria-label="Printer health"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-health"/></svg><span class="tb-label" data-i18n="global.topbar.health_label">Health</span><span class="health-badge" id="healthBadge" style="display:none"></span></button>
+    <button class="tb-cell" id="bulkHeatBtn" data-i18n-title="global.topbar.bulk_heat_title" title="Heat multiple printers" data-i18n-aria-label="global.topbar.bulk_heat_title" aria-label="Heat multiple printers"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-heat"/></svg><span class="tb-label" data-i18n="global.topbar.heat_alt">Heat</span></button>
+    <!-- Shown only when Queue Management is enabled. -->
+    <button class="tb-cell" id="queueBtn" data-i18n-title="settings.tabs.queue" title="Queue Management" data-i18n-aria-label="settings.tabs.queue" aria-label="Queue Management" hidden><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-queue"/></svg><span class="tb-label" data-i18n="global.topbar.queue_label">Queue</span></button>
+    <button class="tb-cell" id="libraryBtn" data-i18n-title="library.title" title="Library" data-i18n-aria-label="library.title" aria-label="Library" aria-pressed="false"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-library"/></svg><span class="tb-label" data-i18n="library.title">Library</span></button>
+    <!-- Tablet and narrower: search collapses to this magnifier. -->
+    <button class="tb-cell tb-icon-only tb-search-btn" id="tbSearchBtn" aria-controls="fleetSearch" aria-expanded="false" data-i18n-aria-label="global.topbar.fleet_search_aria" aria-label="Search printers" data-i18n-title="global.topbar.fleet_search_aria" title="Search printers"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-search-btn"/></svg></button>
+    <label class="tb-cell tb-search" id="tbSearchCell"><svg class="tb-search-glyph" width="15" height="15" aria-hidden="true"><use href="#tb-search"/></svg><input id="fleetSearch" class="fleet-search" data-i18n-placeholder="global.topbar.fleet_search_placeholder" placeholder="Search printers…" data-i18n-aria-label="global.topbar.fleet_search_aria" aria-label="Search printers" autocomplete="off"></label>
+    <div class="tb-right">
+      <!-- Fleet status: a plain readout while its pill words fit; once they
+           don't, the same content becomes a button that opens the status
+           popover. The box is a size container so it adapts to the space it
+           actually gets (see .tb-status-box). renderTopbarStatus() fills both. -->
+      <div class="tb-status-box" id="tbStatusBox">
+        <div class="tb-cell tb-status tb-status-plain" id="tbStatusPlain"></div>
+        <div class="tb-wrap tb-status-wrap" id="tbStatusWrap">
+          <button class="tb-cell tb-status" id="tbStatusBtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="tbStatusPop"></button>
+          <div class="sort-menu tb-menu tb-status-pop" id="tbStatusPop" role="dialog" data-i18n-aria-label="global.topbar.status_aria" aria-label="Fleet status"></div>
+        </div>
+      </div>
+      <span class="tb-cell tb-sitename topbar-sitename" id="topbarSiteName" style="display:none"></span>
+      <!-- One glyph in both themes; syncThemeButton() keeps the title/aria. -->
+      <button class="tb-cell tb-icon-only" id="themeBtn" title="Switch to light theme" aria-label="Light theme" aria-pressed="false"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-theme"/></svg></button>
+      <button class="tb-cell tb-icon-only" id="gear" data-i18n-title="settings.title" title="Settings" aria-label="Settings"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-gear"/></svg></button>
+      <div class="tb-user user-badge" id="userBadge" hidden>
+        <div class="tb-cell tb-locale"><select class="topbar-locale-select" id="topbarLocale" data-i18n-title="settings.view.my_language_short" title="My language" data-i18n-aria-label="settings.view.my_language_short" aria-label="My language"></select></div>
+        <button class="tb-cell tb-icon-only" id="logoutBtn" title="Logout" data-i18n-aria-label="global.topbar.logout_title" aria-label="Logout"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-logout"/></svg></button>
+      </div>
+      <div class="tb-cell tb-clock" id="topbarClock"><span class="tb-time" id="topbarTime"></span><span class="tb-date" id="topbarDate"></span></div>
+      <!-- Narrow and Phone: the cells that leave the bar live in the menu sheet. -->
+      <button class="tb-cell tb-icon-only tb-menu-btn" id="tbMenuBtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="tbSheet" data-i18n-aria-label="global.topbar.menu_aria" aria-label="Menu" data-i18n-title="global.topbar.menu_aria" title="Menu"><svg class="tb-icon" width="18" height="18" aria-hidden="true"><use href="#tb-menu"/></svg><span class="health-badge tb-menu-badge" id="tbMenuBadge" style="display:none"></span></button>
+    </div>
+    <div class="tb-scrim" id="tbScrim"></div>
+    <div class="tb-sheet" id="tbSheet" role="dialog" data-i18n-aria-label="global.topbar.menu_aria" aria-label="Menu">
+      <div class="tb-sheet-status" id="tbSheetStatus"></div>
+      <div class="tb-sheet-pages">
+        <button class="tb-sheet-row" id="tbSheetFiles" data-for="filesBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-files"/></svg><span data-i18n="global.topbar.files_alt">Files</span></button>
+        <button class="tb-sheet-row tb-sheet-phone" id="tbSheetHealth" data-for="healthBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-health"/></svg><span data-i18n="global.topbar.health_label">Health</span><span class="tb-sheet-count" id="tbSheetHealthCount" style="display:none"></span></button>
+        <button class="tb-sheet-row" id="tbSheetHeat" data-for="bulkHeatBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-heat"/></svg><span data-i18n="global.topbar.sheet_heat">Heat printers</span></button>
+        <button class="tb-sheet-row" id="tbSheetQueue" data-for="queueBtn" hidden><svg width="17" height="17" aria-hidden="true"><use href="#tb-queue"/></svg><span data-i18n="global.topbar.queue_label">Queue</span></button>
+        <button class="tb-sheet-row" id="tbSheetLibrary" data-for="libraryBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-library"/></svg><span data-i18n="library.title">Library</span></button>
+        <button class="tb-sheet-row" id="tbSheetSettings" data-for="gear"><svg width="17" height="17" aria-hidden="true"><use href="#tb-gear"/></svg><span data-i18n="settings.title">Settings</span></button>
+      </div>
+      <div class="tb-sheet-seg tb-sheet-phone" id="tbSheetView">
+        <span class="tb-sheet-label" id="tbSheetViewLabel" data-i18n="global.topbar.view_heading">View</span>
+        <div class="tb-seg" role="radiogroup" aria-labelledby="tbSheetViewLabel">
+          <button role="radio" aria-checked="false" data-view="compact" data-i18n="global.topbar.view_name_compact">Compact</button>
+          <button role="radio" aria-checked="false" data-view="regular" data-i18n="global.topbar.view_name_regular">Full</button>
+          <button role="radio" aria-checked="false" data-view="camera" data-i18n="global.topbar.view_name_camera">Camera</button>
+          <button role="radio" aria-checked="false" data-view="list" data-i18n="global.topbar.view_name_list">List</button>
+          <button role="radio" aria-checked="false" data-view="printfarm" data-i18n="global.topbar.view_name_printfarm">Print farm</button>
+        </div>
+      </div>
+      <div class="tb-sheet-seg tb-sheet-phone" id="tbSheetSort">
+        <span class="tb-sheet-label" id="tbSheetSortLabel" data-i18n="global.topbar.sort_alt">Sort</span>
+        <div class="tb-seg" role="radiogroup" aria-labelledby="tbSheetSortLabel">
+          <button role="radio" aria-checked="false" data-sort="none" data-i18n="global.sort.option_none">None</button>
+          <button role="radio" aria-checked="false" data-sort="status" data-i18n="global.sort.option_status">Status</button>
+          <button role="radio" aria-checked="false" data-sort="time" data-i18n="global.sort.option_time">Time left</button>
+          <button role="radio" aria-checked="false" data-sort="name" data-i18n="global.sort.option_name">Name</button>
+        </div>
+      </div>
+      <div class="tb-sheet-util">
+        <button class="tb-sheet-util-btn" id="tbSheetTheme" aria-pressed="false"><svg width="16" height="16" aria-hidden="true"><use href="#tb-theme"/></svg><span id="tbSheetThemeLabel">Light theme</span></button>
+        <label class="tb-sheet-util-btn tb-sheet-lang" id="tbSheetLang"><span class="tb-sr" data-i18n="settings.view.my_language_short">My language</span><select class="topbar-locale-select" id="sheetLocale"></select></label>
+        <button class="tb-sheet-util-btn" id="tbSheetLogout"><svg width="16" height="16" aria-hidden="true"><use href="#tb-logout"/></svg><span data-i18n="global.topbar.logout_title">Logout</span></button>
+      </div>
+      <div class="tb-sheet-foot" id="tbSheetVersion"></div>
+    </div>
+  </div>
   <aside class="side">
     <div class="head">
       <div class="sort-wrap">
@@ -104,107 +205,6 @@
     <input type="file" id="uploadFilesInput" multiple accept=".gcode,.gco,.g,.gx,.3mf" style="display:none">
   </aside>
   <main class="main" id="main" tabindex="-1">
-    <!-- Top bar: one row of cells. Which cells show is decided in one place,
-         applyTopbarVisibility() in app.js; which one is active, in
-         syncTopbarActive(). -->
-    <div class="topbar" id="topbar">
-      <div class="tb-cell tb-brand">
-        <svg class="tb-logo" width="21" height="21" aria-hidden="true"><use href="#tb-logo"/></svg>
-        <span class="tb-brand-text">
-          <span class="tb-name">Snap<span class="tb-name-con">Con</span></span>
-          <span class="vbadge" id="vbadge"></span>
-        </span>
-      </div>
-      <button class="tb-cell" id="filesBtn" data-i18n-title="global.topbar.files_show_title" title="Show file list" data-i18n-aria-label="global.topbar.files_alt" aria-label="Files"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-files"/></svg><span class="tb-label" data-i18n="global.topbar.files_alt">Files</span></button>
-      <div class="tb-wrap" id="tbViewWrap">
-        <button class="tb-cell" id="viewBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu" data-i18n-title="global.topbar.view_button_title" title="Choose view"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-view"/></svg><span class="tb-word" data-i18n="global.topbar.view_prefix">View:</span><span class="tb-value" id="viewValue"></span><svg class="tb-caret" width="8" height="8" aria-hidden="true"><use href="#tb-caret"/></svg></button>
-        <div class="sort-menu left tb-menu" id="viewMenu" role="menu" data-i18n-aria-label="global.topbar.view_menu_aria" aria-label="View">
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="compact"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_compact">Compact</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="regular"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_regular">Full</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="camera"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_camera">Camera</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="list"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_list">List</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-view="printfarm"><span class="sort-check"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.topbar.view_name_printfarm">Print farm</span></button>
-        </div>
-      </div>
-      <div class="tb-wrap sort-wrap" id="tbSortWrap">
-        <button class="tb-cell" id="sortBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="sortMenu" data-i18n-title="global.topbar.sort_button_title" title="Sort printers"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-sort"/></svg><span class="tb-word" data-i18n="global.topbar.sort_prefix">Sort:</span><span class="tb-value" id="sortValue"></span><svg class="tb-caret" width="8" height="8" aria-hidden="true"><use href="#tb-caret"/></svg></button>
-        <div class="sort-menu left tb-menu" id="sortMenu" role="menu" data-i18n-aria-label="global.topbar.sort_menu_aria" aria-label="Sort">
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="none"><span class="sort-check" id="sc-none"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_none">No sort</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="status"><span class="sort-check" id="sc-status"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_status">By status</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="time"><span class="sort-check" id="sc-time"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_time">By time remaining</span></button>
-        <button class="sort-opt" role="menuitemradio" aria-checked="false" data-sort="name"><span class="sort-check" id="sc-name"><svg width="11" height="11" aria-hidden="true"><use href="#tb-check"/></svg></span><span data-i18n="global.sort.option_name">By name</span></button>
-        </div>
-      </div>
-      <button class="tb-cell tb-health" id="healthBtn" data-i18n-title="global.topbar.health_title" title="Printer health" data-i18n-aria-label="global.topbar.health_title" aria-label="Printer health"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-health"/></svg><span class="tb-label" data-i18n="global.topbar.health_label">Health</span><span class="health-badge" id="healthBadge" style="display:none"></span></button>
-      <button class="tb-cell" id="bulkHeatBtn" data-i18n-title="global.topbar.bulk_heat_title" title="Heat multiple printers" data-i18n-aria-label="global.topbar.bulk_heat_title" aria-label="Heat multiple printers"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-heat"/></svg><span class="tb-label" data-i18n="global.topbar.heat_alt">Heat</span></button>
-      <!-- Shown only when Queue Management is enabled. -->
-      <button class="tb-cell" id="queueBtn" data-i18n-title="settings.tabs.queue" title="Queue Management" data-i18n-aria-label="settings.tabs.queue" aria-label="Queue Management" hidden><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-queue"/></svg><span class="tb-label" data-i18n="global.topbar.queue_label">Queue</span></button>
-      <button class="tb-cell" id="libraryBtn" data-i18n-title="library.title" title="Library" data-i18n-aria-label="library.title" aria-label="Library" aria-pressed="false"><svg class="tb-icon" width="15" height="15" aria-hidden="true"><use href="#tb-library"/></svg><span class="tb-label" data-i18n="library.title">Library</span></button>
-      <!-- Tablet and narrower: search collapses to this magnifier. -->
-      <button class="tb-cell tb-icon-only tb-search-btn" id="tbSearchBtn" aria-controls="fleetSearch" aria-expanded="false" data-i18n-aria-label="global.topbar.fleet_search_aria" aria-label="Search printers" data-i18n-title="global.topbar.fleet_search_aria" title="Search printers"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-search-btn"/></svg></button>
-      <label class="tb-cell tb-search" id="tbSearchCell"><svg class="tb-search-glyph" width="15" height="15" aria-hidden="true"><use href="#tb-search"/></svg><input id="fleetSearch" class="fleet-search" data-i18n-placeholder="global.topbar.fleet_search_placeholder" placeholder="Search printers…" data-i18n-aria-label="global.topbar.fleet_search_aria" aria-label="Search printers" autocomplete="off"></label>
-      <div class="tb-right">
-        <!-- Fleet status: a plain readout while its pill words fit; once they
-             don't, the same content becomes a button that opens the status
-             popover. The box is a size container so it adapts to the space it
-             actually gets (see .tb-status-box). renderTopbarStatus() fills both. -->
-        <div class="tb-status-box" id="tbStatusBox">
-          <div class="tb-cell tb-status tb-status-plain" id="tbStatusPlain"></div>
-          <div class="tb-wrap tb-status-wrap" id="tbStatusWrap">
-            <button class="tb-cell tb-status" id="tbStatusBtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="tbStatusPop"></button>
-            <div class="sort-menu tb-menu tb-status-pop" id="tbStatusPop" role="dialog" data-i18n-aria-label="global.topbar.status_aria" aria-label="Fleet status"></div>
-          </div>
-        </div>
-        <span class="tb-cell tb-sitename topbar-sitename" id="topbarSiteName" style="display:none"></span>
-        <!-- One glyph in both themes; syncThemeButton() keeps the title/aria. -->
-        <button class="tb-cell tb-icon-only" id="themeBtn" title="Switch to light theme" aria-label="Light theme" aria-pressed="false"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-theme"/></svg></button>
-        <button class="tb-cell tb-icon-only" id="gear" data-i18n-title="settings.title" title="Settings" aria-label="Settings"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-gear"/></svg></button>
-        <div class="tb-user user-badge" id="userBadge" hidden>
-          <div class="tb-cell tb-locale"><select class="topbar-locale-select" id="topbarLocale" data-i18n-title="settings.view.my_language_short" title="My language" data-i18n-aria-label="settings.view.my_language_short" aria-label="My language"></select></div>
-          <button class="tb-cell tb-icon-only" id="logoutBtn" title="Logout" data-i18n-aria-label="global.topbar.logout_title" aria-label="Logout"><svg class="tb-icon" width="16" height="16" aria-hidden="true"><use href="#tb-logout"/></svg></button>
-        </div>
-        <div class="tb-cell tb-clock" id="topbarClock"><span class="tb-time" id="topbarTime"></span><span class="tb-date" id="topbarDate"></span></div>
-        <!-- Narrow and Phone: the cells that leave the bar live in the menu sheet. -->
-        <button class="tb-cell tb-icon-only tb-menu-btn" id="tbMenuBtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="tbSheet" data-i18n-aria-label="global.topbar.menu_aria" aria-label="Menu" data-i18n-title="global.topbar.menu_aria" title="Menu"><svg class="tb-icon" width="18" height="18" aria-hidden="true"><use href="#tb-menu"/></svg><span class="health-badge tb-menu-badge" id="tbMenuBadge" style="display:none"></span></button>
-      </div>
-      <div class="tb-scrim" id="tbScrim"></div>
-      <div class="tb-sheet" id="tbSheet" role="dialog" data-i18n-aria-label="global.topbar.menu_aria" aria-label="Menu">
-        <div class="tb-sheet-status" id="tbSheetStatus"></div>
-        <div class="tb-sheet-pages">
-          <button class="tb-sheet-row" id="tbSheetFiles" data-for="filesBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-files"/></svg><span data-i18n="global.topbar.files_alt">Files</span></button>
-          <button class="tb-sheet-row tb-sheet-phone" id="tbSheetHealth" data-for="healthBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-health"/></svg><span data-i18n="global.topbar.health_label">Health</span><span class="tb-sheet-count" id="tbSheetHealthCount" style="display:none"></span></button>
-          <button class="tb-sheet-row" id="tbSheetHeat" data-for="bulkHeatBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-heat"/></svg><span data-i18n="global.topbar.sheet_heat">Heat printers</span></button>
-          <button class="tb-sheet-row" id="tbSheetQueue" data-for="queueBtn" hidden><svg width="17" height="17" aria-hidden="true"><use href="#tb-queue"/></svg><span data-i18n="global.topbar.queue_label">Queue</span></button>
-          <button class="tb-sheet-row" id="tbSheetLibrary" data-for="libraryBtn"><svg width="17" height="17" aria-hidden="true"><use href="#tb-library"/></svg><span data-i18n="library.title">Library</span></button>
-          <button class="tb-sheet-row" id="tbSheetSettings" data-for="gear"><svg width="17" height="17" aria-hidden="true"><use href="#tb-gear"/></svg><span data-i18n="settings.title">Settings</span></button>
-        </div>
-        <div class="tb-sheet-seg tb-sheet-phone" id="tbSheetView">
-          <span class="tb-sheet-label" id="tbSheetViewLabel" data-i18n="global.topbar.view_heading">View</span>
-          <div class="tb-seg" role="radiogroup" aria-labelledby="tbSheetViewLabel">
-            <button role="radio" aria-checked="false" data-view="compact" data-i18n="global.topbar.view_name_compact">Compact</button>
-            <button role="radio" aria-checked="false" data-view="regular" data-i18n="global.topbar.view_name_regular">Full</button>
-            <button role="radio" aria-checked="false" data-view="camera" data-i18n="global.topbar.view_name_camera">Camera</button>
-            <button role="radio" aria-checked="false" data-view="list" data-i18n="global.topbar.view_name_list">List</button>
-            <button role="radio" aria-checked="false" data-view="printfarm" data-i18n="global.topbar.view_name_printfarm">Print farm</button>
-          </div>
-        </div>
-        <div class="tb-sheet-seg tb-sheet-phone" id="tbSheetSort">
-          <span class="tb-sheet-label" id="tbSheetSortLabel" data-i18n="global.topbar.sort_alt">Sort</span>
-          <div class="tb-seg" role="radiogroup" aria-labelledby="tbSheetSortLabel">
-            <button role="radio" aria-checked="false" data-sort="none" data-i18n="global.sort.option_none">None</button>
-            <button role="radio" aria-checked="false" data-sort="status" data-i18n="global.sort.option_status">Status</button>
-            <button role="radio" aria-checked="false" data-sort="time" data-i18n="global.sort.option_time">Time left</button>
-            <button role="radio" aria-checked="false" data-sort="name" data-i18n="global.sort.option_name">Name</button>
-          </div>
-        </div>
-        <div class="tb-sheet-util">
-          <button class="tb-sheet-util-btn" id="tbSheetTheme" aria-pressed="false"><svg width="16" height="16" aria-hidden="true"><use href="#tb-theme"/></svg><span id="tbSheetThemeLabel">Light theme</span></button>
-          <label class="tb-sheet-util-btn tb-sheet-lang" id="tbSheetLang"><span class="tb-sr" data-i18n="settings.view.my_language_short">My language</span><select class="topbar-locale-select" id="sheetLocale"></select></label>
-          <button class="tb-sheet-util-btn" id="tbSheetLogout"><svg width="16" height="16" aria-hidden="true"><use href="#tb-logout"/></svg><span data-i18n="global.topbar.logout_title">Logout</span></button>
-        </div>
-        <div class="tb-sheet-foot" id="tbSheetVersion"></div>
-      </div>
-    </div>
     <div class="setup" id="setup">
       <div class="sechead"><h2 data-i18n="settings.title">Settings</h2><span class="count" id="setupmsg"></span></div>
 
