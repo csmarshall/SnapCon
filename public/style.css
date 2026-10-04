@@ -36,6 +36,9 @@
     --tb-hover:rgba(255,255,255,0.05); --tb-menu:#1B1F27; --tb-menu-border:rgba(255,255,255,0.11);
     --tb-menu-shadow:0 14px 36px rgba(0,0,0,0.5); --tb-badge-text:#0F1218;
     --tb-scrim:rgba(0,0,0,0.5);
+    /* Scrollbars and native form controls follow the theme. */
+    color-scheme:dark;
+    --scroll-thumb:color-mix(in srgb, var(--ink-faint) 55%, transparent); --scroll-thumb-hover:var(--ink-faint);
     /* Not theme-dependent (font choice doesn't change with light/dark) —
        kept here only, not duplicated into the [data-theme] blocks below. */
     --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
@@ -77,6 +80,9 @@
     --tb-hover:rgba(255,255,255,0.05); --tb-menu:#1B1F27; --tb-menu-border:rgba(255,255,255,0.11);
     --tb-menu-shadow:0 14px 36px rgba(0,0,0,0.5); --tb-badge-text:#0F1218;
     --tb-scrim:rgba(0,0,0,0.5);
+    /* Scrollbars and native form controls follow the theme. */
+    color-scheme:dark;
+    --scroll-thumb:color-mix(in srgb, var(--ink-faint) 55%, transparent); --scroll-thumb-hover:var(--ink-faint);
   }
   [data-theme="light"]{
     --chassis:#EEF1F5; --panel:#FFFFFF; --panel-2:#F6F8FA;
@@ -112,6 +118,8 @@
     --tb-hover:rgba(23,26,29,0.04); --tb-menu:var(--panel); --tb-menu-border:var(--line);
     --tb-menu-shadow:0 12px 32px rgba(15,18,24,0.14); --tb-badge-text:#171A1D;
     --tb-scrim:rgba(15,18,24,0.28);
+    color-scheme:light;
+    --scroll-thumb:color-mix(in srgb, var(--ink-faint) 45%, transparent); --scroll-thumb-hover:var(--ink-dim);
     /* rr-* (Health page ReadingRow cards) and storage-* (storage quota bar)
        are NOT covered by this pass — out of the "starting point" token list
        given for Phase 2. They'll keep rendering with their dark values
@@ -119,6 +127,15 @@
        not silently left broken. */
   }
   *{box-sizing:border-box;}
+  /* Themed scrollbars: thin, a token-coloured thumb on a transparent track.
+     scrollbar-* for Firefox and current Chromium; ::-webkit-scrollbar for
+     Safari and older Chromium. */
+  *{scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent;}
+  ::-webkit-scrollbar{width:10px; height:10px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:var(--scroll-thumb); border-radius:999px; border:2px solid transparent; background-clip:padding-box;}
+  ::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover); background-clip:padding-box; border:2px solid transparent;}
+  ::-webkit-scrollbar-corner{background:transparent;}
   a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
   textarea:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
     outline:2px solid var(--accent); outline-offset:2px; border-radius:4px;
