@@ -60,7 +60,8 @@ function load(db) {
   }
   const folders = new Map(db.prepare("SELECT root_id, rel_path, class, evidence_json FROM folder_classes").all().map(f => [f.root_id + ":" + f.rel_path, f]));
   const lineage = db.prepare("SELECT relation, subject_key, object_key, method, confidence, state, evidence_json FROM claims WHERE relation IN ('sliced_from', 'source_of') ORDER BY claim_key").all();
-  const decisions = db.prepare("SELECT * FROM decisions WHERE superseded_by IS NULL ORDER BY id").all();
+  // Active Decisions: neither replaced by a later one nor withdrawn by an undo.
+  const decisions = db.prepare("SELECT * FROM decisions WHERE superseded_by IS NULL AND withdrawn_at IS NULL ORDER BY id").all();
   const anchors = db.prepare("SELECT model_id, content_key FROM model_anchors ORDER BY model_id, content_key").all();
   const models = new Map(db.prepare("SELECT * FROM models ORDER BY id").all().map(m => [m.id, m]));
   const aliases = new Map(db.prepare("SELECT alias, content_key FROM content_aliases").all().map(a => [a.alias, a.content_key]));
@@ -301,7 +302,8 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
     const counts = new Map();
     // A file separated from a Model is no claim on it.
     for (const k of c.keys) for (const m of anchorOf.get(k) || []) if (!(rejected.has(k) && rejected.get(k).has(m))) counts.set(m, (counts.get(m) || 0) + 1);
-    for (const [m, n] of counts) if (D.models.has(m) && n * 2 >= c.keys.length) cand.push({ i, m, n });
+    // A merged-away Model never takes a cluster again: its files live on in the survivor.
+    for (const [m, n] of counts) if (D.models.has(m) && !D.models.get(m).merged_into && n * 2 >= c.keys.length) cand.push({ i, m, n });
   });
   // Largest overlap first, then cluster, then the older Model. (The cluster
   // comparison must return 0 for the same cluster, or the Model tie-break
@@ -400,6 +402,12 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
   }
 
   refreshQueryCaches(db);
+  // Hidden Files (§4.5): a cache of the active `hidden` Decisions, rebuilt each
+  // run so it survives a rebuild of the index.
+  db.prepare("UPDATE files SET hidden = 0 WHERE hidden != 0").run();
+  for (const d of D.decisions) if (d.relation === "hidden" && d.subject_type === "file" && d.polarity === "affirm") {
+    db.prepare("UPDATE files SET hidden = 1 WHERE content_key = ? OR container_id IN (SELECT id FROM files WHERE content_key = ?)").run(canonical(d.subject_key), canonical(d.subject_key));
+  }
 
   // Duplicates: locations with the same content (§4.4 duplicate_of: keyed by
   // location; only records, never hides or merges anything).
@@ -435,7 +443,7 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
       ambiguousFiles.push({ file: nodes.get(k).loc, key: k, models: [...targets.keys()].map(m => D.models.get(m).name) });
       reviews.push(review("ambiguous_grouping", "ambiguous:file:" + k, { content_key: k, location: nodes.get(k).loc, priority: 2, confidence: "medium",
         summary: `${nodes.get(k).loc} looks equally like ${targets.size} Models; nothing was suggested`,
-        evidence: [...targets.entries()].map(([m, e]) => ({ model: D.models.get(m).name, method: e.method, evidence: e.evidence })) }));
+        evidence: [...targets.entries()].map(([m, e]) => ({ model: D.models.get(m).name, uuid: D.models.get(m).uuid, method: e.method, evidence: e.evidence })) }));
       continue;
     }
     const [m, e] = [...targets.entries()][0];
@@ -549,7 +557,7 @@ function run(db, { now = Date.now(), reportPath = null, uuid = () => crypto.rand
   // rebuild its files may simply not be scanned yet) and no file's identity
   // is still waiting for its full hash.
   const usedModels = new Set(modelOfNode.values());
-  if (indexComplete && !identityPending) for (const m of D.models.values()) if (!m.hidden && !usedModels.has(m.id)) reviews.push(review("empty_model", "empty:" + m.uuid, { model_uuid: m.uuid, priority: 3, summary: `${m.name} has no files any more` }));
+  if (indexComplete && !identityPending) for (const m of D.models.values()) if (!m.hidden && !m.merged_into && !usedModels.has(m.id)) reviews.push(review("empty_model", "empty:" + m.uuid, { model_uuid: m.uuid, priority: 3, summary: `${m.name} has no files any more` }));
 
   const reviewStats = syncReviews(db, reviews, now);
 
@@ -623,7 +631,17 @@ function refreshQueryCaches(db) {
   }
 }
 
-function modelIdByUuid(D, uuid) { for (const m of D.models.values()) if (m.uuid === uuid) return m.id; return null; }
+// A Model merged into another answers for the survivor (a chain is followed).
+function modelIdByUuid(D, uuid) {
+  for (let hop = 0; hop < 10 && uuid; hop++) {
+    let found = null;
+    for (const m of D.models.values()) if (m.uuid === uuid) { found = m; break; }
+    if (!found) return null;
+    if (!found.merged_into) return found.id;
+    uuid = found.merged_into;
+  }
+  return null;
+}
 
 function edgeView(e, nodes) {
   return { a: nodes.get(e.a).loc, b: nodes.get(e.b).loc, cls: e.cls, confidence: e.confidence, method: e.method, groups: e.groups, evidence: e.evidence, conflicts: e.conflicts, ignored: e.ignored, missing: e.missing };

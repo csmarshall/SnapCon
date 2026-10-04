@@ -12,7 +12,7 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
   };
   const send = (res, fn) => Promise.resolve().then(fn).then(
     out => res.json(out),
-    e => (e && e.status ? res.status(e.status).json({ error: e.message, code: e.code }) : res.status(500).json({ error: e.message, code: "internal" })),
+    e => (e && e.status ? res.status(e.status).json({ error: e.message, code: e.code, ...(e.extra || {}) }) : res.status(500).json({ error: e.message, code: "internal" })),
   );
 
   // Available to anyone signed in, so the UI can say why the Library is off.
@@ -65,16 +65,24 @@ function registerLibraryRoutes(app, { library, requireAuth, actorFromReq }) {
   // M5: the Library. Everyone with library.view browses; nothing here edits
   // (M6), and no location's folder path is part of any answer.
   const str = (v, max = 200) => (typeof v === "string" ? v.slice(0, max) : "");
-  app.get("/api/library/overview", requireAuth, need("library.view"), (req, res) => send(res, () => library.overview()));
+  app.get("/api/library/overview", requireAuth, need("library.view"), (req, res) => send(res, () => library.overview(req.user)));
   app.get("/api/library/facets", requireAuth, need("library.view"), (req, res) => send(res, () => library.facets()));
   app.get("/api/library/models", requireAuth, need("library.view"), (req, res) =>
     send(res, () => library.browse({
       q: str(req.query.q), family: str(req.query.printer, 80), root: str(req.query.location, 80), type: str(req.query.type, 20),
-      material: str(req.query.material, 40), attention: req.query.attention === "1", sort: str(req.query.sort, 10) || "name",
+      material: str(req.query.material, 40), attention: req.query.attention === "1", hidden: req.query.hidden === "1", sort: str(req.query.sort, 10) || "name",
       cursor: str(req.query.cursor, 400) || null, limit: Math.max(1, Math.min(120, parseInt(req.query.limit, 10) || 60)),
     })));
   app.get("/api/library/models/:uuid", requireAuth, need("library.view"), (req, res) => send(res, () => library.model(req.params.uuid)));
   app.get("/api/library/attention", requireAuth, need("library.view"), (req, res) => send(res, () => library.attention()));
+
+  // M6: every change to the Library goes through these two. Each action's own
+  // capability (library.edit.grouping / .metadata / .cover, library.hide,
+  // library.review) is checked by the service — never by the UI alone.
+  app.post("/api/library/actions", requireAuth, need("library.view"), (req, res) =>
+    send(res, () => library.act(req.user, actorFromReq(req), req.body && typeof req.body === "object" ? req.body : {})));
+  app.post("/api/library/actions/:id/undo", requireAuth, need("library.view"), (req, res) =>
+    send(res, () => library.undo(req.user, actorFromReq(req), req.params.id)));
 
   // Thumbnails are content-addressed, so a key never changes what it names.
   app.get("/api/library/thumbs/:key", requireAuth, need("library.view"), (req, res) => {

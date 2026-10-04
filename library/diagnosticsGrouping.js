@@ -35,7 +35,7 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
   const projects = new Map(db.prepare("SELECT * FROM projects").all().map(p => [p.file_id, p]));
   const plates = new Map();
   for (const p of db.prepare("SELECT * FROM plates ORDER BY project_id, plate_no").all()) { if (!plates.has(p.project_id)) plates.set(p.project_id, []); plates.get(p.project_id).push(p); }
-  const decisions = db.prepare("SELECT * FROM decisions ORDER BY id").all();
+  const decisions = db.prepare("SELECT * FROM decisions ORDER BY id").all().map(d => ({ ...d, superseded_by: d.superseded_by || (d.withdrawn_at ? -1 : null) }));
   const models = db.prepare("SELECT * FROM models ORDER BY id").all();
   const reviews = db.prepare("SELECT * FROM review_items ORDER BY kind, subject_key").all();
   const locOfKey = new Map();
@@ -52,7 +52,9 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
     const key = v.plate_no == null ? f.content_key : f.content_key + "#" + v.plate_no;
     const claims = (claimsBySubject.get(key) || []).filter(c => c.relation === "targets_printer").sort((a, b) => (a.state === "applied" ? -1 : 0) - (b.state === "applied" ? -1 : 0));
     const top = claims[0];
-    return { plate: v.plate_no, printer: v.printer_decision_id ? { family: v.printer_family, label: labelOf(v.printer_family), state: "decision", confidence: "authoritative" }
+    // A person's printer never hides the file's own Claim: "file says X → set to Y".
+    return { plate: v.plate_no, printer: v.printer_decision_id ? { family: v.printer_family, label: labelOf(v.printer_family), state: "decision", confidence: "authoritative", decision: v.printer_decision_id,
+        fileSays: top ? { family: top.object_key, label: labelOf(top.object_key), confidence: top.confidence, state: top.state, method: top.method, evidence: json(top.evidence_json) } : null }
       : top ? { family: top.object_key, label: labelOf(top.object_key), confidence: top.confidence, state: top.state, method: top.method, evidence: json(top.evidence_json) } : { family: null, state: "unknown" },
       slicer: v.slicer, estSeconds: v.est_seconds, weightG: v.weight_g, copies: v.copies, colors: v.color_count };
   };
@@ -121,7 +123,7 @@ function diagnosticsGrouping(db, { reportPath, includeEmpty = true } = {}) {
     duplicates: report ? report.duplicates : [],
     reviews: reviewViews,
     decisions: decisions.map(d => ({ id: d.id, subjectType: d.subject_type, subject: d.subject_key, relation: d.relation, polarity: d.polarity, objectType: d.object_type, object: d.object_key,
-      hint: d.subject_hint, reason: d.reason, superseded: !!d.superseded_by, createdAt: d.created_at })),
+      hint: d.subject_hint, reason: d.reason, superseded: d.superseded_by > 0, withdrawn: d.superseded_by === -1, action: d.action_id || null, by: d.created_by || null, createdAt: d.created_at })),
   };
 }
 

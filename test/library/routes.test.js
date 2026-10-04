@@ -20,11 +20,11 @@ const USERS = {
 
 // Every server is closed when its test ends, pass or fail, so a failure never
 // leaves the process running.
-async function server(t, { broken = false } = {}) {
+async function server(t, { broken = false, audit } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "snapcon-rt-"));
   fs.mkdirSync(path.join(base, "gcode"));
   if (broken) fs.mkdirSync(path.join(base, "library-data", "library.db"), { recursive: true });
-  const library = createLibraryService({ baseDir: base, getGcodeFolder: () => path.join(base, "gcode"), log: quiet, workerOptions: { log: quiet } });
+  const library = createLibraryService({ baseDir: base, getGcodeFolder: () => path.join(base, "gcode"), log: quiet, workerOptions: { log: quiet }, ...(audit ? { audit } : {}) });
   library.start();
   const app = express();
   app.use(express.json());
@@ -221,4 +221,72 @@ test("M5: the Library has no editing endpoints (merge, split, rename, hide and r
       assert.equal(r.status, 404, `${who} ${m} ${p}`);
     }
   }
+});
+
+// ---- M6: every change, checked by the server ----
+async function m6Library(t) {
+  const { gcodeFile } = require("./helpers/gcode");
+  const events = [];
+  const s = await server(t, { audit: (event, actor, detail) => events.push({ event, actor, detail }) });
+  fs.writeFileSync(path.join(s.base, "gcode", "Beardie.gcode"), gcodeFile({ objects: [["Beardie.stl", 1]] }));
+  fs.writeFileSync(path.join(s.base, "gcode", "4x Beardie.gcode"), gcodeFile({ objects: [["Beardie.stl", 4]], bodyBytes: 3000 }));
+  fs.writeFileSync(path.join(s.base, "gcode", "Gecko.gcode"), gcodeFile({ objects: [["Gecko.stl", 1]], bodyBytes: 4000 }));
+  assert.equal((await s.call("admin", "POST", "/api/library/roots/gcode/rescan")).status, 200);
+  let list;
+  for (let i = 0; i < 400; i++) {
+    await s.library._idle();
+    list = await s.call("admin", "GET", "/api/library/models");
+    if (list.status === 200 && list.body.total === 2) break;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  const beardie = list.body.models.find(m => m.files === 2).uuid, gecko = list.body.models.find(m => m.files === 1).uuid;
+  const detail = await s.call("admin", "GET", "/api/library/models/" + beardie);
+  const fourX = detail.body.printables.find(v => /4x/.test(v.file.name)).file.contentKey;
+  return { s, events, beardie, gecko, fourX };
+}
+
+test("M6: no change to the Library without its capability — checked by the server for every action, and for undo", async t => {
+  const { s, events, beardie, gecko, fourX } = await m6Library(t);
+  const attempts = [
+    { kind: "rename", model: beardie, name: "x" }, { kind: "cover", model: beardie, auto: true },
+    { kind: "hide", model: beardie }, { kind: "unhide", model: beardie }, { kind: "hide_file", model: beardie, files: [fourX] },
+    { kind: "merge", from: gecko, into: beardie }, { kind: "split", model: beardie, files: [fourX] }, { kind: "move", model: beardie, files: [fourX], to: gecko },
+    { kind: "approve", review: 1, survivor: beardie }, { kind: "reject", review: 1 }, { kind: "dismiss", review: 1 },
+    { kind: "set_printer", model: beardie, file: fourX, family: "flashforge-ad5x" },
+  ];
+  for (const a of attempts) {
+    assert.equal((await s.call(null, "POST", "/api/library/actions", a)).status, 401, "signed out: " + a.kind);
+    const v = await s.call("view", "POST", "/api/library/actions", a);
+    assert.equal(v.status, 403, "view: " + a.kind);
+    assert.equal(v.body.code, "forbidden");
+  }
+  assert.equal(events.length, 0, "nothing was done, nothing audited");
+  const renamed = await s.call("regular", "POST", "/api/library/actions", { kind: "rename", model: beardie, name: "Bearded dragon" });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.body));
+  assert.equal((await s.call("view", "GET", "/api/library/models/" + beardie)).body.name, "Bearded dragon");
+  assert.equal((await s.call("view", "POST", "/api/library/actions/" + renamed.body.actionId + "/undo")).status, 403, "undo needs the same capability");
+  const undone = await s.call("admin", "POST", "/api/library/actions/" + renamed.body.actionId + "/undo");
+  assert.equal(undone.status, 200);
+  assert.equal((await s.call("admin", "POST", "/api/library/actions/" + renamed.body.actionId + "/undo")).body.code, "already_undone");
+  assert.deepEqual(events.map(e => e.event), ["model-rename", "model-change-undone"]);
+  assert.equal(events[0].detail.after, "Bearded dragon");
+  assert.ok(!JSON.stringify(events).includes(s.base), "the audit trail carries names, never folder paths");
+});
+
+test("M6: a stale action answers 409 with a reason; the Model page shows the history and what can still be undone", async t => {
+  const { s, beardie, gecko, fourX } = await m6Library(t);
+  const moved = await s.call("regular", "POST", "/api/library/actions", { kind: "move", model: beardie, files: [fourX], to: gecko });
+  assert.equal(moved.status, 200, JSON.stringify(moved.body));
+  const again = await s.call("regular", "POST", "/api/library/actions", { kind: "move", model: beardie, files: [fourX], to: gecko });
+  assert.equal(again.status, 409);
+  assert.equal(again.body.code, "stale_file");
+  const merged = await s.call("regular", "POST", "/api/library/actions", { kind: "merge", from: gecko, into: beardie });
+  assert.equal(merged.status, 200);
+  const late = await s.call("regular", "POST", "/api/library/actions", { kind: "rename", model: gecko, name: "y" });
+  assert.equal(late.status, 409);
+  assert.deepEqual([late.body.code, late.body.mergedInto], ["model_merged", beardie], "and where it went");
+  const page = await s.call("view", "GET", "/api/library/models/" + beardie);
+  assert.deepEqual(page.body.history.map(h => [h.kind, h.undoable]), [["merge", true], ["move", false]]);
+  assert.equal((await s.call("view", "GET", "/api/library/models/" + gecko)).body.mergedInto, beardie);
+  assert.equal((await s.call("admin", "POST", "/api/library/actions", { kind: "nope" })).status, 400);
 });

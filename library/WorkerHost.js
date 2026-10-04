@@ -40,7 +40,7 @@ function createWorkerHost({ log = console, forceInline = false } = {}) {
       if (!p) return;
       pending.delete(id); clearTimeout(p.timer); syncRef();
       if (ok) { restarts = 0; p.resolve(result); }
-      else { const e = new Error(error && error.message); e.code = error && error.code; p.reject(e); }
+      else { const e = new Error(error && error.message); e.code = error && error.code; if (error && error.status) e.status = error.status; if (error && error.extra) e.extra = error.extra; p.reject(e); }
     });
     worker.on("error", e => log.error("[library] worker error: " + e.message));
     worker.on("exit", code => {

@@ -16,6 +16,7 @@ const { GCODE_META_VERSION, THREEMF_META_VERSION, thumbExt } = require("./indexS
 const { diagnosticsRaw } = require("./diagnosticsRaw");
 const { diagnosticsGrouping, stableExport } = require("./diagnosticsGrouping");
 const libraryView = require("./libraryView");
+const libraryActions = require("./actions");
 
 const GCODE_ROOT = "gcode";
 const NAME_MAX = 60;
@@ -168,6 +169,45 @@ function createLibraryService({
   async function runGrouping() {
     try { lastGrouping = { ...(await worker.request("index.group", { dbPath: store.dbPath, now: now(), reportPath: groupingReport })), at: now() }; }
     catch (e) { log.error("[library] grouping: " + e.message); lastGrouping = { error: e.message, at: now() }; }
+  }
+
+  // ---- M6 actions ----
+  const asLibraryError = e => {
+    if (!e || !e.status) return e;
+    const le = new LibraryError(e.status, e.code, e.message);
+    if (e.extra) le.extra = e.extra;
+    return le;
+  };
+  async function runAction(user, actor, action) {
+    requireAvailable();
+    const cap = libraryActions.CAPABILITY[action && action.kind];
+    if (!cap) throw new LibraryError(400, "unknown_action", "Unknown action.");
+    if (!authz || !authz.can(user, cap)) throw new LibraryError(403, "forbidden", "You don't have permission to do this.");
+    let res;
+    try { res = await worker.request("library.act", { dbPath: store.dbPath, action, actor, now: now(), reportPath: groupingReport }); }
+    catch (e) { throw asLibraryError(e); }
+    // Names, never folder paths, in the audit trail.
+    audit("model-" + res.kind.replace(/_/g, "-"), actor, { action: res.actionId, ...auditSummary(res) });
+    return res;
+  }
+  async function runUndo(user, actor, actionId) {
+    requireAvailable();
+    const a = store.db.prepare("SELECT id, kind FROM actions WHERE id = ?").get(Number(actionId));
+    if (!a) throw new LibraryError(404, "action_not_found", "That change no longer exists.");
+    if (!authz || !authz.can(user, libraryActions.CAPABILITY[a.kind])) throw new LibraryError(403, "forbidden", "You don't have permission to do this.");
+    let res;
+    try { res = await worker.request("library.undo", { dbPath: store.dbPath, actionId: a.id, actor, now: now(), reportPath: groupingReport }); }
+    catch (e) { throw asLibraryError(e); }
+    audit("model-change-undone", actor, { action: a.id, kind: a.kind, ...auditSummary(res.summary || {}) });
+    return res;
+  }
+  function auditSummary(r) {
+    const out = {};
+    for (const k of ["model", "name", "before", "after", "family", "fileSays", "plate", "reviewKind"]) if (r[k] != null) out[k] = r[k];
+    for (const k of ["from", "into", "to", "a", "b"]) if (r[k]) out[k] = { uuid: r[k].uuid, name: r[k].name };
+    if (r.files != null) out.files = r.files;
+    if (r.file != null) out.file = r.file;
+    return out;
   }
 
   function logScan(root, s) {
@@ -511,13 +551,23 @@ function createLibraryService({
       requireAvailable();
       const m = libraryView.modelDetail(store.db, String(uuid || ""));
       if (!m) throw new LibraryError(404, "model_not_found", "No such model.");
+      if (!m.mergedInto) m.history = libraryActions.history(store.db, m.uuid);
       return m;
     },
+    // M6: a person's change to the Library. The capability is checked here,
+    // per action, whatever the UI showed; the worker validates the request
+    // against the current state and answers 409 when it no longer applies.
+    act: (user, actor, action) => runAction(user, actor, action),
+    undo: (user, actor, actionId) => runUndo(user, actor, actionId),
     attention: () => { requireAvailable(); return libraryView.attentionList(store.db); },
     // What every Library page shows at the top: each location's state (never
     // its folder), whether indexing is running, and the attention counts.
-    overview: () => {
+    overview: user => {
       requireAvailable();
+      const can = {};
+      for (const [k, cap] of Object.entries({ grouping: "library.edit.grouping", metadata: "library.edit.metadata", cover: "library.edit.cover", hide: "library.hide", review: "library.review", diagnostics: "library.diagnostics" })) {
+        can[k] = !!authz && authz.can(user, cap);
+      }
       const s = status();
       const roots = store.roots.list().filter(r => r.enabled).map(r => ({ id: r.id, name: r.name, status: r.status, offline: r.status === "offline", lastOkAt: r.last_ok_at || null }));
       const ix = s.indexer;
@@ -526,6 +576,7 @@ function createLibraryService({
         indexing: ix ? { scanning: ix.scanning ? { rootId: ix.scanning.rootId, phase: ix.scanning.phase, done: ix.scanning.done, total: ix.scanning.total } : null,
           queued: ix.queue.length, hashing: ix.hashing ? { hashed: ix.hashing.hashed, remaining: ix.hashing.remaining } : null } : null,
         attention: libraryView.attentionCounts(store.db),
+        can,
       };
     },
     thumbFile,

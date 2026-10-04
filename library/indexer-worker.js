@@ -18,6 +18,7 @@ const indexStore = require("./indexStore");
 const gcodeExtract = require("./gcodeExtract");
 const threemfExtract = require("./threemfExtract");
 const grouping = require("./grouping");
+const actions = require("./actions");
 
 const dbs = new Map();   // dbPath -> connection, opened on first use
 function dbFor(dbPath) {
@@ -64,6 +65,26 @@ const handlers = {
   "index.lineage": ({ dbPath, now }) => indexStore.lineage(dbFor(dbPath), { now }),
   // Models from the index (M4), in one transaction: all of it or none of it.
   // The report is written once the transaction has committed.
+  // M6: a person's action, then grouping, in one transaction — all of it or
+  // none of it; the report is written once it has committed.
+  "library.act": ({ dbPath, action, actor, now, reportPath }) => {
+    const db = dbFor(dbPath);
+    const { result, report } = indexStore.inTransaction(db, () => {
+      const result = actions.apply(db, action, { actor, now });
+      return { result, report: grouping.run(db, { now }).report };
+    });
+    if (reportPath) grouping.writeReport(reportPath, report);
+    return result;
+  },
+  "library.undo": ({ dbPath, actionId, actor, now, reportPath }) => {
+    const db = dbFor(dbPath);
+    const { result, report } = indexStore.inTransaction(db, () => {
+      const result = actions.undo(db, actionId, { actor, now });
+      return { result, report: grouping.run(db, { now }).report };
+    });
+    if (reportPath) grouping.writeReport(reportPath, report);
+    return result;
+  },
   "index.group": ({ dbPath, now, reportPath }) => {
     const db = dbFor(dbPath);
     const { report, ...out } = indexStore.inTransaction(db, () => grouping.run(db, { now }));
@@ -112,7 +133,7 @@ async function handle(cmd, payload) {
 if (!isMainThread && parentPort) {
   parentPort.on("message", async ({ id, cmd, payload }) => {
     try { parentPort.postMessage({ id, ok: true, result: await handle(cmd, payload) }); }
-    catch (e) { parentPort.postMessage({ id, ok: false, error: { message: e.message, code: e.code || null } }); }
+    catch (e) { parentPort.postMessage({ id, ok: false, error: { message: e.message, code: e.code || null, status: e.status || null, extra: e.extra || null } }); }
   });
 }
 

@@ -84,7 +84,7 @@ function resolvePrinter(db, ck) {
   // it (setHash). content_aliases maps those keys to this one.
   const keys = [ck, ...db.prepare("SELECT alias FROM content_aliases WHERE content_key = ?").all(ck).map(r => r.alias)];
   const decisions = db.prepare(`SELECT id, polarity, object_key, value_json FROM decisions
-    WHERE subject_type = 'variant' AND subject_key IN (${keys.map(() => "?").join(",")}) AND relation = 'targets_printer' AND superseded_by IS NULL ORDER BY id DESC`).all(...keys);
+    WHERE subject_type = 'variant' AND subject_key IN (${keys.map(() => "?").join(",")}) AND relation = 'targets_printer' AND superseded_by IS NULL AND withdrawn_at IS NULL ORDER BY id DESC`).all(...keys);
   for (const d of decisions.filter(x => x.polarity === "reject")) {
     db.prepare("UPDATE claims SET state = 'overridden' WHERE subject_type = 'variant' AND subject_key = ? AND relation = 'targets_printer' AND object_key = ?").run(ck, d.object_key);
   }

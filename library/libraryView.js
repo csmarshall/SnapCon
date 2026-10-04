@@ -14,6 +14,7 @@ const labelOf = fam => (fam ? (PrinterIdentity.FAMILIES.find(f => f.key === fam)
 const json = s => { try { return JSON.parse(s || "null"); } catch { return null; } };
 const loc = f => f.root_id + ":" + f.rel_path;
 const PAGE_MAX = 120;
+const stemOf = n => String(n || "").replace(/(\.gcode)?\.[^.]+$/, "");
 
 // How strongly a Review Item asks for attention. "action": something the
 // owner decided no longer applies, or a file is broken; "review": SnapCon is
@@ -34,7 +35,7 @@ const LEVEL_RANK = { action: 0, review: 1, info: 2 };
 // names, by the location it names, or by the files its Evidence lists.
 function attentionIndex(db) {
   const reviews = db.prepare("SELECT * FROM review_items WHERE status = 'open' ORDER BY priority, kind, subject_key").all();
-  const models = new Map(db.prepare("SELECT id, uuid, name FROM models").all().map(m => [m.uuid, m]));
+  const models = new Map(db.prepare("SELECT id, uuid, name FROM models WHERE merged_into IS NULL").all().map(m => [m.uuid, m]));
   const byKey = new Map(), byLoc = new Map();
   for (const f of db.prepare("SELECT root_id, rel_path, content_key, model_id FROM files WHERE entry_path = '' AND model_id IS NOT NULL").all()) {
     if (!byKey.has(f.content_key)) byKey.set(f.content_key, new Set());
@@ -54,7 +55,9 @@ function attentionIndex(db) {
     return item;
   });
   const idToModel = new Map([...models.values()].map(m => [m.id, m]));
-  return { items, perModel, idToModel };
+  const ownerOfKey = new Map();
+  for (const [k, ids] of byKey) if (ids.size === 1) ownerOfKey.set(k, idToModel.get([...ids][0]));
+  return { items, perModel, idToModel, byUuid: models, ownerOfKey };
 }
 
 function rootsState(db) {
@@ -117,8 +120,10 @@ const TYPES = {
 // person is never passed through.
 const { ftsQuery } = require("./searchTerms");
 
-function listModels(db, { q = "", family = "", root = "", type = "", material = "", attention = false, sort = "name", cursor = null, limit = 60 } = {}) {
-  const where = ["m.hidden = 0", "EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')"];
+function listModels(db, { q = "", family = "", root = "", type = "", material = "", attention = false, hidden = false, sort = "name", cursor = null, limit = 60 } = {}) {
+  // A merged-away Model is never listed (its files are in the survivor); a
+  // hidden one only when hidden Models are asked for (M6, recoverable).
+  const where = ["m.merged_into IS NULL", hidden ? "m.hidden = 1" : "m.hidden = 0", "EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')"];
   const args = [];
   const fq = ftsQuery(q);
   if (fq) { where.push("m.id IN (SELECT rowid FROM model_fts WHERE model_fts MATCH ?)"); args.push(fq); }
@@ -200,7 +205,7 @@ function cards(db, rows, att) {
 
 // Facets for the filters, over the whole visible Library.
 function facets(db) {
-  const vis = "SELECT m.id FROM models m WHERE m.hidden = 0 AND EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')";
+  const vis = "SELECT m.id FROM models m WHERE m.hidden = 0 AND m.merged_into IS NULL AND EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')";
   const families = db.prepare(`SELECT printer_family AS key, count(DISTINCT model_id) AS n FROM model_families WHERE model_id IN (${vis}) GROUP BY printer_family ORDER BY n DESC, key`).all()
     .map(r => ({ key: r.key, label: labelOf(r.key), count: r.n }));
   const roots = db.prepare(`SELECT r.id, r.name, count(DISTINCT f.model_id) AS n FROM roots r JOIN files f ON f.root_id = r.id AND f.entry_path = '' WHERE f.model_id IN (${vis})
@@ -209,7 +214,8 @@ function facets(db) {
   const materials = db.prepare(`SELECT upper(json_extract(j.value, '$.type')) AS mat, count(DISTINCT f.model_id) AS n FROM files f JOIN variants v ON v.file_id = f.id, json_each(v.filaments_json) j
     WHERE f.model_id IN (${vis}) AND json_extract(j.value, '$.type') IS NOT NULL GROUP BY mat ORDER BY n DESC, mat`).all().map(r => ({ key: r.mat, count: r.n }));
   const total = db.prepare(`SELECT count(*) AS n FROM (${vis})`).get().n;
-  return { total, families, roots, types, materials };
+  const hidden = db.prepare("SELECT count(*) AS n FROM models m WHERE m.hidden = 1 AND m.merged_into IS NULL AND EXISTS (SELECT 1 FROM files f WHERE f.model_id = m.id AND f.entry_path = '')").get().n;
+  return { total, hidden, families, roots, types, materials };
 }
 
 // ---- the Model page ----
@@ -217,11 +223,18 @@ function facets(db) {
 function printerOf(db, key, v) {
   const claims = db.prepare(`SELECT * FROM claims WHERE subject_type = 'variant' AND subject_key = ? AND relation = 'targets_printer'
     ORDER BY CASE state WHEN 'applied' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END, CASE confidence WHEN 'exact' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`).all(key);
-  if (v.printer_decision_id) return { family: v.printer_family, label: labelOf(v.printer_family), state: "decision", confidence: null, evidence: [] };
   const top = claims[0];
-  if (!top) return { family: null, label: null, state: "unknown", confidence: null, evidence: [] };
-  const ev = (json(top.evidence_json) || []).map(e => ({ signal: e.signal, value: e.value, source: e.source, strength: e.strength, family: e.family || null, familyLabel: labelOf(e.family) }));
-  return { family: top.object_key, label: labelOf(top.object_key), state: top.state, confidence: top.confidence, method: top.method, evidence: ev,
+  const ev = top ? (json(top.evidence_json) || []).map(e => ({ signal: e.signal, value: e.value, source: e.source, strength: e.strength, family: e.family || null, familyLabel: labelOf(e.family) })) : [];
+  // What the file itself says, kept even when a person chose otherwise (§4.1):
+  // "File says X → set to Y" never hides the file's own Evidence.
+  const fileSays = top ? { family: top.object_key, label: labelOf(top.object_key), state: top.state, confidence: top.confidence, method: top.method, evidence: ev } : null;
+  if (v.printer_decision_id) {
+    const d = db.prepare("SELECT id, created_by, created_at FROM decisions WHERE id = ?").get(v.printer_decision_id) || {};
+    return { family: v.printer_family, label: labelOf(v.printer_family), state: "decision", confidence: null, evidence: ev, fileSays,
+      decision: { id: d.id || null, by: d.created_by || null, at: d.created_at || null } };
+  }
+  if (!top) return { family: null, label: null, state: "unknown", confidence: null, evidence: [], fileSays: null };
+  return { family: top.object_key, label: labelOf(top.object_key), state: top.state, confidence: top.confidence, method: top.method, evidence: ev, fileSays,
     others: claims.slice(1).filter(c => c.object_key !== top.object_key).map(c => ({ family: c.object_key, label: labelOf(c.object_key), state: c.state, confidence: c.confidence })) };
 }
 
@@ -247,6 +260,8 @@ function membershipOf(db, f, modelUuid) {
 function modelDetail(db, uuid) {
   const m = db.prepare("SELECT * FROM models WHERE uuid = ?").get(uuid);
   if (!m) return null;
+  // A merged Model answers with where it went, so an old link still lands.
+  if (m.merged_into) return { uuid: m.uuid, name: m.name, mergedInto: m.merged_into };
   const roots = rootsState(db);
   const files = db.prepare(`SELECT f.*, ft.original AS title_original FROM files f LEFT JOIN file_titles ft ON ft.file_id = f.id
     WHERE f.model_id = ? ORDER BY f.entry_path != '', f.role, f.root_id, f.rel_path, f.entry_path`).all(m.id);
@@ -264,12 +279,12 @@ function modelDetail(db, uuid) {
     if (!variantsByFile.has(v.file_id)) variantsByFile.set(v.file_id, []);
     variantsByFile.get(v.file_id).push(v);
   }
-  const fileView = f => ({ id: f.id, ...where(f), role: f.role, size: f.size, availability: availability(f, roots), thumb: f.thumb_key || null,
+  const fileView = f => ({ id: f.id, contentKey: f.content_key, ...where(f), role: f.role, size: f.size, availability: availability(f, roots), thumb: f.thumb_key || null, hidden: !!f.hidden,
     duplicates: top.filter(o => o.id !== f.id && o.content_key === f.content_key).map(o => where(o)), why: membershipOf(db, f, m.uuid) });
 
   // Printable Variants: one per plain G-code, one per sliced plate.
   const printables = [];
-  for (const f of top) for (const v of variantsByFile.get(f.id) || []) {
+  for (const f of top) for (const v of f.hidden ? [] : variantsByFile.get(f.id) || []) {
     const key = v.plate_no == null ? f.content_key : f.content_key + "#" + v.plate_no;
     const fil = (json(v.filaments_json) || []).filter(x => x && x.used !== false && !(x.usedG === 0)).map(x => ({ type: x.type || null, color: x.hex || x.color || null, grams: x.g != null ? x.g : x.usedG != null ? x.usedG : null, vendor: x.vendor || null }));
     const pr = projectByFile.get(f.id);
@@ -286,7 +301,7 @@ function modelDetail(db, uuid) {
       send: f.root_id !== "gcode" ? { ok: false, reason: "location" } : avail !== "ok" ? { ok: false, reason: avail } : { ok: true, path: f.rel_path },
     });
   }
-  const projects = top.filter(f => projectByFile.has(f.id)).map(f => {
+  const projects = top.filter(f => projectByFile.has(f.id) && !f.hidden).map(f => {
     const p = projectByFile.get(f.id);
     // The printer the project is set up for, from its own settings — what
     // the file says, not a Claim (an unsliced project has no Variant).
@@ -299,7 +314,7 @@ function modelDetail(db, uuid) {
       plates: (platesByProject.get(p.id) || []).map(pl => ({ plate: pl.plate_no, name: pl.name, printable: !!pl.sliced, thumb: pl.thumb_key || null,
         objects: ((json(pl.objects_json) || {}).objects || []).slice(0, 12) })) };
   });
-  const others = files.filter(f => !variantsByFile.has(f.id) && !projectByFile.has(f.id)).map(f => ({ ...fileView(f), entry: f.entry_path || null,
+  const others = files.filter(f => !variantsByFile.has(f.id) && !projectByFile.has(f.id) && !f.hidden).map(f => ({ ...fileView(f), entry: f.entry_path || null,
     container: f.entry_path ? (top.find(t => t.id === f.container_id) || {}).name || null : null }));
 
   // Suggestions involving this Model, and why they are only suggestions.
@@ -308,13 +323,20 @@ function modelDetail(db, uuid) {
     const o = db.prepare("SELECT uuid, name FROM models WHERE uuid = ?").get(otherUuid);
     const ev = json(c.evidence_json) || [];
     const missing = (ev.find(e => e.signal === "missing") || {}).value || null;
-    return { other: o ? { uuid: o.uuid, name: o.name } : null, method: c.method, groups: String(c.groups || "").split(",").filter(Boolean),
+    const rv = db.prepare("SELECT id FROM review_items WHERE kind = 'suggested_match' AND status = 'open' AND ((model_uuid = ? AND other_model_uuid = ?) OR (model_uuid = ? AND other_model_uuid = ?))").get(m.uuid, otherUuid, otherUuid, m.uuid);
+    return { review: rv ? rv.id : null, other: o ? { uuid: o.uuid, name: o.name, ...modelContext(db, o.uuid) } : null, method: c.method, groups: String(c.groups || "").split(",").filter(Boolean),
       evidence: ev.filter(e => e.signal !== "missing").map(e => ({ signal: e.signal, value: e.value, group: e.group, strength: e.strength, between: e.between || null })).slice(0, 6),
       missing };
   });
   const attention = (att.perModel.get(m.id) || []).map(i => reviewView(i, att));
   const families = db.prepare("SELECT printer_family, variant_count FROM model_families WHERE model_id = ? ORDER BY variant_count DESC").all(m.id).map(r => ({ key: r.printer_family, label: labelOf(r.printer_family), variants: r.variant_count }));
   const cover = coversFor(db, [m.id]).get(m.id) || null;
+  // Pictures a person may choose as the cover (M6): every image, plate
+  // picture and file thumbnail of this Model, by content key (+ plate).
+  const pictures = [];
+  for (const f of files) if (f.thumb_key && !f.hidden) pictures.push({ contentKey: f.content_key, plate: null, thumb: f.thumb_key, label: f.entry_path ? f.name : stemOf(f.name) });
+  for (const p of projects) for (const pl of p.plates) if (pl.thumb) pictures.push({ contentKey: p.file.contentKey, plate: pl.plate, thumb: pl.thumb, label: (p.title || stemOf(p.file.name)) + " · " + pl.plate });
+  const chosenMissing = m.cover_source === "user" && !(cover && cover.source === "chosen");
   const gallery = [];
   const seenThumb = new Set();
   const addG = (thumb, label) => { if (thumb && !seenThumb.has(thumb)) { seenThumb.add(thumb); gallery.push({ thumb, label }); } };
@@ -323,12 +345,22 @@ function modelDetail(db, uuid) {
   for (const p of projects) for (const pl of p.plates) addG(pl.thumb, (p.title || p.file.name) + " · " + pl.plate);
   for (const v of printables) addG(v.thumb, v.file.name);
   return {
-    uuid: m.uuid, name: m.name, designer: m.designer, license: m.license, designModelId: m.design_model_id, sourceUrl: m.source_url, notes: m.notes,
-    cover, gallery: gallery.slice(0, 24), families,
-    counts: { files: top.length, printables: printables.length, projects: projects.length, others: others.length },
+    uuid: m.uuid, name: m.name, nameSource: m.name_source, origin: m.origin, hidden: !!m.hidden,
+    designer: m.designer, license: m.license, designModelId: m.design_model_id, sourceUrl: m.source_url, notes: m.notes,
+    cover, coverSource: m.cover_source, coverMissing: chosenMissing, pictures: pictures.slice(0, 60), gallery: gallery.slice(0, 24), families,
+    hiddenFiles: top.filter(f => f.hidden).map(f => fileView(f)),
+    counts: { files: top.filter(f => !f.hidden).length, printables: printables.length, projects: projects.length, others: others.length, hidden: top.filter(f => f.hidden).length },
     printables, projects, others, suggestions, attention,
     locations: [...new Set(top.map(f => f.root_id))].map(id => ({ id, name: (roots.get(id) || {}).name || id, offline: !!(roots.get(id) || {}).offline })),
   };
+}
+
+// Enough to tell two same-named Models apart: cover, printers, locations, counts.
+function modelContext(db, uuid) {
+  const m = db.prepare("SELECT id FROM models WHERE uuid = ?").get(uuid);
+  if (!m) return {};
+  const c = cards(db, [{ id: m.id, uuid, name: "" }], { perModel: new Map() })[0];
+  return { cover: c.cover, files: c.files, families: c.families.map(f => f.label), locations: c.locations.map(l => l.name) };
 }
 
 // ---- Needs attention ----
@@ -343,11 +375,20 @@ function reviewView(r, att) {
     case "unknown_printer": Object.assign(detail, ev && ev.object_key ? { likely: labelOf(ev.object_key), confidence: ev.confidence, state: ev.state } : {}); break;
     case "ambiguous_grouping":
       if (/^ambiguous:generic:/.test(r.subject_key)) Object.assign(detail, { variant: "generic", terms: (ev.terms || []).map(t => String(t).replace(/^title:/, "")), files: (ev.files || []).length, reason: (ev.reason || [])[0] || null });
-      else if (/^ambiguous:file:/.test(r.subject_key)) Object.assign(detail, { variant: "file", candidates: (Array.isArray(ev) ? ev : []).map(x => x.model) });
+      else if (/^ambiguous:file:/.test(r.subject_key)) {
+        const owner = att.ownerOfKey.get(r.content_key);
+        Object.assign(detail, { variant: "file", contentKey: r.content_key, owner: owner ? { uuid: owner.uuid, name: owner.name } : null,
+          candidates: (Array.isArray(ev) ? ev : []).map(x => ({ uuid: x.uuid || null, name: x.model })) });
+      }
       else if (/^ambiguous:nested:/.test(r.subject_key)) Object.assign(detail, { variant: "nested", folder: ev.folder, subFolders: (ev.subFolders || []).length });
       else Object.assign(detail, { variant: "anchor", model: ev.model, files: (ev.files || []).length });
       break;
-    case "suggested_match": Object.assign(detail, { missing: ev.missing || null, method: (r.summary || "").replace(/^.*\(([^)]*)\)$/, "$1") }); break;
+    case "suggested_match": {
+      const a = att.byUuid.get(r.model_uuid), b = att.byUuid.get(r.other_model_uuid);
+      Object.assign(detail, { missing: ev.missing || null, method: (r.summary || "").replace(/^.*\(([^)]*)\)$/, "$1"),
+        a: a ? { uuid: a.uuid, name: a.name } : null, b: b ? { uuid: b.uuid, name: b.name } : null });
+      break;
+    }
     case "possible_duplicate": Object.assign(detail, { basis: ev.basis }); break;
     case "decision_unmatched": case "file_changed": Object.assign(detail, { relation: ev.relation, lastSeenAt: ev.lastSeenAt || r.location }); break;
     default: break;
@@ -369,4 +410,4 @@ function attentionCounts(db) {
   return counts;
 }
 
-module.exports = { listModels, facets, modelDetail, attentionList, attentionCounts, levelOf, ftsQuery };
+module.exports = { listModels, facets, modelDetail, attentionList, attentionCounts, levelOf, ftsQuery, modelContext };
