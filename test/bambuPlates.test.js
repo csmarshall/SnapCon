@@ -119,3 +119,25 @@ test("the plate travels from the request to the connector, on the direct, staged
   // The browser: a card's own Print passes the plate its colours were mapped for.
   assert.match(appSrc, /if\(plate==null&&MAP&&MAP\.plate\) plate=MAP\.plate;/);
 });
+
+// M8 security review: a filament id in slice_info indexed an array on the main
+// thread — id="4294967295" made /api/map build a 4-billion-slot array (minutes
+// of a frozen server, then out of memory). Ids are bounded where they are read
+// and where they index.
+test("a crafted filament id cannot make /api/map build a huge array", () => {
+  const huge = SLICE_INFO.replace('<filament id="4" tray_info_idx="GFG01"', '<filament id="4294967295" tray_info_idx="GFG01"').replace('<filament id="2" tray_info_idx="GFG00" type="PETG"', '<filament id="20000000" tray_info_idx="GFG00" type="PETG"');
+  const f = path.join(os.tmpdir(), "snapcon-plates-huge-" + process.pid + ".3mf");
+  fs.writeFileSync(f, buildZip([
+    { name: "Metadata/project_settings.config", data: Buffer.from(JSON.stringify({ printer_model: "Bambu Lab P2S" })), deflate: true },
+    { name: "Metadata/slice_info.config", data: Buffer.from(huge), deflate: true },
+    { name: "Metadata/plate_3.gcode", data: Buffer.from(gcode([0, 7, 0, 8])), deflate: true },
+  ]));
+  const info = threemf.read(f);
+  assert.ok(info.plateFilaments[3].every(x => x.id >= 1 && x.id <= 64), "out-of-range ids are dropped where they are read");
+  const env = server(CAPS);
+  const t0 = Date.now();
+  // Even handed ids that bypassed the reader, the route's array stays small.
+  const out = env.plateTrayInfo({ filaments: [], plateFilaments: { 3: [{ id: 4294967295, trayInfoIdx: "x" }, { id: 2, trayInfoIdx: "GFG00" }] } }, 3);
+  assert.ok(out.length <= 64 && Date.now() - t0 < 100);
+  assert.deepEqual([...out], [null, "GFG00"]);
+});

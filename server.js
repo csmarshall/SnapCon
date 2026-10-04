@@ -1431,7 +1431,8 @@ function plateTrayInfo(info, plate) {
   const list = (info.plateFilaments && info.plateFilaments[plate]) || null;
   if (!list) return info.filaments.map(f => f.trayInfoIdx);   // no per-plate list: as the file gives it
   const out = [];
-  for (const f of list) out[f.id - 1] = f.trayInfoIdx;
+  // Ids come from the file: only plausible filament numbers index the array.
+  for (const f of list) if (Number.isInteger(f.id) && f.id >= 1 && f.id <= 64) out[f.id - 1] = f.trayInfoIdx;
   return Array.from(out, v => (v === undefined ? null : v));
 }
 

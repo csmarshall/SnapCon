@@ -66,6 +66,12 @@ function isBambuSettings(json) {
   return /bambu\s*lab/.test(text);
 }
 
+// A filament number from the file, or null: an integer 1..64 (AMS units hold
+// 4 trays and a printer takes at most a few). The id indexes arrays built from
+// it, so a crafted "4294967295" must never reach them (M8 security review).
+const MAX_FILAMENTS = 64;
+function filamentId(v) { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= MAX_FILAMENTS ? n : null; }
+
 function parseSliceInfo(xml) {
   const out = { printerModelId: null, nozzle: null, filaments: [], plateFilaments: {}, prediction: null, weight: null };
   if (!xml) return out;
@@ -76,7 +82,7 @@ function parseSliceInfo(xml) {
     if (!idx) continue;
     out.plateFilaments[Number(idx[1])] = [...pm[1].matchAll(/<filament\b([^>]*)\/>/g)].map(f => {
       const a = (k) => { const v = new RegExp(`${k}="([^"]*)"`).exec(f[1]); return v ? v[1] : null; };
-      return { id: Number(a("id")) || null, type: a("type"), color: a("color"), trayInfoIdx: a("tray_info_idx"), usedG: Number(a("used_g")) || null };
+      return { id: filamentId(a("id")), type: a("type"), color: a("color"), trayInfoIdx: a("tray_info_idx"), usedG: Number(a("used_g")) || null };
     }).filter(f => f.id);
   }
   const meta = (key) => {
