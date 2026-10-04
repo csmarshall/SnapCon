@@ -549,7 +549,7 @@ Chamber temperature is still not shown. The printer reports two readings that mi
 neither has been confirmed.
 
 
-0.7.3
+0.8.0
 
 ### "Upload" now always means upload
 The Upload button used to do two different things depending on the printer, with nothing on screen
@@ -650,9 +650,14 @@ in the header.
 - Counts include every printer; the list only shows prints on printers you can see.
 
 ### Fixed: Bambu Lab projects with several plates printed plate 1
-Choosing plate 3 in Send mapped plate 3's filaments but started plate 1. The plate you choose is now
-the plate that starts, with the trays you chose for that plate's own filaments. A plate the file does
-not have is refused before anything is sent.
+Choosing plate 3 in Send mapped plate 3's filaments but started plate 1. Now:
+- the plate you choose drives both the tray mapping and the actual start command sent to the printer;
+- a plate the file does not have is refused before anything is sent;
+- a printer that cannot choose a plate is never sent one other than plate 1.
+
+Plate 1 was validated. Starting a plate other than 1 on a physical Bambu printer has **not** been
+tested yet; until it has, treat it as untested. It fails safely: SnapCon names the plate it starts
+and never silently prints a different one.
 
 ### Queue reliability
 - **A G-code folder that disappears** (a drive or share that is suddenly not there) no longer marks
@@ -665,7 +670,9 @@ not have is refused before anything is sent.
   is recorded in the print history as exactly what was sent.
 
 ### Known limitations
-- Starting a Bambu plate other than plate 1 has not yet been tried on a real printer.
-- On an installation upgraded from an earlier version, Spanish shows text added since then — the
-  Library included — in English: SnapCon never overwrites an existing translation file. A fresh
-  installation is fully translated.
+- Starting a Bambu plate other than plate 1 has not yet been tested on physical hardware (see above).
+- Existing translation files are not overwritten on upgrade. If your installation already has its
+  own Spanish file (or a customised one), text added since — the Library included — shows in English
+  until that file is updated or replaced. A fresh installation is fully translated.
+- A send that is still waiting for a busy printer (not yet transferred) is forgotten if SnapCon
+  restarts before the printer frees up. Sends already on the printer keep their Library identity.

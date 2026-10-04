@@ -2132,9 +2132,11 @@ carry the folder path by design.
 
 **Packaged builds:** win-x64, linux-x64, macos-x64 and macos-arm64 all build. Verified from scratch
 on **Windows x64** and **Linux x64** (WSL2 Ubuntu, kernel 6.18): worker thread, `node:sqlite`,
-schema 4, indexing and hashing, and a Library print recorded exact. **macOS (x64, arm64) is not
-verified** — no Mac was available; this remains the one platform check §15 asks for that is open.
-Docker could not be run here (not installed); `test/docker.test.js` checks the image's COPY lines.
+schema 4, indexing and hashing, and a Library print recorded exact. **macOS (x64, arm64) builds
+compile, but their runtime behaviour is unverified** — no Mac was available; a packaged macOS smoke
+test is a post-release item. **Docker:** its configuration and build inputs were checked statically
+(`test/docker.test.js` checks the image's COPY lines); the image was **not** built or run, because
+Docker was not available.
 
 **Localisation:** every Library string has a real Spanish translation (the 35 strings identical in
 both languages are words like "Material" and placeholders). An installation upgraded from an earlier
@@ -2142,9 +2144,9 @@ version keeps its existing runtime `locales/es.json` (never overwritten, by desi
 string added since in English — on the owner's instance, the Spanish file is at version 20 of 69.
 Release notes say so; changing that policy is the owner's decision.
 
-**Release notes:** the Library, printing from it, print history, the Bambu plate fix and the queue
-fixes are in RELEASE_NOTES.md under the unreleased 0.7.3 section; `package.json` still says 0.7.2 —
-the release's version is the owner's decision.
+**Release:** approved by the owner as **SnapCon 0.8.0** (2026-10-04). The Library, printing from it,
+print history, the Bambu plate fix and the queue fixes are in RELEASE_NOTES.md under 0.8.0 (the
+unreleased 0.7.3 section, never tagged or shipped, became 0.8.0).
 
 **Still unverified on hardware:** starting a Bambu plate other than 1 (no multi-plate sliced Bambu file
 exists in the Library, and no print was sent to a Bambu printer).
