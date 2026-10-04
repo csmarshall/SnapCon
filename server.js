@@ -2426,6 +2426,17 @@ async function locationAnswers(dir) {
   if (!dir) return false;
   try { return await netfs.exists(dir); } catch { return false; }
 }
+// A root found not answering: logged once per outage, and the Library checks
+// it (at most every 30 s), which marks a Library location offline so dispatch
+// stops even claiming for it.
+const ROOT_DOWN = new Map();   // root id -> when it was last checked
+function noteRootDown(rootId) {
+  const last = ROOT_DOWN.get(rootId);
+  if (last && Date.now() - last < 30000) return;
+  if (!last) console.log(`[queue] ${rootId === GCODE_ROOT ? "the G-code folder" : "Library location " + rootId} does not answer; queued items from it wait`);
+  ROOT_DOWN.set(rootId, Date.now());
+  if (library.available) library.rescan(rootId).catch(() => {});
+}
 
 // A queued file no longer where it was: the Library's other present copies of
 // the same content (by sha256), each hashed again now. The first identical one
@@ -2470,7 +2481,15 @@ async function attemptQueueDispatch(printerId) {
     catch (e) { if (e instanceof LibraryError && e.status === 503) return; nextDir = null; }   // offline: wait; removed or off: fails below
   }
   if (nextDir && netfs.availability(nextDir).status !== "online") return;
+  // A root that does not answer at all — a share or drive that is gone at
+  // once (not found) rather than by timing out — is an outage, not proof
+  // that the item's file was deleted: nothing is claimed, the item keeps its
+  // place, and the root is checked again (M7.1; the G-code folder and Library
+  // locations alike). Once the root answers, a file that is really gone is
+  // "missing" as before.
+  if (next && nextDir && !(await locationAnswers(nextDir))) { noteRootDown(nextRoot); return; }
 
+  if (next) ROOT_DOWN.delete(nextRoot);
   const claim = queueStore.claimNextForDispatch(printerId);
   if (!claim.claimed) return;
   const item = claim.item;
@@ -2501,9 +2520,9 @@ async function attemptQueueDispatch(printerId) {
       // missing file (§12, M7): the item goes back to the front and waits,
       // and the Library checks the location now. Once it is known offline
       // nothing is claimed until it answers again.
-      if (nextRoot !== GCODE_ROOT && !(await locationAnswers(nextDir))) {
-        console.log(`[queue] ${p.name}: "${item.file.name}" not dispatched — its Library location does not answer; it stays first in the queue`);
-        library.rescan(nextRoot).catch(() => {});
+      if (!(await locationAnswers(nextDir))) {
+        console.log(`[queue] ${p.name}: "${item.file.name}" not dispatched — its folder does not answer; it stays first in the queue`);
+        noteRootDown(nextRoot);
         queueStore.applyObserved(printerId, QueueEngine.onDispatchDeferred, item.id);
         return;
       }
