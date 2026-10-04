@@ -611,3 +611,61 @@ printer's own model.
 - The job card names the model when it is known: "Sliced for Snapmaker U1".
 - A printer whose exact model SnapCon cannot tell (an Adventurer 5M vs 5M Pro) is compared by
   brand only, as before.
+
+### Model Library (new)
+A Library of your model files across the G-code folder and any other folders you add as
+**locations** (Settings → Library) — local disks or network shares. Open it with the Library button
+in the header.
+- **Models, not folders of files.** Files are grouped into Models from what the files themselves say
+  (object names, project titles, slicer metadata, identical content), never from folder names alone.
+  Each Model shows its covers, the printable files and plates, projects, and which of your printers
+  each file was sliced for — with how sure SnapCon is and why.
+- **Search and filters** by name, printer, location, type and material. "trex", "t rex" and "t-rex"
+  all find TinyTREX and Skeleton T-Rex.
+- **Needs attention** lists what SnapCon is unsure about: two Models that may be the same, a file
+  that fits several Models, a file whose printer is unknown, a missing or unreadable file.
+- **You stay in charge.** Merge, separate, move a file, rename, choose the cover, set the printer, hide
+  — and undo any of it from the Model's Changes list, even after a restart. Your choices survive
+  rescans and index rebuilds; the files themselves are never moved, renamed or changed.
+- **Network shares that go offline** keep their Models in the Library, shown as offline; nothing in
+  SnapCon waits on them.
+- Library Diagnostics (admins) explains every grouping decision.
+
+### Print and queue from the Library
+- **Print and Queue on a Model** use the same Send and Queue dialogs and the same safety checks as the
+  file browser, from any Library location. The dialog says which Model and location it is sending.
+- Before anything is sent, SnapCon checks that the file is still exactly the one shown on the Model
+  page. A changed file is refused rather than printed.
+- A queued Library file is checked again, in full, when its turn comes. If it was moved, an identical
+  copy elsewhere in the Library is used only after its content is verified; if its location is
+  offline, it waits in place.
+
+### Print history
+- Every print is recorded with what was printed, where, when, how it was started, and how it ended
+  when the printer reported it. A Model page shows its history and a count: "17 prints · 13 confirmed
+  · 4 matched by filename". Prints sent from the Library are confirmed; older prints matched only by
+  file name are marked as such and never counted as confirmed. Generic names ("Assembly", "Benchy")
+  are never matched by name; a print whose name fits several Models asks you which one.
+- **The last 90 days** of prints are filled in from the existing log on first start.
+- Counts include every printer; the list only shows prints on printers you can see.
+
+### Fixed: Bambu Lab projects with several plates printed plate 1
+Choosing plate 3 in Send mapped plate 3's filaments but started plate 1. The plate you choose is now
+the plate that starts, with the trays you chose for that plate's own filaments. A plate the file does
+not have is refused before anything is sent.
+
+### Queue reliability
+- **A G-code folder that disappears** (a drive or share that is suddenly not there) no longer marks
+  every queued job "file missing". Jobs wait in place until the folder answers again; a file that is
+  really gone is still reported.
+- **On Windows, another program holding the queue file open for a moment** (a backup tool, a viewer)
+  no longer makes a queue action fail. If it holds it longer, the action is refused and nothing is
+  lost.
+- **A file sent now and started later** — uploaded to a busy printer and started from it afterwards —
+  is recorded in the print history as exactly what was sent.
+
+### Known limitations
+- Starting a Bambu plate other than plate 1 has not yet been tried on a real printer.
+- On an installation upgraded from an earlier version, Spanish shows text added since then — the
+  Library included — in English: SnapCon never overwrites an existing translation file. A fresh
+  installation is fully translated.

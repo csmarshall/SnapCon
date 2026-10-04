@@ -2087,3 +2087,64 @@ started from the printer → Print `snapcon_variant`/`exact`, "sent from the Lib
 the printer", audit `staged: true`.
 
 No job was sent to a real printer; every print above went to a simulator.
+
+## 31. M8 results — hardening (2026-10-03)
+
+No new Library feature. What was checked, what it found, and what is left.
+
+**Real Library (live, read-only):** `quick_check` ok, no foreign-key violations, schema 4; 299 files
+(all hashed, none missing), 251 Models (3 merged away, none still holding files), 277 Variants,
+698 Prints (159 linked; the counts equal the links), 78 open items. Every Library read endpoint
+answers in ~15 ms median (the measurement floor here), Diagnostics in 67 ms; the process holds
+156 MB. A live print was recorded while it ran.
+
+**Scale (100 printers × 90 days, 27,000 jobs, on a copy of the real Library):** the audit import takes
+13 s once (worker); recording one job took ~5 s because every job recomputed every Print's link —
+**fixed**: a recorded job now updates only its own link and Model (5 ms; a test checks it agrees with
+a full recompute), and the full recompute after grouping memoises shared content (4.8 s → 2.1 s).
+Model page with the most-printed history 78 ms, grid 82 ms, Needs attention 77 ms.
+
+**Upgrade and recovery (copies of every real backup):** all ten backups — schemas 1, 2 and 3 —
+migrate to 4 with every authored row kept, a pre-migration snapshot each, `quick_check` ok, and
+grouping working. A database from a newer SnapCon is left byte-for-byte untouched (Library
+unavailable, SnapCon running). A file that is not a database is quarantined and replaced by the
+newest good backup (or a new Library, said so). **Found and fixed:** a damaged page that the open
+probe does not reach but preparation does ("malformed") left the Library unavailable beside a good
+backup; it now gets the same quarantine-and-restore, once (regression test on a damaged root page).
+
+**Security review** (independent, of M5–M7.1). Fixed:
+- a crafted Bambu project (`<filament id="4294967295"/>` in `slice_info`) made `/api/map` build a
+  four-billion-slot array on the main thread — minutes of a frozen server, then out of memory.
+  Filament ids are now bounded (1–64) where they are read and where they index;
+- Library actions on an `unlinked_print` item, and their undo, did not check printer visibility: they
+  answer 404 now for a printer the person may not see, and the Model's changes no longer show such a
+  print's job name and time to them;
+- "Accept file change" hashed the G-code folder's path for an item queued from a Library location, so
+  such an item could never be accepted; it now uses the item's own location (as the person);
+- the queue now refuses a file no printer can start (an STL in a location) before reading it;
+- a location's own error text (which can name a share path) is no longer repeated to those who may
+  only use the location.
+Found sound: location containment (lexical + realpath, junctions), every route's capability and
+printer-visibility check, escaping of every value in the Library UI, audit details without paths,
+parameterised SQL. Not changed: the realpath check and the later read are not atomic (exploiting it
+needs write access to the location itself); M1's admin `location-added`/`-removed` audit events
+carry the folder path by design.
+
+**Packaged builds:** win-x64, linux-x64, macos-x64 and macos-arm64 all build. Verified from scratch
+on **Windows x64** and **Linux x64** (WSL2 Ubuntu, kernel 6.18): worker thread, `node:sqlite`,
+schema 4, indexing and hashing, and a Library print recorded exact. **macOS (x64, arm64) is not
+verified** — no Mac was available; this remains the one platform check §15 asks for that is open.
+Docker could not be run here (not installed); `test/docker.test.js` checks the image's COPY lines.
+
+**Localisation:** every Library string has a real Spanish translation (the 35 strings identical in
+both languages are words like "Material" and placeholders). An installation upgraded from an earlier
+version keeps its existing runtime `locales/es.json` (never overwritten, by design), so it shows every
+string added since in English — on the owner's instance, the Spanish file is at version 20 of 69.
+Release notes say so; changing that policy is the owner's decision.
+
+**Release notes:** the Library, printing from it, print history, the Bambu plate fix and the queue
+fixes are in RELEASE_NOTES.md under the unreleased 0.7.3 section; `package.json` still says 0.7.2 —
+the release's version is the owner's decision.
+
+**Still unverified on hardware:** starting a Bambu plate other than 1 (no multi-plate sliced Bambu file
+exists in the Library, and no print was sent to a Bambu printer).
