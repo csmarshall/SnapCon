@@ -118,7 +118,10 @@ test("a background scan cannot take interactive capacity", async t => {
 test("a stream fails, instead of hanging, when its storage stops answering mid-read", async t => {
   const nf = make(t, { opTimeoutMs: 300, probeEveryMs: 60000 });
   const nas = tmp(); nf.registerRoot("gcode", nas);
-  const f = path.join(nas, "big.gcode"); fs.writeFileSync(f, Buffer.alloc(64 * 1024, 1));
+  // Far larger than a Readable's read-ahead (64 KiB by default since Node 22),
+  // so the stream cannot have buffered the whole file before the share dies.
+  const size = 1024 * 1024;
+  const f = path.join(nas, "big.gcode"); fs.writeFileSync(f, Buffer.alloc(size, 1));
   const stream = nf.createReadStream(f, { chunkSize: 16 * 1024 });
   let got = 0, err = null;
   try {
@@ -129,7 +132,7 @@ test("a stream fails, instead of hanging, when its storage stops answering mid-r
     }
   } catch (e) { err = e; }
   assert.equal(err && err.code, "NAS_UNREACHABLE");
-  assert.ok(got < 64 * 1024, "the upload reading it sees a failure, never a truncated success");
+  assert.ok(got < size, "the upload reading it sees a failure, never a truncated success");
 });
 
 test("an operation queued before the outage is known fails as soon as it is, without waiting its turn", async t => {
