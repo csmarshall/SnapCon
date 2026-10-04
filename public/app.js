@@ -4873,7 +4873,7 @@ async function selectFile(name, source){
   try{ const m=await getJSON("/api/map?file="+encodeURIComponent(name)+sendRootQ());
     $("jobloading").classList.remove("show");
     if(m.error){ MAP=null; if(!URL_PRINTER_FILTER) $("jobsechead").style.display="none"; return; }
-    MAP=m; renderJob(); renderList(); renderFleet();
+    MAP=m; if(m.plate) SEND_PLATE=m.plate; renderJob(); renderList(); renderFleet();
   }catch(e){ $("jobloading").classList.remove("show"); if(!URL_PRINTER_FILTER) $("jobsechead").style.display="none"; }
 }
 
@@ -6533,6 +6533,9 @@ async function pushTo(printer, start, extraUI, prefs, onProgress, plate){
   let ok=false;
   try{
     const src=SEND_SOURCE?{root:SEND_SOURCE.root,library:SEND_SOURCE.library}:{};
+    // The colours mapped above are MAP's plate: a card's own Print button
+    // passes no plate, and must start that same plate (M7.1).
+    if(plate==null&&MAP&&MAP.plate) plate=MAP.plate;
     const r=await postJSON("/api/print",{file:SELECTED,printer,start,map,prefs,plate,...src});
     const d=await r.json(); if(!r.ok||d.error||(!d.jobId&&d.mode!=="pending")) throw new Error(d.error||("HTTP "+r.status));
     if(d.mode==="pending"){

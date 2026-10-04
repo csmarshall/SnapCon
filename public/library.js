@@ -423,7 +423,8 @@
     // still being the Variant shown here (M7).
     const data=s.ok&&canAct_?`data-root="${esc(s.root)}" data-path="${esc(s.path)}" data-key="${esc(v.key)}" data-plate="${v.plate==null?"":esc(v.plate)}"`:`disabled title="${esc(why)}"`;
     const pbtn=`<button type="button" class="btn primary btn-sm lib-print" ${data}>${esc(t("library.print"))}</button>`;
-    const qbtn=(typeof QUEUE_MANAGEMENT_ENABLED!=="undefined"&&QUEUE_MANAGEMENT_ENABLED)?`<button type="button" class="btn ghost btn-sm lib-queue" ${data}>${esc(t("library.queue"))}</button>`:"";
+    const qdata=s.ok&&canAct_&&s.queue===false?`disabled title="${esc(t("library.queue_plate_title",{n:v.plate}))}"`:data;
+    const qbtn=(typeof QUEUE_MANAGEMENT_ENABLED!=="undefined"&&QUEUE_MANAGEMENT_ENABLED)?`<button type="button" class="btn ghost btn-sm lib-queue" ${qdata}>${esc(t("library.queue"))}</button>`:"";
     return `<div class="lib-var${f.availability!=="ok"?" is-unavailable":""}">
       <span class="lib-var-thumb">${v.thumb?`<img loading="lazy" alt="" src="${thumbUrl(v.thumb)}">`:`<span class="lib-noimg is-sm"></span>`}</span>
       <div class="lib-var-main">
@@ -539,6 +540,11 @@
       return;
     }
     await selectFile(path, { root, rootName, model:m.uuid, modelName:m.name, library });
+    // A project's plate: the Send dialog opens on this Variant's plate, with
+    // that plate's colours (M7.1).
+    if(library.plate!=null&&SELECTED===path&&MAP&&Array.isArray(MAP.plates)&&MAP.plates.includes(library.plate)&&MAP.plate!==library.plate){
+      SEND_PLATE=library.plate; await loadMap(path,{plate:library.plate});
+    }
     if(L.open) hideFleet(true);    // selectFile shows the job header behind the Library
     if(SELECTED===path&&MAP) openSendModal();
     else alert(t("library.print_open_failed"));

@@ -311,9 +311,10 @@ function modelDetail(db, uuid, { printerVisible } = {}) {
       slicer: v.slicer || null, slicerVersion: v.slicer_version || null,
       filaments: fil, estSeconds: v.est_seconds, weightG: v.weight_g, copies: v.copies, colors: v.color_count, layerHeight: v.layer_height, nozzle: v.nozzle,
       // Print/Queue go through the existing Send and Queue dialogs, from any
-      // location (§12). SnapCon starts plate 1 of a project only.
-      send: avail !== "ok" ? { ok: false, reason: avail } : v.plate_no != null && v.plate_no !== 1 ? { ok: false, reason: "plate" }
-        : { ok: true, root: f.root_id, path: f.rel_path },
+      // location (§12). Print starts the plate chosen on a printer that can
+      // choose one (the server checks); the queue starts plate 1 only.
+      send: avail !== "ok" ? { ok: false, reason: avail }
+        : { ok: true, root: f.root_id, path: f.rel_path, queue: v.plate_no == null || v.plate_no === 1 },
     });
   }
   const projects = top.filter(f => projectByFile.has(f.id) && !f.hidden).map(f => {

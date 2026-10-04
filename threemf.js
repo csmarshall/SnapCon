@@ -67,8 +67,18 @@ function isBambuSettings(json) {
 }
 
 function parseSliceInfo(xml) {
-  const out = { printerModelId: null, nozzle: null, filaments: [], prediction: null, weight: null };
+  const out = { printerModelId: null, nozzle: null, filaments: [], plateFilaments: {}, prediction: null, weight: null };
   if (!xml) return out;
+  // Each plate lists the filaments IT uses, by the project's filament id
+  // (1-based): a multi-plate project's plates use different ones.
+  for (const pm of xml.matchAll(/<plate>([\s\S]*?)<\/plate>/g)) {
+    const idx = /<metadata key="index" value="(\d+)"/.exec(pm[1]);
+    if (!idx) continue;
+    out.plateFilaments[Number(idx[1])] = [...pm[1].matchAll(/<filament\b([^>]*)\/>/g)].map(f => {
+      const a = (k) => { const v = new RegExp(`${k}="([^"]*)"`).exec(f[1]); return v ? v[1] : null; };
+      return { id: Number(a("id")) || null, type: a("type"), color: a("color"), trayInfoIdx: a("tray_info_idx"), usedG: Number(a("used_g")) || null };
+    }).filter(f => f.id);
+  }
   const meta = (key) => {
     const m = new RegExp(`<metadata key="${key}" value="([^"]*)"`).exec(xml);
     return m ? m[1] : null;

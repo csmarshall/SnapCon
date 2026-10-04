@@ -275,3 +275,48 @@ test("a stale mapping is not applied to a different file", async (t) => {
   await assert.rejects(() => bambu.startPrintFile(p, "two.3mf"), /AMS|tray/i,
     "the mapping was chosen for a different file");
 });
+
+// ---- plates (M7.1) ----
+// A sliced project holds one G-code per plate; project_file names the one to
+// run. The plate chosen in the Send dialog must be the plate that prints, fed
+// by the trays chosen for THAT plate's filaments.
+
+test("the plate chosen is the plate project_file starts", async (t) => {
+  const { broker, p } = await withPrinter(t);
+  await bambu.applyHeadMapping(p, [0], { 0: 1 }, {}, { file: "multi.3mf", plate: 3 });
+  await bambu.startPrintFile(p, "multi.3mf", { plate: 3 });
+  const start = printCommands(broker).find(c => c.command === "project_file");
+  assert.equal(start.param, "Metadata/plate_3.gcode");
+});
+
+test("plate 1 is still the default, exactly as verified on the P2S", async (t) => {
+  const { broker, p } = await withPrinter(t);
+  await bambu.applyHeadMapping(p, [0, 1], { 0: 0, 1: 1 }, {}, { file: "ams.3mf", plate: 1 });
+  await bambu.startPrintFile(p, "ams.3mf", { plate: 1 });
+  const start = printCommands(broker).find(c => c.command === "project_file");
+  assert.equal(start.param, "Metadata/plate_1.gcode");
+  assert.deepEqual(start.ams_mapping, [0, 1]);
+});
+
+test("trays chosen for one plate never feed another", async (t) => {
+  const { broker, p } = await withPrinter(t);
+  await bambu.applyHeadMapping(p, [2], { 2: 0 }, {}, { file: "multi.3mf", plate: 3 });
+  await assert.rejects(() => bambu.startPrintFile(p, "multi.3mf", { plate: 1 }), /plate 1/);
+  assert.equal(printCommands(broker).filter(c => c.command === "project_file").length, 0, "nothing was started");
+});
+
+test("ams_mapping is addressed by the project's filament number, -1 for a filament the plate does not use", async (t) => {
+  // The printer's own report of a job using only the second filament:
+  // "mapping": [65535, 3]. A packed [3] would feed filament 1 instead.
+  const { broker, p } = await withPrinter(t);
+  await bambu.applyHeadMapping(p, [1, 3], { 1: 3, 3: 0 }, {}, { file: "multi.3mf", plate: 2 });
+  await bambu.startPrintFile(p, "multi.3mf", { plate: 2 });
+  const start = printCommands(broker).find(c => c.command === "project_file");
+  assert.deepEqual(start.ams_mapping, [-1, 3, -1, 0]);
+});
+
+test("a filament index that cannot belong to a file is refused", async (t) => {
+  const { p } = await withPrinter(t);
+  await assert.rejects(() => bambu.applyHeadMapping(p, [-1], { "-1": 0 }, {}), /filament/i);
+  await assert.rejects(() => bambu.applyHeadMapping(p, [99], { 99: 0 }, {}), /filament/i);
+});

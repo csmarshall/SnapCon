@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 68,
+    "version": 69,
     "snapconVersion": "0.7.2",
     "updated": "2026-10-03"
   },
@@ -1890,7 +1890,6 @@
     "err_forbidden": "Tu cuenta no puede cambiar la Biblioteca.",
     "err_unknown_action": "Acción desconocida.",
     "send_source": "Desde la biblioteca: {model} · {location}",
-    "print_unavailable_plate": "SnapCon solo puede iniciar la placa 1 de un proyecto. Lamina esta placa por separado para imprimirla desde aquí.",
     "n_prints_one": "{count} impresión",
     "n_prints_other": "{count} impresiones",
     "n_confirmed": "{n} confirmadas",
@@ -1933,6 +1932,7 @@
     "link_print_ok": "Vincular a «{model}»",
     "done_link_print": "Impresión vinculada a «{model}»",
     "change_link_print": "Impresión vinculada",
-    "hist_link_print": "{file} → {into}"
+    "hist_link_print": "{file} → {into}",
+    "queue_plate_title": "La cola solo puede iniciar la placa 1 de un proyecto. Imprime la placa {n} directamente."
   }
 }

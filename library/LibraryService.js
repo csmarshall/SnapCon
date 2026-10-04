@@ -243,10 +243,9 @@ function createLibraryService({
     const db = store.db;
     const f = db.prepare("SELECT * FROM files WHERE root_id = ? AND rel_path = ? AND entry_path = ''").get(String(rootId), String(rel || ""));
     if (!f || f.state !== "present") throw new LibraryError(409, "library_file_missing", "The Library no longer has this file there. Reload the model.");
+    // Which plates a printer can start is the print route's to check (M7.1):
+    // a Bambu printer starts the plate it is told; others plate 1.
     const p = plate == null || plate === "" ? null : Number(plate);
-    // SnapCon starts a project's first plate only (the Bambu connector sends
-    // plate_1); another plate would print something other than what was chosen.
-    if (p != null && p !== 1) throw new LibraryError(400, "plate_unsupported", "SnapCon can only start plate 1 of a project. Slice the plate you want on its own, or print it from the slicer.");
     const v = db.prepare(`SELECT plate_no FROM variants WHERE file_id = ? AND ${p == null ? "plate_no IS NULL" : "plate_no = ?"}`).get(...(p == null ? [f.id] : [f.id, p]));
     if (!v) throw new LibraryError(409, "library_variant_missing", "That printable file or plate is no longer there. Reload the model.");
     const canon = k => { const ck = String(k || "").split("#")[0]; return (db.prepare("SELECT content_key FROM content_aliases WHERE alias = ?").get(ck) || {}).content_key || ck; };

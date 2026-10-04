@@ -57,6 +57,10 @@ exports.capabilities = {
   // is the documented command and the printer's owner reports it prints gcode;
   // it is offered rather than withheld, and the first real print will settle it.
   fileTypes: ["3mf", "gcode"],
+  // A sliced project holds one G-code per plate (Metadata/plate_N.gcode) and
+  // project_file names the one to run, so the plate chosen in the Send dialog
+  // is the plate that prints (see startPrintFile).
+  plateSelect: true,
   excludeObject: false,
   // Off until each flag's effect is verified on hardware — the verified start
   // payload is sent as captured instead of exposing switches that may do
@@ -1030,14 +1034,25 @@ module.exports.bedTemp = async (p, t) => {
 // server hands that here before starting the print, exactly as it does for the
 // AD5X. Stashed rather than sent: a Bambu print is started by ONE command that
 // carries the mapping with it.
+//
+// ams_mapping is indexed by the project's filament number (the palette index:
+// the position in the plate's filament_colour list), with -1 for a filament
+// the plate does not use. That is the printer's own shape: a P2S running a
+// cloud job that used only the project's second filament reported
+// "mapping": [65535, 3] (test/fixtures/bambu-p2s-report.js). A packed list
+// would feed a plate that uses filaments 3 and 5 from the trays meant for
+// filaments 1 and 2. For a plate using all of its filaments the two are the
+// same array — the shape verified starting a print on the P2S.
 const MAPPING_TTL_MS = 5 * 60 * 1000;
-const mappings = new Map();   // printer id -> { file, ams_mapping, at }
+const mappings = new Map();   // printer id -> { file, plate, ams_mapping, at }
+const UNUSED = -1;
 
 module.exports.applyHeadMapping = async (p, tools, map, prefs, opts = {}) => {
   const c = connFor(p);
   const heads = c && c.haveBaseline ? decodeHeads(c.status).heads : [];
   const order = (Array.isArray(tools) && tools.length ? tools : Object.keys(map || {})).map(Number).sort((a, b) => a - b);
-  const ams_mapping = [];
+  if (order.some(f => !Number.isInteger(f) || f < 0 || f > 31)) throw new Error("That filament mapping does not belong to this file.");
+  const ams_mapping = order.length ? new Array(order[order.length - 1] + 1).fill(UNUSED) : [];
   for (const filament of order) {
     const head = Number((map || {})[filament]);
     const slot = heads[head];
@@ -1051,16 +1066,22 @@ module.exports.applyHeadMapping = async (p, tools, map, prefs, opts = {}) => {
     if (!Number.isInteger(tray) || tray < 0 || tray > 15) {
       throw new Error(`That tray cannot be used for printing on ${p.name}.`);
     }
-    ams_mapping.push(tray);
+    ams_mapping[filament] = tray;
   }
-  mappings.set(String(p.id), { file: opts.file || null, ams_mapping, at: Date.now() });
+  mappings.set(String(p.id), { file: opts.file || null, plate: plateOf(opts.plate), ams_mapping, at: Date.now() });
 };
 
-function takeMapping(p, file) {
+// A plate number, or null when none was given.
+function plateOf(v) { const n = Number(v); return Number.isInteger(n) && n >= 1 ? n : null; }
+
+// The trays chosen for this file and this plate: each plate has its own
+// filaments, so trays chosen for plate 3 never feed plate 1.
+function takeMapping(p, file, plate) {
   const key = String(p.id);
   const m = mappings.get(key);
   if (!m || Date.now() - m.at > MAPPING_TTL_MS) return null;
   if (m.file && m.file !== file) return null;
+  if (m.plate != null && m.plate !== plate) return null;
   return m;
 }
 
@@ -1123,19 +1144,22 @@ module.exports.uploadFile = async (p, localPath, name, job = {}) => {
 // the plate, the file, and which tray feeds each filament. Those flags are
 // exactly the payload verified on a P2S — SnapCon's own print-option switches
 // stay hidden for Bambu until each one's effect has been watched on hardware.
-module.exports.startPrintFile = async (p, name) => {
+// opts.plate: which plate of the project to print (default 1). The server
+// checks the file holds that sliced plate before sending anything.
+module.exports.startPrintFile = async (p, name, opts = {}) => {
   const c = connOrThrow(p);
   if (/\.gcode$/i.test(String(name))) {
     await sendCommand(c, { command: "gcode_file", param: String(name) }, { timeoutMs: 20000 });
     return;
   }
-  const mapping = takeMapping(p, name);
+  const plate = plateOf(opts.plate) || 1;
+  const mapping = takeMapping(p, name, plate);
   if (!mapping) {
-    throw new Error(`Choose which AMS tray feeds each filament before printing ${name} on ${p.name}.`);
+    throw new Error(`Choose which AMS tray feeds each filament of plate ${plate} before printing ${name} on ${p.name}.`);
   }
   await sendCommand(c, {
     command: "project_file",
-    param: "Metadata/plate_1.gcode",
+    param: `Metadata/plate_${plate}.gcode`,
     subtask_name: String(name).replace(/\.gcode\.3mf$|\.3mf$/i, ""),
     url: `ftp:///${name}`,
     bed_type: "auto",

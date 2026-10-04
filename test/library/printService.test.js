@@ -76,7 +76,9 @@ test("the Variant a person chose must still be the file's: changed, missing, or 
   db.prepare("INSERT INTO content_aliases (alias, content_key) VALUES ('q:frog-old', 'q:frog')").run();
   assert.equal(library.printIdentity({ rootId: "nas", rel: "Frog.gcode", key: "q:frog-old" }).contentKey, "q:frog", "an older key of the same content is the same Variant");
   assert.equal(library.printIdentity({ rootId: "nas", rel: "Dragon.3mf", key: "f".repeat(64) + "#1", plate: 1 }).variantKey, "f".repeat(64) + "#1");
-  rejects(() => library.printIdentity({ rootId: "nas", rel: "Dragon.3mf", key: "f".repeat(64) + "#2", plate: 2 }), 400, "plate_unsupported");
+  // M7.1: any sliced plate is a Variant; which printer can start it is the print route's check.
+  assert.equal(library.printIdentity({ rootId: "nas", rel: "Dragon.3mf", key: "f".repeat(64) + "#2", plate: 2 }).variantKey, "f".repeat(64) + "#2");
+  rejects(() => library.printIdentity({ rootId: "nas", rel: "Dragon.3mf", key: "f".repeat(64) + "#3", plate: 3 }), 409, "library_variant_missing");
   rejects(() => library.printIdentity({ rootId: "nas", rel: "Gone.gcode", key: "q:gone" }), 409, "library_file_missing");
   rejects(() => library.printIdentity({ rootId: "nas", rel: "Nowhere.gcode" }), 409, "library_file_missing");
   assert.deepEqual(library.locateContent("f".repeat(64)).map(c => [c.rootId, c.rel]), [["nas", "Dragon.3mf"]]);

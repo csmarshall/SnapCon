@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 68,
+    "version": 69,
     "snapconVersion": "0.7.2",
     "updated": "2026-10-03"
   },
@@ -1890,7 +1890,6 @@
     "err_forbidden": "Your account can't change the Library.",
     "err_unknown_action": "Unknown action.",
     "send_source": "From the Library: {model} · {location}",
-    "print_unavailable_plate": "SnapCon can only start plate 1 of a project. Slice this plate on its own to print it from here.",
     "n_prints_one": "{count} print",
     "n_prints_other": "{count} prints",
     "n_confirmed": "{n} confirmed",
@@ -1933,6 +1932,7 @@
     "link_print_ok": "Link to “{model}”",
     "done_link_print": "Print linked to “{model}”",
     "change_link_print": "Print linked",
-    "hist_link_print": "{file} → {into}"
+    "hist_link_print": "{file} → {into}",
+    "queue_plate_title": "The queue can only start plate 1 of a project. Print plate {n} directly instead."
   }
 }

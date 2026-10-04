@@ -612,6 +612,26 @@ async function libraryPrintIdentity(ref, lib) {
   const sha256 = id.sha256 || (await queueStore.computeFileHash(ref.fp)).sha256;
   return { ...id, sha256 };
 }
+// M7.1: which plate of a project this print starts. A Bambu project holds one
+// G-code per sliced plate; the plate asked for must be one of them (absent:
+// the first, which is what /api/map shows), and a plate other than 1 only
+// goes to a connector that can start the plate it is told
+// (capabilities.plateSelect). Every other file: no plate. Never "plate N"
+// shown while another one prints.
+async function resolvePrintPlate(p, fp, requested) {
+  if (!/\.3mf$/i.test(fp)) return { plate: null };
+  const info = await netfs.threemfRead(fp);
+  if (!info.isBambu || !info.sliced) return { plate: null };
+  const asked = requested == null || requested === "" ? null : Number(requested);
+  const plate = asked == null ? info.plates[0] : asked;
+  if (!Number.isInteger(plate) || !info.plates.includes(plate)) {
+    return { error: `This file has no sliced plate ${requested}.`, code: "no_such_plate", status: 400 };
+  }
+  if (plate !== 1 && !(getCapabilities(p.connector, p) || {}).plateSelect) {
+    return { error: `${p.name} can only start plate 1 of a project, and this is plate ${plate}.`, code: "plate_unsupported", status: 400 };
+  }
+  return { plate };
+}
 // What a queue item keeps of it: stable ids and names, never a folder path.
 const libraryQueueRef = id => ({ model: id.model, modelName: id.modelName, contentKey: id.contentKey, variantKey: id.variantKey, plate: id.plate, location: id.location });
 const libraryAudit = id => ({ model: id.model, modelName: id.modelName, location: String(id.location).split(":")[0], content: String(id.contentKey).slice(0, 16) });
@@ -1396,6 +1416,27 @@ app.post("/api/files/upload", requireRegular, rawGcodeBody, async (req, res) => 
   }
 });
 
+// A Bambu project's tray_info_idx per filament, indexed by the project's
+// filament number for one plate (null where that plate does not use it).
+function plateTrayInfo(info, plate) {
+  const list = (info.plateFilaments && info.plateFilaments[plate]) || null;
+  if (!list) return info.filaments.map(f => f.trayInfoIdx);   // no per-plate list: as the file gives it
+  const out = [];
+  for (const f of list) out[f.id - 1] = f.trayInfoIdx;
+  return Array.from(out, v => (v === undefined ? null : v));
+}
+
+// A Bambu plate's G-code does not say which of the project's filaments it
+// uses; its slice_info plate block does (M7.1). Only those are marked used —
+// they are the ones that need a tray — so the colours mapped in the Send
+// dialog are this plate's. Without a plate block, the palette as parsed.
+function platePalette(palette, info, plate) {
+  const list = info.plateFilaments && info.plateFilaments[plate];
+  if (!list || !list.length) return palette;
+  const ids = new Set(list.map(f => f.id));
+  return palette.map(s => ({ ...s, used: ids.has(s.i + 1) }));
+}
+
 app.get("/api/map", requireAuth, async (req, res) => {
   try {
     const ref = await resolveFileRef(req.user, req.query.root, req.query.file);
@@ -1415,6 +1456,7 @@ app.get("/api/map", requireAuth, async (req, res) => {
       }
       const plate = Math.max(1, parseInt(req.query.plate, 10) || info.plates[0] || 1);
       const result = parseGcodeMap(await netfs.threemfPlateGcode(fp, plate), { scanBody: false });
+      result.palette = platePalette(result.palette, info, plate);
       return res.json({
         ...result,
         printerModel: result.printerModel || info.printerModel,
@@ -1424,7 +1466,9 @@ app.get("/api/map", requireAuth, async (req, res) => {
         plate,
         printerModelId: info.printerModelId,
         nozzle: info.nozzle,
-        trayInfoIdx: info.filaments.map(f => f.trayInfoIdx)
+        // By the project's filament number (the palette index), for the
+        // plate shown: a multi-plate project's plates use different filaments.
+        trayInfoIdx: plateTrayInfo(info, plate)
       });
     }
     // The Orca config block (colours + "filament used [g]") lives at the END of
@@ -1681,17 +1725,25 @@ async function decideUpload(p, name, localPath) {
 app.post("/api/print", requireRegular, async (req, res) => {
   // root (M7, §12): the Library location the file is in; absent = the G-code
   // folder. library: { key, plate } — the Variant chosen on a Model page.
-  const { file, printer, start, map, prefs, root, library: lib } = req.body || {};
+  const { file, printer, start, map, prefs, root, library: lib, plate: plateAsked } = req.body || {};
   const p = PRINTERS[printer];
   if (!p) return res.status(400).json({ error: "Unknown printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer" });
   if (p.maintenanceMode) return res.status(409).json({ error: p.name + " is in maintenance mode — take it off maintenance before printing." });
-  let ref, ident = null;
+  let ref, ident = null, plate = null;
   try {
     ref = await resolveFileRef(req.user, root, file);
     if (!ref || !(await fileExists(ref.fp))) return res.status(404).json({ error: "File not found" });
-    if (lib) ident = await libraryPrintIdentity(ref, lib);
+    const pl = await resolvePrintPlate(p, ref.fp, plateAsked);
+    if (pl.error) return res.status(pl.status).json({ error: pl.error, code: pl.code });
+    plate = pl.plate;
+    // The Variant printed is the plate that prints: a plate changed in the
+    // Send dialog is that plate's Variant.
+    if (lib) ident = await libraryPrintIdentity(ref, { ...lib, plate: plate != null ? plate : lib.plate });
   } catch (e) { if (replyFileRefError(res, e, root)) return; return res.status(500).json({ error: e.message }); }
+  if (ident && ident.plate != null && ident.plate !== (plate != null ? plate : 1)) {
+    return res.status(400).json({ error: `${p.name} can only start plate 1 of a project, and this is plate ${ident.plate}.`, code: "plate_unsupported" });
+  }
   const fp = ref.fp;
   // Before anything is uploaded: a file this printer could never start is
   // refused here rather than after a multi-megabyte transfer.
@@ -1770,7 +1822,7 @@ app.post("/api/print", requireRegular, async (req, res) => {
   // there yet.
   if (disposition.action === "defer") {
     if (disposition.queue && await addQueueItem(false)) return res.json({ ok: true, mode: "queued", printer: p.name });
-    pendingLoad.set(printer, { file: fp, name, ts: Date.now(), tools, map, prefs, actor: actorFromReq(req) });
+    pendingLoad.set(printer, { file: fp, name, ts: Date.now(), tools, map, prefs, actor: actorFromReq(req), plate });
     return res.json({ ok: true, mode: "pending", printer: p.name });
   }
 
@@ -1812,21 +1864,22 @@ app.post("/api/print", requireRegular, async (req, res) => {
         if (c.applyHeadMapping && (tools.length || printerHasAnyDefaultPref(p) || wantsAnyPref(prefs))) {
           job.phase = "mapping";
           console.log(`[print] ${p.name}: applyHeadMapping starting (tools=${tools.length}, prefs=${JSON.stringify(prefs)}, printer defaults autoLevel=${!!p.autoLevel} flowCalibrate=${!!p.flowCalibrate} timelapse=${!!p.timelapse})`);
-          await c.applyHeadMapping(p, tools, map, prefs);
+          await c.applyHeadMapping(p, tools, map, prefs, { file: name, plate });
           console.log(`[print] ${p.name}: applyHeadMapping resolved`);
         }
         if (start) {
           job.phase = "starting";
-          console.log(`[print] ${p.name}: startPrintFile starting for "${name}"`);
-          await c.startPrintFile(p, name);
+          console.log(`[print] ${p.name}: startPrintFile starting for "${name}"${plate != null ? " (plate " + plate + ")" : ""}`);
+          await c.startPrintFile(p, name, { plate });
           console.log(`[print] ${p.name}: startPrintFile resolved`);
         }
       });
       if (!start) {
         // The file is on the printer now. Surface it the same "ready to
         // print" way uploadNotifiedFile does once a deferred upload lands:
-        // one click away, not silently just stored.
-        queuedFile.set(printer, { name, status: "ready", ts: Date.now() });
+        // one click away, not silently just stored. It keeps the plate for
+        // when it is started from there.
+        queuedFile.set(printer, { name, status: "ready", ts: Date.now(), plate });
         saveQueuedFiles();
         // "Upload into queue": the item is added only after the bytes are
         // actually there, and carries alreadyUploaded so dispatch does not
@@ -1933,17 +1986,18 @@ app.get("/api/printer-file-meta", requireAuth, async (req, res) => {
 // print-started notification) and the audit row must fire exactly once, and
 // never for a job that failed -- an audit trail claiming a print started when
 // it did not is worse than no trail at all.
-async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needsMapping, job, printerKey }) {
+// plate: the plate to start (a Bambu project; M7.1).
+async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needsMapping, job, printerKey, plate = null }) {
   try {
     await withStartSequence(p, async () => {
       if (needsMapping) {
         job.phase = "mapping";
         console.log(`[printfile] ${p.name}: applyHeadMapping starting (tools=${tools.length}, prefs=${JSON.stringify(prefs)}, printer defaults autoLevel=${!!p.autoLevel} flowCalibrate=${!!p.flowCalibrate} timelapse=${!!p.timelapse})`);
-        await c.applyHeadMapping(p, tools, map, prefs);
+        await c.applyHeadMapping(p, tools, map, prefs, { file: filename, plate });
         console.log(`[printfile] ${p.name}: applyHeadMapping resolved, calling startPrintFile`);
       }
       job.phase = "starting";
-      await c.startPrintFile(p, filename);
+      await c.startPrintFile(p, filename, { plate });
     });
     console.log(`[printfile] ${p.name}: startPrintFile resolved for "${filename}"`);
     // Printing it is what "ready to print" was waiting for -- clear the badge.
@@ -1964,6 +2018,9 @@ async function runPrintFileJob({ p, c, filename, tools, map, prefs, actor, needs
 app.post("/api/printfile", requireRegular, async (req, res) => {
   const { printer, filename, map, prefs } = req.body || {};
   const p = PRINTERS[printer];
+  // The file SnapCon staged on this printer, if this is it: its plate is
+  // used (M7.1).
+  const staged = (() => { const q = queuedFile.get(printer); return q && q.status === "ready" && q.name === filename ? q : null; })();
   if (!p) return res.status(400).json({ error: "Unknown printer" });
   if (!printerVisibleTo(req.user, p)) return res.status(403).json({ error: "You don't have access to this printer" });
   if (p.maintenanceMode) return res.status(409).json({ error: p.name + " is in maintenance mode — take it off maintenance before printing." });
@@ -2000,7 +2057,8 @@ app.post("/api/printfile", requireRegular, async (req, res) => {
   const job = { phase: needsMapping ? "mapping" : "starting", sent: 0, total: 0, done: false, error: null, result: null, ts: Date.now() };
   JOBS.set(jobId, job);
   res.json({ ok: true, jobId, printer: p.name, filename, mapped: tools.length });
-  runPrintFileJob({ p, c, filename, tools, map, prefs, actor: actorFromReq(req), needsMapping, job, printerKey: printer });
+  runPrintFileJob({ p, c, filename, tools, map, prefs, actor: actorFromReq(req), needsMapping, job, printerKey: printer,
+    plate: staged ? staged.plate : null });
 });
 
 // ---- Print control: pause / resume / cancel (standard Klipper macros) ----
@@ -2203,7 +2261,7 @@ function saveQueuedFiles() {
   for (const [idx, qf] of queuedFile) {
     if (qf.status !== "ready") continue;
     const p = PRINTERS[idx];
-    if (p && p.id) out[p.id] = { name: qf.name, ts: qf.ts };
+    if (p && p.id) out[p.id] = { name: qf.name, ts: qf.ts, plate: qf.plate == null ? null : qf.plate };
   }
   try { fs.writeFileSync(QUEUED_FILE_PATH, JSON.stringify(out, null, 2)); }
   catch (e) { console.error("[queued-files] save failed:", e.message); }
@@ -2214,7 +2272,7 @@ function loadQueuedFiles() {
   if (!saved || typeof saved !== "object") return;
   PRINTERS.forEach((p, idx) => {
     const entry = p.id && saved[p.id];
-    if (entry && entry.name) queuedFile.set(idx, { name: entry.name, status: "ready", ts: entry.ts || Date.now() });
+    if (entry && entry.name) queuedFile.set(idx, { name: entry.name, status: "ready", ts: entry.ts || Date.now(), plate: entry.plate == null ? null : entry.plate });
   });
 }
 loadQueuedFiles();
@@ -2309,8 +2367,8 @@ async function uploadNotifiedFile(idx, pl) {
     // --load CLI hook, which has no color-mapping concept) — apply the same
     // head mapping an immediate upload would have gotten, now that the
     // printer that was busy is finally idle enough to receive it.
-    if (c.applyHeadMapping && ((pl.tools && pl.tools.length) || printerHasAnyDefaultPref(p) || wantsAnyPref(pl.prefs))) await c.applyHeadMapping(p, pl.tools || [], pl.map, pl.prefs);
-    queuedFile.set(idx, { name: pl.name, status: "ready", ts: Date.now() });
+    if (c.applyHeadMapping && ((pl.tools && pl.tools.length) || printerHasAnyDefaultPref(p) || wantsAnyPref(pl.prefs))) await c.applyHeadMapping(p, pl.tools || [], pl.map, pl.prefs, { file: pl.name, plate: pl.plate });
+    queuedFile.set(idx, { name: pl.name, status: "ready", ts: Date.now(), plate: pl.plate == null ? null : pl.plate });
     saveQueuedFiles();
     // pl.actor is attached by whichever caller queued this (a web request's
     // actorFromReq(req), or userLabel:"CLI" for the --load/--snapcon hook) —
@@ -4784,6 +4842,11 @@ async function resolveQueuedFile(req, res, f, name, sub) {
   }
   if (ident && hash.sha256 !== ident.sha256) {
     res.status(409).json({ error: "This file changed since the Library last read it. Reload the model and try again.", code: "library_file_changed" });
+    return null;
+  }
+  // Dispatch starts a project's plate 1 (M7.1): another plate is never queued.
+  if (ident && ident.plate != null && ident.plate !== 1) {
+    res.status(400).json({ error: `The queue can only start plate 1 of a project, and this is plate ${ident.plate}. Print it directly instead.`, code: "plate_unsupported" });
     return null;
   }
   return { root: ref.root, hash, ident };
