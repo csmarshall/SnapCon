@@ -90,18 +90,24 @@ test("AuditLog: prune() with a generous retention window keeps everything", () =
   assert.equal(audit.query({}).total, 1);
 });
 
-test("AuditLog: prune(0) removes every existing row (each one is already older than a 0-day window by the time prune runs)", () => {
+test("AuditLog: prune(0) removes every existing row (each one is already older than a 0-day window by the time prune runs)", t => {
+  // prune keeps rows exactly at the cutoff (ts < cutoff). Step the clock so the
+  // rows really are older, instead of hoping a millisecond passes.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const audit = freshAuditLog();
   audit.log({ category: "auth", event: "login", userId: "u1", userLabel: "alice" });
   audit.log({ category: "job", event: "print-started", userId: "u1", userLabel: "alice", printerId: "p1" });
+  t.mock.timers.tick(1);
   audit.prune(0);
   assert.equal(audit.query({}).total, 0);
 });
 
-test("AuditLog: prune() falls back to retentionDaysFn() when called with no argument", () => {
+test("AuditLog: prune() falls back to retentionDaysFn() when called with no argument", t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "snapcon-audit-test-"));
   const audit = createAuditLog({ baseDir, retentionDaysFn: () => 0 });
   audit.log({ category: "auth", event: "login", userId: "u1", userLabel: "alice" });
+  t.mock.timers.tick(1);
   audit.prune();
   assert.equal(audit.query({}).total, 0);
 });
