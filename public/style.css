@@ -2034,3 +2034,52 @@
     .lib-card,.lib-card:hover{transition:none; transform:none;}
     .lib-spin{animation:none;}
   }
+
+  /* ---- Library M6: changing the Library ---- */
+  .lib-bar.is-ok{border-color:color-mix(in srgb,var(--ok) 50%,transparent); background:color-mix(in srgb,var(--ok) 10%,transparent);}
+  .lib-bar .modalx{margin-left:auto;}
+  .lib-warn-text{color:var(--warn);}
+  .lib-tools{display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 12px;}
+  .lib-tools .btn-sm,.lib-actions .btn-sm,.lib-selbar .btn-sm,.lib-history .btn-sm,.lib-other .btn-sm{padding:5px 10px; font-size:11.5px;}
+  .lib-menu{position:relative; display:inline-block;}
+  .lib-menu > summary{list-style:none; cursor:pointer;}
+  .lib-menu > summary::-webkit-details-marker{display:none;}
+  .lib-menu-list{position:absolute; right:0; z-index:20; margin-top:4px; min-width:230px; display:flex; flex-direction:column; padding:4px; background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.28);}
+  .lib-tools .lib-menu-list{left:0; right:auto;}
+  .lib-menu-list button{font:inherit; font-size:12.5px; text-align:left; background:none; border:none; color:var(--ink); padding:8px 10px; border-radius:6px; cursor:pointer;}
+  .lib-menu-list button:hover,.lib-menu-list button:focus-visible{background:var(--panel-2); outline:none;}
+  .lib-var-act{position:relative;}
+  .lib-act-row{display:flex; align-items:center; justify-content:flex-end; gap:8px;}
+  .lib-sel{display:flex; align-items:center; cursor:pointer;}
+  .lib-proj{position:relative;}
+  .lib-proj > .lib-act-row{position:absolute; top:8px; right:10px;}
+  .lib-selbar[hidden]{display:none;}
+  .lib-selbar{position:sticky; bottom:0; z-index:15; display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:16px; padding:10px 12px; background:var(--panel); border:1px solid var(--accent); border-radius:10px; box-shadow:0 -6px 18px rgba(0,0,0,.18); font-size:12.5px;}
+  .lib-selbar > span{margin-right:auto; font-weight:650;}
+  .lib-actions{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;}
+  .lib-dialog{max-width:620px;}
+  .lib-dlg-body{font-size:13px; color:var(--ink-dim);}
+  .lib-dlg-body p{margin:0 0 10px;}
+  .lib-dlg-body .field{margin-bottom:8px;}
+  .lib-dlg-sum{color:var(--ink); background:var(--panel-2); border-radius:8px; padding:8px 10px;}
+  .lib-dlg-list{margin:0 0 10px; padding-left:18px; color:var(--ink);}
+  .lib-dlg-status{min-height:18px; margin-top:6px;}
+  .lib-dlg-foot{display:flex; justify-content:flex-end; gap:8px; margin-top:12px;}
+  .lib-fs{border:1px solid var(--line-soft); border-radius:8px; padding:8px 10px; margin:0 0 10px; display:flex; flex-wrap:wrap; gap:6px 16px;}
+  .lib-fs legend{padding:0 4px; margin:0;}
+  .lib-fs label{display:flex; align-items:center; gap:6px; color:var(--ink); cursor:pointer;}
+  .lib-pick{max-height:300px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin:4px 0 10px;}
+  .lib-pick-row{display:grid; grid-template-columns:18px 44px minmax(0,1fr); align-items:center; gap:10px; padding:6px 8px; border:1px solid var(--line-soft); border-radius:8px; cursor:pointer;}
+  .lib-pick-row:has(input:checked){border-color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,transparent);}
+  .lib-pick-row .lib-var-thumb{width:44px; height:44px;}
+  .lib-pick-txt{display:flex; flex-direction:column; min-width:0;}
+  .lib-covers{display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; max-height:340px; overflow-y:auto; margin-bottom:10px;}
+  .lib-cover-opt{display:flex; flex-direction:column; gap:4px; cursor:pointer; min-width:0;}
+  .lib-cover-opt input{position:absolute; opacity:0; pointer-events:none;}
+  .lib-cover-opt:has(input:checked) .lib-well-sm{border-color:var(--accent); box-shadow:0 0 0 2px var(--accent);}
+  .lib-cover-opt:has(input:focus-visible) .lib-well-sm{outline:2px solid var(--accent); outline-offset:2px;}
+  .lib-history .lib-item > div{flex:1; min-width:0;}
+  @media (max-width:760px){
+    .lib-menu-list,.lib-tools .lib-menu-list{right:0; left:auto; min-width:200px; max-width:calc(100vw - 40px);}
+    .lib-dlg-foot .btn{flex:1;}
+  }

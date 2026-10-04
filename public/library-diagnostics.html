@@ -172,7 +172,7 @@ function summary() {
 function fileRow(f) {
   const w = f.why;
   const conf = fileConf(f);
-  const printers = f.variants.map(v => `${v.plate != null ? "plate " + v.plate + ": " : ""}${esc(v.printer.label || v.printer.family || "unknown")} ${pill(v.printer.state, (v.printer.confidence || "-") + " · " + v.printer.state)}`).join("<br>");
+  const printers = f.variants.map(v => `${v.plate != null ? "plate " + v.plate + ": " : ""}${v.printer.state === "decision" && v.printer.fileSays ? `<span class="sub">file says ${esc(v.printer.fileSays.label || v.printer.fileSays.family)} →</span> ` : ""}${esc(v.printer.label || v.printer.family || "unknown")} ${pill(v.printer.state, (v.printer.confidence || "-") + " · " + v.printer.state)}`).join("<br>");
   const t = f.title;
   const titleInfo = t ? `<details><summary>Title</summary><ul class="ev"><li><span class="k">original</span> ${esc(t.original)}</li><li><span class="k">normalised</span> ${esc(t.normalized) || "∅"}${t.genericScore ? ` <span class="k">(generic ${esc(t.genericScore)})</span>` : ""}</li>${(t.transformations || []).map(x => `<li><span class="k">${esc(x.rule)}</span> removed “${esc(x.removed)}”</li>`).join("")}</ul></details>` : "";
   const proj = f.project ? `<span class="path">3MF ${esc(f.project.flavour)} · ${f.project.plates} plate(s), ${f.project.printablePlates} printable${f.project.designer ? " · " + esc(f.project.designer) : ""}${f.project.designModelId ? " · design " + esc(f.project.designModelId) : ""}</span>` : "";
@@ -242,7 +242,7 @@ function otherTab() {
     `</tbody></table>` + more(list.length) +
     `<h2>Duplicates (${dups.length})</h2><div class="sub">The same content at two locations. Recorded only; nothing is hidden.</div>` +
     dups.map(d => `<div class="item"><div class="path">${esc(d.a)}</div><div class="path">${esc(d.b)}</div><div class="why">${esc(d.basis === "sha256" ? "byte-identical (full hash)" : "same quick fingerprint; the full hash will confirm")}</div></div>`).join("") +
-    `<h2>Decisions (${decs.length})</h2>` + (decs.length ? `<table><thead><tr><th>#</th><th>Relation</th><th>Subject</th><th>Object</th><th>State</th></tr></thead><tbody>${decs.map(d => `<tr><td>${d.id}</td><td>${esc(d.relation)} ${esc(d.polarity)}</td><td class="file"><span class="path">${esc(d.hint || d.subject)}</span></td><td class="file"><span class="path">${esc(d.object || "")}</span></td><td>${d.superseded ? "superseded" : "active"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No Decisions yet.</div>');
+    `<h2>Decisions (${decs.length})</h2><div class="sub">What people decided. An active Decision controls the result: automatic grouping and printer resolution follow it, whatever new Evidence appears.</div>` + (decs.length ? `<table><thead><tr><th>#</th><th>Relation</th><th>Subject</th><th>Object</th><th>State</th></tr></thead><tbody>${decs.map(d => `<tr><td>${d.id}</td><td>${esc(d.relation)} ${esc(d.polarity)}</td><td class="file"><span class="path">${esc(d.hint || d.subject)}</span></td><td class="file"><span class="path">${esc(d.object || "")}</span></td><td>${d.superseded ? "superseded" : d.withdrawn ? "undone" : "active"}${d.action ? ` <span class="sub">action ${esc(d.action)}</span>` : ""}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No Decisions yet.</div>');
 }
 
 function more(n) { return n > shown ? `<div class="more"><button type="button" id="more">Show ${Math.min(PAGE, n - shown)} more of ${n - shown}</button></div>` : ""; }

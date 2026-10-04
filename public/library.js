@@ -13,10 +13,12 @@
   const PAGE=60;
   const L={
     open:false, view:null, uuid:null, syncing:false, req:0,
-    filters:{ q:"", printer:"", location:"", type:"", material:"", attention:false, sort:"name" },
+    filters:{ q:"", printer:"", location:"", type:"", material:"", attention:false, hidden:false, sort:"name" },
     models:[], next:null, total:0, facets:null, overview:null, loadingMore:false,
     // Back from a Model returns to the same cards at the same place.
     gridKept:false, gridScroll:0,
+    // M6: what was just done, with its Undo; files ticked for Separate/Move.
+    flash:null, selected:new Set(),
   };
 
   // ---- data ----
@@ -89,10 +91,18 @@
     root.innerHTML=`<div class="lib-shell">
       <div class="lib-bars" id="libBars"></div>
       <div id="libBody"><div class="lib-loading">${esc(t("library.loading"))}</div></div></div>`;
-    loadOverview();
-    if(L.view==="model") renderModel(L.uuid);
-    else if(L.view==="attention") renderAttention();
-    else renderGrid();
+    // What this person may change comes with the overview: the first view
+    // waits for it (or tools would render as if they had none); later views
+    // use the one already known and refresh it alongside.
+    const first=!L.overview;
+    const ready=loadOverview();
+    const token=L.req;
+    (first?ready:Promise.resolve()).then(()=>{
+      if(token!==L.req) return;
+      if(L.view==="model") renderModel(L.uuid);
+      else if(L.view==="attention") renderAttention();
+      else renderGrid();
+    });
   }
 
   // Offline locations, indexing, and the way to Needs attention: shown on
@@ -108,9 +118,13 @@
     if(err){ el.innerHTML=err.code==="library_unavailable"||err.status===503?`<div class="lib-bar is-bad">${esc(t("library.unavailable"))}</div>`:""; return; }
     const o=L.overview; if(!o) return;
     const off=o.roots.filter(r=>r.offline);
+    const fl=L.flash;
     const ix=o.indexing;
     const idx=ix&&(ix.scanning||ix.queued||ix.hashing);
     el.innerHTML=
+      (fl?`<div class="lib-bar ${fl.error?"is-bad":"is-ok"}" role="status"><span>${esc(fl.text)}</span>
+        ${fl.actionId?`<button type="button" class="btn ghost btn-sm" id="libFlashUndo">${esc(t("library.undo"))}</button>`:""}
+        <button type="button" class="modalx" id="libFlashX" aria-label="${esc(t("library.close"))}">✕</button></div>`:"")+
       off.map(r=>`<div class="lib-bar is-warn" role="status"><span class="lib-bar-dot"></span>
         <span>${esc(t("library.offline_bar",{name:r.name}))}</span>
         ${isAdmin()?`<button type="button" class="btn ghost btn-sm lib-recheck" data-root="${esc(r.id)}">${esc(t("library.recheck"))}</button>`:""}</div>`).join("")+
@@ -120,6 +134,8 @@
       try{ await fetch("/api/library/roots/"+encodeURIComponent(b.dataset.root)+"/rescan",{method:"POST"}); }catch{}
       setTimeout(loadOverview,1500);
     }));
+    if($("libFlashUndo")) $("libFlashUndo").addEventListener("click",()=>undoAction(fl.actionId));
+    if($("libFlashX")) $("libFlashX").addEventListener("click",()=>{ L.flash=null; renderBars(); });
     const n=$("libAttnCount");
     if(n){ const c=o.attention||{}; const k=(c.action||0)+(c.review||0); n.textContent=k?String(k):""; n.style.display=k?"":"none"; n.classList.toggle("is-bad",!!c.action); }
   }
@@ -133,6 +149,7 @@
     if(f.type) p.set("type",f.type);
     if(f.material) p.set("material",f.material);
     if(f.attention) p.set("attention","1");
+    if(f.hidden) p.set("hidden","1");
     if(f.sort&&f.sort!=="name") p.set("sort",f.sort);
     for(const [k,v] of Object.entries(extra||{})) if(v!=null) p.set(k,v);
     return p.toString();
@@ -155,6 +172,7 @@
         <div class="lib-f"><label class="fl" for="libSort">${esc(t("library.f_sort"))}</label><select class="field" id="libSort">
           <option value="name">${esc(t("library.sort_name"))}</option><option value="recent">${esc(t("library.sort_recent"))}</option></select></div>
         <div class="lib-f lib-f-check">${checkboxHtml("libAttention", f.attention, t("library.f_attention"), "", false)}</div>
+        <div class="lib-f lib-f-check" id="libHiddenWrap" style="display:none">${checkboxHtml("libHidden", f.hidden, t("library.f_hidden"), "", false)}</div>
       </div>
       <div class="lib-active" id="libActive"></div>
       <div class="lib-grid" id="libGrid" aria-live="polite"></div>
@@ -167,6 +185,7 @@
       $(id).addEventListener("change",()=>{ f[key]=$(id).value; loadModels(true); });
     }
     $("libAttention").addEventListener("change",()=>{ f.attention=$("libAttention").checked; loadModels(true); });
+    $("libHidden").addEventListener("change",()=>{ f.hidden=$("libHidden").checked; loadModels(true); });
     $("libAttnLink").addEventListener("click",e=>{ e.preventDefault(); go("/library/attention"); });
     if(L.gridKept && L.models.length){
       // Back from a Model: the same cards, the same place, no new requests.
@@ -193,6 +212,8 @@
     opts("libLocation", t("library.f_any_location"), fc.roots.map(x=>({v:x.id,l:x.name,n:x.count})), f.location);
     opts("libType", t("library.f_any_type"), fc.types.map(x=>({v:x.key,l:t("library.type_"+x.key),n:x.count})), f.type);
     opts("libMaterial", t("library.f_any_material"), fc.materials.map(x=>({v:x.key,l:x.key,n:x.count})), f.material);
+    // Hidden Models are only offered when there are some (M6: recoverable).
+    if($("libHiddenWrap")){ $("libHiddenWrap").style.display=(fc.hidden||f.hidden)?"":"none"; const lab=$("libHiddenWrap").querySelector(".checkbox-label"); if(lab) lab.textContent=t("library.f_hidden_n",{n:fc.hidden||0}); }
   }
   async function loadModels(reset){
     const token=++L.req;
@@ -231,11 +252,11 @@
       }
     }
   }
-  const anyFilter=()=>{ const f=L.filters; return !!(f.q||f.printer||f.location||f.type||f.material||f.attention); };
+  const anyFilter=()=>{ const f=L.filters; return !!(f.q||f.printer||f.location||f.type||f.material||f.attention||f.hidden); };
   function renderActive(){
     const el=$("libActive"); if(!el) return;
     el.innerHTML=anyFilter()?`<button type="button" class="btn ghost btn-sm" id="libClear">${esc(t("library.clear_filters"))}</button>`:"";
-    if($("libClear")) $("libClear").addEventListener("click",()=>{ Object.assign(L.filters,{q:"",printer:"",location:"",type:"",material:"",attention:false}); renderGrid(); });
+    if($("libClear")) $("libClear").addEventListener("click",()=>{ Object.assign(L.filters,{q:"",printer:"",location:"",type:"",material:"",attention:false,hidden:false}); renderGrid(); });
   }
 
   // The fleet-fit chips: which printer families this Model has files for,
@@ -278,6 +299,9 @@
     try{ m=await api("/api/library/models/"+encodeURIComponent(uuid)); }
     catch(e){ if(token===L.req) $("libBody").innerHTML=`${backHtml()}<div class="lib-empty">${esc(e.status===404?t("library.model_not_found"):t("library.load_failed"))}</div>`; wireBack(); return; }
     if(token!==L.req||!$("libBody")) return;
+    // An old link to a merged Model lands on the survivor.
+    if(m.mergedInto){ L.flash={text:t("library.was_merged",{name:m.name})}; history.replaceState(null,"","/library/m/"+m.mergedInto); return route("/library/m/"+m.mergedInto,false); }
+    L.model=m; L.selected=new Set();
     const byFamily=new Map();
     for(const v of m.printables){ const k=v.printer.family||"~unknown"; if(!byFamily.has(k)) byFamily.set(k,[]); byFamily.get(k).push(v); }
     const famOrder=[...byFamily.keys()].sort((a,b)=>(a==="~unknown")-(b==="~unknown")||byFamily.get(b).length-byFamily.get(a).length);
@@ -302,7 +326,10 @@
           </div>
           <div class="lib-model-facts">
             <h1 class="lib-model-name">${esc(m.name)}</h1>
-            <div class="lib-model-sub">${esc(summaryLine(m))}</div>
+            <div class="lib-model-sub">${esc(summaryLine(m))}${m.nameSource==="user"?` · <span title="${esc(t("library.named_by_person_title"))}">${esc(t("library.named_by_person"))}</span>`:""}</div>
+            ${m.hidden?`<div class="lib-bar is-warn"><span>${esc(t("library.hidden_banner"))}</span>${can("hide")?`<button type="button" class="btn ghost btn-sm" id="libUnhide">${esc(t("library.unhide_model"))}</button>`:""}</div>`:""}
+            ${m.coverMissing?`<p class="settings-help lib-warn-text">${esc(t("library.cover_missing"))}</p>`:""}
+            ${toolsHtml(m)}
             <dl class="lib-dl">${facts.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}
               <dt>${esc(t("library.fits"))}</dt><dd>${fits.length?fits.map(x=>fitLine(x)).join(""):`<span class="lib-dim">${esc(fitsNone)}</span>`}</dd>
             </dl>
@@ -315,6 +342,13 @@
         </section>`:""}
         ${m.projects.length?`<section class="lib-sec"><h2>${esc(t("library.sec_projects"))} <span class="lib-sec-n">${m.projects.length}</span></h2>${m.projects.map(projectHtml).join("")}</section>`:""}
         ${m.others.length?`<section class="lib-sec"><h2>${esc(t("library.sec_other"))} <span class="lib-sec-n">${m.others.length}</span></h2><div class="lib-others">${m.others.map(otherHtml).join("")}</div></section>`:""}
+        ${m.hiddenFiles&&m.hiddenFiles.length?`<section class="lib-sec"><h2>${esc(t("library.sec_hidden_files"))} <span class="lib-sec-n">${m.hiddenFiles.length}</span></h2>
+          <p class="settings-help">${esc(t("library.hidden_files_help"))}</p>
+          <div class="lib-others">${m.hiddenFiles.map(f=>`<div class="lib-other"><span class="lib-var-thumb">${f.thumb?`<img loading="lazy" alt="" src="${thumbUrl(f.thumb)}">`:`<span class="lib-noimg is-sm"></span>`}</span>
+            <div><div class="lib-var-title"><span class="lib-fname" title="${esc(f.name)}">${esc(stem(f.name))}</span></div><div class="lib-var-where">${esc(f.rootName)} · ${esc(f.path)}</div>
+            ${can("hide")?`<button type="button" class="btn ghost btn-sm lib-unhide-file" data-ck="${esc(f.contentKey)}" data-name="${esc(stem(f.name))}">${esc(t("library.unhide_file"))}</button>`:""}</div></div>`).join("")}</div></section>`:""}
+        ${historyHtml(m)}
+        <div class="lib-selbar" id="libSelBar" hidden></div>
         ${isAdmin()?`<p class="settings-help lib-diag-link"><a href="/library-diagnostics.html" target="_blank" rel="noopener">${esc(t("library.diagnostics_link"))}</a></p>`:""}
       </div>`;
     wireBack();
@@ -325,6 +359,7 @@
     $("libBody").querySelectorAll("[data-model]").forEach(a=>a.addEventListener("click",e=>{ e.preventDefault(); go("/library/m/"+a.dataset.model); }));
     $("libBody").querySelectorAll(".lib-print").forEach(b=>b.addEventListener("click",()=>printVia(b.dataset.path,"print")));
     $("libBody").querySelectorAll(".lib-queue").forEach(b=>b.addEventListener("click",()=>printVia(b.dataset.path,"queue")));
+    wireModelTools(m);
   }
   function fitLine(x){
     const names=x.fit.printers.slice().sort((a,b)=>(x.fit.idle.includes(b)-x.fit.idle.includes(a))).map(p=>p.name+(x.fit.idle.includes(p)?" ("+t("library.idle")+")":""));
@@ -354,7 +389,7 @@
       ${list.map(variantHtml).join("")}</div>`;
   }
   function printerHtml(p){
-    if(p.state==="decision") return `<span class="lib-conf is-decision">${esc(t("library.printer_set"))}</span>`;
+    if(p.state==="decision") return `<span class="lib-conf is-decision" title="${esc(p.fileSays?t("library.pwhy_file_says",{family:p.fileSays.label||"?"}):"")}">${esc(t("library.printer_set"))}</span>`;
     if(p.state==="applied") return `<span class="lib-conf is-ok">${esc(t("library.printer_confident"))}</span>`;
     if(p.state==="suggested") return `<span class="lib-conf is-warn" title="${esc(t("library.printer_likely_title"))}">${esc(t("library.printer_likely"))}</span>`;
     return `<span class="lib-conf is-dim">${esc(t("library.printer_unknown"))}</span>`;
@@ -392,7 +427,7 @@
         ${f.duplicates.length?`<div class="lib-var-dup">${esc(tn("library.also_at",f.duplicates.length,{where:f.duplicates.map(d=>d.rootName+" · "+d.path).join("; ")}))}</div>`:""}
         <div class="lib-explains">${whyHereHtml(f.why)}${whyPrinterHtml(v.printer)}</div>
       </div>
-      <div class="lib-var-act">${pbtn}${qbtn}</div>
+      <div class="lib-var-act">${pbtn}${qbtn}${fileMenuHtml(f,{plate:v.plate,printer:v.printer})}</div>
     </div>`;
   }
 
@@ -432,11 +467,13 @@
     else if(p.state==="suggested") summary=t("library.pwhy_suggested",{family:p.label});
     else if(p.state==="recorded") summary=t("library.pwhy_recorded");
     else summary=t("library.pwhy_unknown");
-    const lines=(p.evidence||[]).map(e=>{
+    // A person's choice never hides what the file says (§4.1).
+    const said=p.state==="decision"&&p.fileSays?[t("library.pwhy_file_says",{family:p.fileSays.label||t("library.printer_unknown")})]:[];
+    const lines=said.concat((p.evidence||[]).map(e=>{
       const k=PRINTER_SIGNAL[e.signal];
       const base=k?t(k,{value:String(e.value)}):e.signal+": "+e.value;
       return base+(e.familyLabel&&e.familyLabel!==p.label?" → "+e.familyLabel:"")+(e.strength==="weak"?" ("+t("library.weak")+")":"");
-    });
+    }));
     if(p.others&&p.others.length) lines.push(t("library.pwhy_others",{list:p.others.map(o=>o.label).join(", ")}));
     return `<details class="lib-why"><summary>${esc(t("library.why_printer"))}</summary><p>${esc(summary)}</p>${lines.length?`<ul>${lines.map(l=>`<li>${esc(l)}</li>`).join("")}</ul>`:""}</details>`;
   }
@@ -448,7 +485,8 @@
       <details class="lib-why"><summary>${esc(t("library.why_only_suggestion"))}</summary>
         <p>${esc(t("library.sugg_explain"))}</p>${lines.length?`<ul>${lines.map(l=>`<li>${esc(l)}</li>`).join("")}</ul>`:""}
         ${s.missing?`<p class="lib-dim">${esc(missingText(s))}</p>`:""}</details>
-      <p class="settings-help">${esc(t("library.m6_note"))}</p></div>`;
+      ${s.review&&can("grouping")?`<div class="lib-actions"><button type="button" class="btn primary btn-sm lib-approve" data-review="${esc(s.review)}">${esc(t("library.merge_btn"))}</button>
+        <button type="button" class="btn ghost btn-sm lib-reject" data-review="${esc(s.review)}">${esc(t("library.keep_apart_btn"))}</button></div>`:""}</div>`;
   }
   function missingText(s){
     const g=s.groups||[];
@@ -469,7 +507,7 @@
         <span class="lib-well lib-well-sm">${pl.thumb?`<img loading="lazy" alt="" src="${thumbUrl(pl.thumb)}">`:`<span class="lib-noimg is-sm">${pl.plate}</span>`}</span>
         <span class="lib-plate-name">${esc(pl.name||t("library.plate_n",{n:pl.plate}))}</span>
         <span class="lib-plate-state">${esc(pl.printable?t("library.plate_printable"):t("library.plate_not_sliced"))}</span></div>`).join("")}</div>`:""}
-      <div class="lib-explains">${whyHereHtml(f.why)}</div></div>`;
+      <div class="lib-explains">${whyHereHtml(f.why)}</div>${fileMenuHtml(f,{})}</div>`;
   }
   function otherHtml(o){
     return `<div class="lib-other">
@@ -519,10 +557,12 @@
     }).join("");
     if(isAdmin()) $("libAttnBody").insertAdjacentHTML("beforeend",`<p class="settings-help lib-diag-link"><a href="/library-diagnostics.html" target="_blank" rel="noopener">${esc(t("library.diagnostics_link"))}</a></p>`);
     $("libAttnBody").querySelectorAll("[data-model]").forEach(x=>x.addEventListener("click",e=>{ e.preventDefault(); go("/library/m/"+x.dataset.model); }));
+    wireItemActions($("libAttnBody"), a.items);
   }
   // The Model page's own attention items: what is wrong or uncertain about
   // this Model, in the same words as Needs attention.
   function attentionBlock(items){
+    L.modelItems=items;
     // Suggestions have their own section on this page.
     const sorted=items.filter(i=>i.kind!=="suggested_match").sort((a,b)=>LEVELS.indexOf(a.level)-LEVELS.indexOf(b.level));
     if(!sorted.length) return "";
@@ -553,7 +593,303 @@
       case "source_may_match": text=t("library.it_source"); break;
       default: text=i.kind;
     }
-    return `<li class="lib-item lib-item-${i.level}"><span class="lib-item-dot" aria-hidden="true"></span><div><div>${esc(text)}</div>${models?`<div class="lib-item-models">${models}</div>`:""}</div></li>`;
+    return `<li class="lib-item lib-item-${i.level}"><span class="lib-item-dot" aria-hidden="true"></span><div><div>${esc(text)}</div>${models?`<div class="lib-item-models">${models}</div>`:""}${itemActionsHtml(i)}</div></li>`;
+  }
+
+  // ---- M6: changing the Library (§7) ----
+  // Every change is one POST to /api/library/actions; the server checks the
+  // capability and whether the request still applies (409 otherwise) and
+  // records it so it can be undone after a reload. Buttons here are only
+  // offered to those who may use them; that is convenience, not security.
+  const can=k=>!!(L.overview&&L.overview.can&&L.overview.can[k]);
+  const KIND_CAP={ merge:"grouping", split:"grouping", move:"grouping", approve:"grouping", reject:"grouping", dismiss:"review",
+    hide:"hide", unhide:"hide", hide_file:"hide", unhide_file:"hide", rename:"metadata", cover:"cover", set_printer:"metadata" };
+  async function post(url, body){
+    const r=await fetch(url,{ method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body||{}) });
+    if(typeof checkAuthFailure==="function") checkAuthFailure(r);
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok){ const e=new Error(b.error||("HTTP "+r.status)); e.status=r.status; e.code=b.code; e.body=b; throw e; }
+    return b;
+  }
+  function errText(e){
+    const k="library.err_"+(e.code||"");
+    const base=(e.code&&typeof hasTranslation==="function"&&hasTranslation(k))?t(k):(e.message||t("library.load_failed"));
+    return e.status===409?base+" "+t("library.reload_hint"):base;
+  }
+  // Do it, say what was done, offer Undo, and show the result.
+  async function act(action, flashText){
+    const r=await post("/api/library/actions", action);
+    L.gridKept=false;
+    L.flash={ text:typeof flashText==="function"?flashText(r):flashText, actionId:r.actionId };
+    afterChange(r.model);
+    return r;
+  }
+  async function undoAction(id){
+    try{
+      const r=await post("/api/library/actions/"+encodeURIComponent(id)+"/undo");
+      L.gridKept=false;
+      L.flash={ text:t("library.undone") };
+      afterChange(r.model);
+    }catch(e){ L.flash={ text:errText(e), error:true }; renderBars(); }
+  }
+  function afterChange(modelUuid){
+    if(L.view==="model"&&modelUuid&&modelUuid!==L.uuid) go("/library/m/"+modelUuid);
+    else render();
+  }
+
+  // A small dialog that says exactly what will happen, and shows why when it
+  // can't (a 409 says the Library changed meanwhile).
+  function dialog({ title, body, confirm, danger, onConfirm, wire, okEnabled=true }){
+    let el=$("libDialog");
+    if(!el){ el=document.createElement("div"); el.className="modal"; el.id="libDialog"; el.setAttribute("role","dialog"); el.setAttribute("aria-modal","true"); el.setAttribute("aria-labelledby","libDlgTitle"); document.body.appendChild(el); }
+    el.innerHTML=`<div class="modalbox lib-dialog">
+      <div class="modalhdr"><span id="libDlgTitle">${esc(title)}</span><button class="modalx" type="button" id="libDlgX" aria-label="${esc(t("library.close"))}">✕</button></div>
+      <div class="lib-dlg-body">${body}</div>
+      <div class="pstatus lib-dlg-status" id="libDlgStatus" role="alert"></div>
+      <div class="lib-dlg-foot"><button type="button" class="btn ghost" id="libDlgCancel">${esc(t("common.cancel"))}</button>
+        <button type="button" class="btn ${danger?"danger":"primary"}" id="libDlgOk" ${okEnabled?"":"disabled"}>${esc(confirm)}</button></div></div>`;
+    el.classList.add("show");
+    const close=()=>{ el.classList.remove("show"); el.innerHTML=""; document.removeEventListener("keydown",onKey); };
+    const onKey=e=>{ if(e.key==="Escape") close(); };
+    document.addEventListener("keydown",onKey);
+    $("libDlgX").addEventListener("click",close); $("libDlgCancel").addEventListener("click",close);
+    el.onclick=e=>{ if(e.target===el) close(); };   // the backdrop only, never a click inside
+    const ok=$("libDlgOk");
+    ok.addEventListener("click",async()=>{
+      ok.disabled=true; $("libDlgStatus").className="pstatus work"; $("libDlgStatus").textContent=t("library.working");
+      try{ await onConfirm(el); close(); }
+      catch(e){ $("libDlgStatus").className="pstatus err"; $("libDlgStatus").textContent=errText(e); ok.disabled=false; }
+    });
+    if(wire) wire(el, ok);
+    const first=el.querySelector("input:not([type=hidden]),select"); (first||ok).focus();
+    return el;
+  }
+
+  // Choosing another Model: search, and enough context to tell same-named
+  // Models apart (cover, printers, locations, how many files).
+  function chooserHtml(){
+    return `<label class="fl" for="libPickQ">${esc(t("library.pick_label"))}</label>
+      <input class="field" id="libPickQ" type="search" autocomplete="off" placeholder="${esc(t("library.search_placeholder"))}">
+      <div class="lib-pick" id="libPick" role="radiogroup" aria-label="${esc(t("library.pick_label"))}"></div>`;
+  }
+  function wireChooser(el, exclude, onPick){
+    let token=0, debounce=null;
+    const load=async q=>{
+      const my=++token;
+      let r; try{ r=await api("/api/library/models?limit=20"+(q?"&q="+encodeURIComponent(q):"")); }catch{ return; }
+      if(my!==token||!$("libPick")) return;
+      const list=r.models.filter(x=>!exclude.includes(x.uuid));
+      $("libPick").innerHTML=list.length?list.map(x=>`<label class="lib-pick-row"><input type="radio" class="lib-pick-radio" name="libPick" value="${esc(x.uuid)}" data-name="${esc(x.name)}">
+        <span class="lib-var-thumb">${x.cover?`<img loading="lazy" alt="" src="${thumbUrl(x.cover.thumb)}">`:`<span class="lib-noimg is-sm"></span>`}</span>
+        <span class="lib-pick-txt"><span class="lib-fname">${esc(x.name)}</span>
+        <span class="lib-var-where">${esc([x.files===1?t("library.one_file"):tn("library.n_files",x.files), x.families.map(f=>shortFamily(f.label)).join(", "), x.locations.map(l=>l.name).join(", ")].filter(Boolean).join(" · "))}</span></span></label>`).join("")
+        :`<div class="lib-empty-sm">${esc(t("library.no_match"))}</div>`;
+      $("libPick").querySelectorAll(".lib-pick-radio").forEach(rb=>rb.addEventListener("change",()=>onPick({ uuid:rb.value, name:rb.dataset.name })));
+    };
+    $("libPickQ").addEventListener("input",()=>{ clearTimeout(debounce); debounce=setTimeout(()=>load($("libPickQ").value.trim()),200); });
+    load("");
+  }
+
+  // ---- the Model's own tools ----
+  function toolsHtml(m){
+    const b=(id,label,cap)=>can(cap)?`<button type="button" class="btn ghost btn-sm" id="${id}">${esc(label)}</button>`:"";
+    const main=b("libRename",t("library.rename_btn"),"metadata")+(m.pictures&&m.pictures.length>1?b("libCover",t("library.cover_btn"),"cover"):"");
+    const more=b("libMerge",t("library.merge_into_btn"),"grouping")+(m.hidden?"":b("libHide",t("library.hide_model_btn"),"hide"));
+    if(!main&&!more) return "";
+    // The grouping changes sit one step away, never next to Print.
+    return `<div class="lib-tools">${main}${more?`<details class="lib-menu"><summary class="btn ghost btn-sm">${esc(t("library.more_btn"))}</summary><div class="lib-menu-list">${more}</div></details>`:""}</div>`;
+  }
+  function fileMenuHtml(f, { plate, printer }){
+    const items=[];
+    const key=`data-ck="${esc(f.contentKey)}" data-name="${esc(stem(f.name))}"`;
+    if(can("grouping")) items.push(`<button type="button" class="lib-move" ${key}>${esc(t("library.move_btn"))}</button>`, `<button type="button" class="lib-split" ${key}>${esc(t("library.split_btn"))}</button>`);
+    if(can("metadata")&&printer) items.push(`<button type="button" class="lib-setprinter" ${key} data-plate="${plate==null?"":esc(plate)}">${esc(t("library.set_printer_btn"))}</button>`);
+    if(can("hide")) items.push(`<button type="button" class="lib-hidefile" ${key}>${esc(t("library.hide_file_btn"))}</button>`);
+    if(!items.length) return "";
+    const pick=can("grouping")?`<label class="lib-sel" title="${esc(t("library.select_title"))}"><input type="checkbox" class="checkbox-input lib-selbox" data-ck="${esc(f.contentKey)}" aria-label="${esc(t("library.select_file",{name:stem(f.name)}))}"></label>`:"";
+    return `<div class="lib-act-row">${pick}<details class="lib-menu lib-file-menu"><summary class="btn ghost btn-sm" aria-label="${esc(t("library.file_actions",{name:stem(f.name)}))}">⋯</summary><div class="lib-menu-list">${items.join("")}</div></details></div>`;
+  }
+  const KIND_TEXT=k=>t("library.change_"+k);
+  function historyHtml(m){
+    const h=m.history||[];
+    if(!h.length) return "";
+    return `<section class="lib-sec"><h2>${esc(t("library.sec_history"))}</h2><ul class="lib-items lib-history">${h.map(a=>`<li class="lib-item">
+      <span class="lib-item-dot" aria-hidden="true"></span><div><div>${esc(KIND_TEXT(a.kind))}${historyDetail(a)}</div>
+      <div class="lib-var-where">${esc([a.by||t("library.someone"), typeof fmtTime==="function"?fmtTime(a.at):new Date(a.at).toLocaleString()].join(" · "))}${a.undoneAt?" · "+esc(t("library.undone_by",{who:a.undoneBy||t("library.someone")})):""}</div>
+      ${a.undoable&&can(KIND_CAP[a.kind])?`<button type="button" class="btn ghost btn-sm lib-undo" data-action="${esc(a.id)}">${esc(t("library.undo"))}</button>`:""}</div></li>`).join("")}</ul></section>`;
+  }
+  function historyDetail(a){
+    const s=a.summary||{};
+    const n=x=>x&&x.name?"“"+x.name+"”":"";
+    if(a.kind==="merge"||a.kind==="approve") return esc(": "+t("library.hist_merge",{from:n(s.from),into:n(s.into)}));
+    if(a.kind==="move") return esc(": "+t("library.hist_move",{files:(s.files||[]).join(", "),to:n(s.to)}));
+    if(a.kind==="split") return esc(": "+t("library.hist_split",{files:(s.files||[]).join(", "),to:n(s.to)}));
+    if(a.kind==="rename") return esc(": “"+(s.before||"")+"” → “"+(s.after||"")+"”");
+    if(a.kind==="set_printer") return esc(": "+(s.file||"")+" → "+(s.family?printerLabel(s.family):t("library.printer_file_says_short")));
+    if(a.kind==="reject") return esc(": "+n(s.a)+" / "+n(s.b));
+    if(a.kind==="hide_file"||a.kind==="unhide_file") return esc(": "+(s.file||""));
+    return "";
+  }
+  const printerLabel=k=>{ const f=(window.PrinterIdentity&&PrinterIdentity.FAMILIES||[]).find(x=>x.key===k); return f?f.label:k; };
+
+  function wireModelTools(m){
+    const body=$("libBody"), name=m.name;
+    const on=(sel,fn)=>body.querySelectorAll(sel).forEach(el=>el.addEventListener("click",()=>{ const d=el.closest("details"); if(d) d.open=false; fn(el); }));
+    on("#libRename",()=>dialog({ title:t("library.rename_title",{name}), confirm:t("library.rename_ok"),
+      body:`<label class="fl" for="libNewName">${esc(t("library.name_label"))}</label><input class="field" id="libNewName" maxlength="120" value="${esc(name)}">
+        <p class="settings-help">${esc(t("library.rename_help"))}</p>
+        ${m.nameSource==="user"?`<p class="settings-help"><button type="button" class="btn ghost btn-sm" id="libAutoName">${esc(t("library.rename_auto"))}</button></p>`:""}`,
+      wire:el=>{ const a=$("libAutoName"); if(a) a.addEventListener("click",async()=>{ try{ await act({ kind:"rename", model:m.uuid, auto:true }, t("library.done_rename_auto")); el.classList.remove("show"); }catch(e){ $("libDlgStatus").textContent=errText(e); } }); },
+      onConfirm:()=>act({ kind:"rename", model:m.uuid, name:$("libNewName").value }, r=>t("library.done_rename",{after:r.after})) }));
+    on("#libCover",()=>{
+      let pick=null;
+      dialog({ title:t("library.cover_title",{name}), confirm:t("library.cover_ok"), okEnabled:false,
+        body:`<div class="lib-covers" role="radiogroup" aria-label="${esc(t("library.cover_title",{name}))}">${m.pictures.map((p,i)=>`<label class="lib-cover-opt"><input type="radio" name="libCoverPick" value="${i}" class="lib-pick-radio">
+          <span class="lib-well lib-well-sm"><img loading="lazy" alt="" src="${thumbUrl(p.thumb)}"></span><span class="lib-plate-name" title="${esc(p.label)}">${esc(p.label)}</span></label>`).join("")}</div>
+          <p class="settings-help">${esc(t("library.cover_help"))}</p>${m.coverSource==="user"?`<button type="button" class="btn ghost btn-sm" id="libCoverAuto">${esc(t("library.cover_auto"))}</button>`:""}`,
+        wire:(el,ok)=>{ el.querySelectorAll("input[name=libCoverPick]").forEach(r=>r.addEventListener("change",()=>{ pick=m.pictures[Number(r.value)]; ok.disabled=false; }));
+          const a=$("libCoverAuto"); if(a) a.addEventListener("click",async()=>{ try{ await act({ kind:"cover", model:m.uuid, auto:true }, t("library.done_cover_auto")); el.classList.remove("show"); }catch(e){ $("libDlgStatus").textContent=errText(e); } }); },
+        onConfirm:()=>act({ kind:"cover", model:m.uuid, file:pick.contentKey, plate:pick.plate }, t("library.done_cover")) });
+    });
+    on("#libMerge",()=>{
+      let target=null;
+      dialog({ title:t("library.merge_title_pick",{name}), confirm:t("library.merge_ok_pick"), okEnabled:false,
+        body:`<p>${esc(t("library.merge_help",{name}))}</p>${chooserHtml()}<div id="libMergeSummary"></div>`,
+        wire:(el,ok)=>wireChooser(el,[m.uuid],x=>{ target=x; ok.disabled=false; ok.textContent=t("library.merge_ok",{into:x.name});
+          $("libMergeSummary").innerHTML=mergeChoicesHtml(name, x.name); }),
+        onConfirm:()=>act({ kind:"merge", from:m.uuid, into:target.uuid, keepName:radio("libKeepName"), keepCover:radio("libKeepCover") },
+          r=>t("library.done_merge",{from:r.from.name,into:r.into.name})) });
+    });
+    on("#libHide",()=>dialog({ title:t("library.hide_title",{name}), confirm:t("library.hide_ok"), body:`<p>${esc(t("library.hide_help"))}</p>`,
+      onConfirm:()=>act({ kind:"hide", model:m.uuid }, t("library.done_hide",{name})) }));
+    on("#libUnhide",async()=>{ try{ await act({ kind:"unhide", model:m.uuid }, t("library.done_unhide",{name})); }catch(e){ L.flash={ text:errText(e), error:true }; renderBars(); } });
+    on(".lib-unhide-file",async el=>{ try{ await act({ kind:"unhide_file", model:m.uuid, files:[el.dataset.ck] }, t("library.done_unhide_file",{file:el.dataset.name})); }catch(e){ L.flash={ text:errText(e), error:true }; renderBars(); } });
+    on(".lib-hidefile",el=>dialog({ title:t("library.hide_file_title",{file:el.dataset.name}), confirm:t("library.hide_file_ok"), body:`<p>${esc(t("library.hide_file_help"))}</p>`,
+      onConfirm:()=>act({ kind:"hide_file", model:m.uuid, files:[el.dataset.ck] }, t("library.done_hide_file",{file:el.dataset.name})) }));
+    on(".lib-move",el=>moveDialog(m,[{ ck:el.dataset.ck, name:el.dataset.name }]));
+    on(".lib-split",el=>splitDialog(m,[{ ck:el.dataset.ck, name:el.dataset.name }]));
+    on(".lib-setprinter",el=>printerDialog(m, el.dataset.ck, el.dataset.name, el.dataset.plate===""?null:Number(el.dataset.plate)));
+    on(".lib-undo",el=>undoAction(el.dataset.action));
+    on(".lib-approve",el=>approveDialog(Number(el.dataset.review), m.uuid));
+    on(".lib-reject",el=>rejectDialog(Number(el.dataset.review)));
+    // Ticked files: Separate or Move them together.
+    const bar=$("libSelBar");
+    const sync=()=>{
+      const picked=[...body.querySelectorAll(".lib-selbox:checked")].map(x=>x.dataset.ck);
+      L.selected=new Set(picked);
+      body.querySelectorAll(".lib-selbox").forEach(x=>{ x.checked=L.selected.has(x.dataset.ck); });
+      const n=L.selected.size;
+      bar.hidden=!n;
+      if(!n){ bar.innerHTML=""; return; }
+      const files=[...L.selected].map(ck=>({ ck, name:(body.querySelector(`.lib-selbox[data-ck="${CSS.escape(ck)}"]`)||{}).closest?.(".lib-var,.lib-proj")?.querySelector(".lib-fname")?.textContent||"" }));
+      bar.innerHTML=`<span>${esc(tn("library.selected_n",n))}</span>
+        <button type="button" class="btn ghost btn-sm" id="libSelSplit">${esc(tn("library.split_n_btn",n))}</button>
+        <button type="button" class="btn ghost btn-sm" id="libSelMove">${esc(tn("library.move_n_btn",n))}</button>
+        <button type="button" class="btn ghost btn-sm" id="libSelClear">${esc(t("library.clear_selection"))}</button>`;
+      $("libSelSplit").addEventListener("click",()=>splitDialog(m,files));
+      $("libSelMove").addEventListener("click",()=>moveDialog(m,files));
+      $("libSelClear").addEventListener("click",()=>{ body.querySelectorAll(".lib-selbox").forEach(x=>{ x.checked=false; }); sync(); });
+    };
+    body.querySelectorAll(".lib-selbox").forEach(x=>x.addEventListener("change",()=>{
+      // One content can show on several rows (plates): tick them all together.
+      body.querySelectorAll(`.lib-selbox[data-ck="${CSS.escape(x.dataset.ck)}"]`).forEach(y=>{ y.checked=x.checked; });
+      sync();
+    }));
+    if(L.modelItems) wireItemActions(body, L.modelItems);
+  }
+  const radio=name=>{ const r=document.querySelector(`input[name=${name}]:checked`); return r?r.value:undefined; };
+  function mergeChoicesHtml(fromName, intoName){
+    return `<p class="lib-dlg-sum">${esc(t("library.merge_summary",{from:fromName,into:intoName}))}</p>
+      <fieldset class="lib-fs"><legend class="fl">${esc(t("library.keep_name"))}</legend>
+        <label><input type="radio" name="libKeepName" value="into" checked> ${esc(intoName)}</label>
+        <label><input type="radio" name="libKeepName" value="from"> ${esc(fromName)}</label></fieldset>
+      <fieldset class="lib-fs"><legend class="fl">${esc(t("library.keep_cover"))}</legend>
+        <label><input type="radio" name="libKeepCover" value="into" checked> ${esc(t("library.cover_of",{name:intoName}))}</label>
+        <label><input type="radio" name="libKeepCover" value="from"> ${esc(t("library.cover_of",{name:fromName}))}</label></fieldset>`;
+  }
+  function moveDialog(m, files){
+    let target=null;
+    const n=files.length;
+    dialog({ title:tn("library.move_title",n,{name:files[0].name}), confirm:tn("library.move_ok_pick",n), okEnabled:false,
+      body:`<p>${esc(tn("library.move_help",n,{from:m.name}))}</p>${chooserHtml()}`,
+      wire:(el,ok)=>wireChooser(el,[m.uuid],x=>{ target=x; ok.disabled=false; ok.textContent=tn("library.move_ok",n,{to:x.name}); }),
+      onConfirm:()=>act({ kind:"move", model:m.uuid, files:files.map(f=>f.ck), to:target.uuid }, r=>tn("library.done_move",n,{to:r.to.name})) });
+  }
+  function splitDialog(m, files){
+    const n=files.length;
+    dialog({ title:tn("library.split_title",n), confirm:tn("library.split_ok",n),
+      body:`<p>${esc(tn("library.split_help",n,{from:m.name}))}</p><ul class="lib-dlg-list">${files.map(f=>`<li>${esc(f.name)}</li>`).join("")}</ul>
+        <label class="fl" for="libSplitName">${esc(t("library.new_model_name"))}</label><input class="field" id="libSplitName" maxlength="120" value="${esc(files[0].name)}">`,
+      onConfirm:()=>act({ kind:"split", model:m.uuid, files:files.map(f=>f.ck), name:$("libSplitName").value }, r=>tn("library.done_split",n,{to:r.to.name})) });
+  }
+  function printerDialog(m, ck, name, plate){
+    const v=(L.model&&L.model.printables||[]).find(x=>x.file.contentKey===ck&&(x.plate==null?plate==null:x.plate===plate));
+    const said=v&&v.printer.fileSays?v.printer.fileSays.label:null;
+    const fams=(window.PrinterIdentity&&PrinterIdentity.FAMILIES||[]).slice().sort((a,b)=>a.label.localeCompare(b.label));
+    dialog({ title:t("library.printer_title",{file:name+(plate!=null?" · "+t("library.plate_n",{n:plate}):"")}), confirm:t("library.printer_ok"),
+      body:`<p>${esc(said?t("library.printer_file_says",{family:said}):t("library.printer_file_says_none"))}</p>
+        <label class="fl" for="libPrinterPick">${esc(t("library.printer_label"))}</label>
+        <select class="field" id="libPrinterPick">${v&&v.printer.state==="decision"?`<option value="">${esc(t("library.printer_use_file",{family:said||t("library.printer_unknown")}))}</option>`:""}
+          ${fams.map(f=>`<option value="${esc(f.key)}" ${v&&v.printer.family===f.key?"selected":""}>${esc(f.label)}</option>`).join("")}</select>
+        <p class="settings-help">${esc(t("library.printer_help"))}</p>`,
+      onConfirm:()=>{ const fam=$("libPrinterPick").value; return act({ kind:"set_printer", model:m.uuid, file:ck, plate, family:fam||null },
+        fam?t("library.done_printer",{file:name,family:printerLabel(fam)}):t("library.done_printer_reset",{file:name})); } });
+  }
+  async function reviewItem(id){
+    const list=(L.view==="attention"&&L.attnItems)||L.modelItems||[];
+    let it=list.find(x=>x.id===id);
+    if(!it){ try{ it=(await api("/api/library/attention")).items.find(x=>x.id===id); }catch{} }
+    return it;
+  }
+  async function approveDialog(id, here){
+    const it=await reviewItem(id);
+    if(!it||!it.detail.a||!it.detail.b){ L.flash={ text:t("library.err_review_resolved")+" "+t("library.reload_hint"), error:true }; return render(); }
+    const a=it.detail.a, b=it.detail.b;
+    const keep=here===b.uuid?b:a, other=keep===a?b:a;
+    dialog({ title:t("library.approve_title",{a:a.name,b:b.name}), confirm:t("library.merge_ok",{into:keep.name}),
+      body:`<fieldset class="lib-fs"><legend class="fl">${esc(t("library.which_stays"))}</legend>
+        <label><input type="radio" name="libSurvivor" value="${esc(keep.uuid)}" checked> ${esc(keep.name)}</label>
+        <label><input type="radio" name="libSurvivor" value="${esc(other.uuid)}"> ${esc(other.name)}</label></fieldset>
+        <p class="lib-dlg-sum" id="libApproveSum">${esc(t("library.merge_summary",{from:other.name,into:keep.name}))}</p>`,
+      wire:(el,ok)=>el.querySelectorAll("input[name=libSurvivor]").forEach(r=>r.addEventListener("change",()=>{
+        const s=r.value===keep.uuid?keep:other, f=s===keep?other:keep;
+        ok.textContent=t("library.merge_ok",{into:s.name}); $("libApproveSum").textContent=t("library.merge_summary",{from:f.name,into:s.name}); })),
+      onConfirm:()=>act({ kind:"approve", review:id, survivor:radio("libSurvivor") }, r=>t("library.done_merge",{from:r.from.name,into:r.into.name})) });
+  }
+  async function rejectDialog(id){
+    const it=await reviewItem(id);
+    const a=it&&it.detail.a?it.detail.a.name:"", b=it&&it.detail.b?it.detail.b.name:"";
+    dialog({ title:t("library.reject_title",{a,b}), confirm:t("library.keep_apart_ok"), body:`<p>${esc(t("library.reject_help"))}</p>`,
+      onConfirm:()=>act({ kind:"reject", review:id }, t("library.done_reject",{a,b})) });
+  }
+
+  // ---- Needs attention: what can be done about each item ----
+  function itemActionsHtml(i){
+    const out=[];
+    if(i.kind==="suggested_match"&&can("grouping")) out.push(`<button type="button" class="btn primary btn-sm lib-approve" data-review="${i.id}">${esc(t("library.merge_btn"))}</button>`,
+      `<button type="button" class="btn ghost btn-sm lib-reject" data-review="${i.id}">${esc(t("library.keep_apart_btn"))}</button>`);
+    if(i.kind==="ambiguous_grouping"&&i.detail.variant==="file"&&i.detail.owner&&can("grouping")) out.push(`<button type="button" class="btn ghost btn-sm lib-choose" data-review="${i.id}">${esc(t("library.choose_btn"))}</button>`);
+    if(i.kind==="empty_model"&&i.models[0]&&can("hide")) out.push(`<button type="button" class="btn ghost btn-sm lib-hide-empty" data-model="${esc(i.models[0].uuid)}" data-name="${esc(i.models[0].name)}">${esc(t("library.hide_model_btn"))}</button>`);
+    if(can("review")) out.push(`<button type="button" class="btn ghost btn-sm lib-dismiss" data-review="${i.id}">${esc(t("library.dismiss_btn"))}</button>`);
+    return out.length?`<div class="lib-actions">${out.join("")}</div>`:"";
+  }
+  function wireItemActions(root, items){
+    L.attnItems=items;
+    const on=(sel,fn)=>root.querySelectorAll(sel).forEach(el=>el.addEventListener("click",e=>{ e.preventDefault(); e.stopPropagation(); fn(el); }));
+    on(".lib-actions .lib-approve",el=>approveDialog(Number(el.dataset.review), L.view==="model"?L.uuid:null));
+    on(".lib-actions .lib-reject",el=>rejectDialog(Number(el.dataset.review)));
+    on(".lib-dismiss",async el=>{ try{ await act({ kind:"dismiss", review:Number(el.dataset.review) }, t("library.done_dismiss")); }catch(e){ L.flash={ text:errText(e), error:true }; renderBars(); } });
+    on(".lib-hide-empty",el=>dialog({ title:t("library.hide_title",{name:el.dataset.name}), confirm:t("library.hide_ok"), body:`<p>${esc(t("library.hide_help"))}</p>`,
+      onConfirm:()=>act({ kind:"hide", model:el.dataset.model }, t("library.done_hide",{name:el.dataset.name})) }));
+    on(".lib-choose",el=>{
+      const it=items.find(x=>x.id===Number(el.dataset.review)); if(!it) return;
+      const d=it.detail, cands=(d.candidates||[]).filter(c=>c.uuid&&c.uuid!==d.owner.uuid);
+      let pick=null;
+      dialog({ title:t("library.choose_title"), confirm:t("library.choose_ok"), okEnabled:false,
+        body:`<p>${esc(t("library.choose_help",{file:where(it.location)}))}</p><div class="lib-pick">${cands.map(c=>`<label class="lib-pick-row"><input type="radio" name="libChoose" class="lib-pick-radio" value="${esc(c.uuid)}" data-name="${esc(c.name)}"><span class="lib-pick-txt"><span class="lib-fname">${esc(c.name)}</span></span></label>`).join("")}</div>`,
+        wire:(dl,ok)=>dl.querySelectorAll("input[name=libChoose]").forEach(r=>r.addEventListener("change",()=>{ pick={ uuid:r.value, name:r.dataset.name }; ok.disabled=false; ok.textContent=tn("library.move_ok",1,{to:pick.name}); })),
+        onConfirm:()=>act({ kind:"move", model:d.owner.uuid, files:[d.contentKey], to:pick.uuid, review:it.id }, r=>tn("library.done_move",1,{to:r.to.name})) });
+    });
   }
 
   // ---- wiring ----
