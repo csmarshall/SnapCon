@@ -3,7 +3,7 @@
     "locale": "en",
     "language": "English",
     "nativeName": "English",
-    "version": 74,
+    "version": 75,
     "snapconVersion": "0.8.0",
     "updated": "2026-10-04"
   },
@@ -673,7 +673,10 @@
       "view_heading": "View",
       "next_done_in": "Next done in {time}",
       "brand_back_aria": "SnapCon, back to printers",
-      "brand_single_printer": "Showing a single printer"
+      "brand_single_printer": "Showing a single printer",
+      "update_tooltip": "SnapCon v{latest} is available. You have v{current}. Details and release notes in Settings, Updates.",
+      "brand_back_aria_update": "SnapCon, back to printers. Update available: v{latest}.",
+      "sheet_update": "Update available: v{latest}"
     },
     "sort": {
       "option_none": "None",
@@ -1537,6 +1540,27 @@
       },
       "backup_failed_notice": "The last backup failed {when}: {error}. SnapCon tries again every hour.",
       "backup_refused_corrupt": "The last backup ({when}) was refused: the Library database failed its integrity check, so it wasn't copied over your good backups. Those are kept. Restart SnapCon to restore the newest one."
+    },
+    "updates": {
+      "title": "Updates",
+      "check_label": "Check for updates",
+      "check_desc": "Once a day, SnapCon asks GitHub for the latest release. Nothing about your printers or files is sent.",
+      "installed": "Installed",
+      "latest": "Latest release",
+      "last_checked": "Last checked",
+      "never": "Never",
+      "no_releases": "No releases yet",
+      "up_to_date": "SnapCon is up to date.",
+      "check_now": "Check now",
+      "checking": "Checking…",
+      "checking_title": "Checking with GitHub…",
+      "release_notes": "Release notes for v{version} ↗",
+      "error_unreachable": "Couldn’t reach GitHub.",
+      "error_rate_limited": "GitHub is limiting requests. SnapCon will try again after {time}.",
+      "error_bad_response": "GitHub’s answer couldn’t be read.",
+      "last_success": "Last successful check: {time}.",
+      "last_success_never": "No successful check yet.",
+      "how_to_update": "How to update depends on how SnapCon runs: Docker, the standalone app, or from source. The release notes cover each."
     }
   },
   "library": {

@@ -3,7 +3,7 @@
     "locale": "es",
     "language": "Spanish",
     "nativeName": "Español",
-    "version": 74,
+    "version": 75,
     "snapconVersion": "0.8.0",
     "updated": "2026-10-04"
   },
@@ -673,7 +673,10 @@
       "view_heading": "Vista",
       "next_done_in": "Próxima en terminar: {time}",
       "brand_back_aria": "SnapCon, volver a las impresoras",
-      "brand_single_printer": "Mostrando una sola impresora"
+      "brand_single_printer": "Mostrando una sola impresora",
+      "update_tooltip": "SnapCon v{latest} está disponible. Tienes v{current}. Detalles y notas de la versión en Configuración, Actualizaciones.",
+      "brand_back_aria_update": "SnapCon, volver a las impresoras. Actualización disponible: v{latest}.",
+      "sheet_update": "Actualización disponible: v{latest}"
     },
     "sort": {
       "option_none": "Ninguno",
@@ -1537,6 +1540,27 @@
       },
       "backup_failed_notice": "La última copia falló {when}: {error}. SnapCon lo vuelve a intentar cada hora.",
       "backup_refused_corrupt": "La última copia ({when}) se rechazó: la base de datos de la biblioteca no superó la comprobación de integridad, así que no se copió encima de tus copias buenas. Esas se conservan. Reinicia SnapCon para restaurar la más reciente."
+    },
+    "updates": {
+      "title": "Actualizaciones",
+      "check_label": "Buscar actualizaciones",
+      "check_desc": "Una vez al día, SnapCon consulta a GitHub la última versión. No se envía nada sobre tus impresoras ni tus archivos.",
+      "installed": "Instalada",
+      "latest": "Última versión",
+      "last_checked": "Última comprobación",
+      "never": "Nunca",
+      "no_releases": "Aún no hay versiones",
+      "up_to_date": "SnapCon está actualizado.",
+      "check_now": "Comprobar ahora",
+      "checking": "Comprobando…",
+      "checking_title": "Consultando a GitHub…",
+      "release_notes": "Notas de la versión v{version} ↗",
+      "error_unreachable": "No se pudo conectar con GitHub.",
+      "error_rate_limited": "GitHub está limitando las solicitudes. SnapCon volverá a intentarlo después de {time}.",
+      "error_bad_response": "No se pudo leer la respuesta de GitHub.",
+      "last_success": "Última comprobación correcta: {time}.",
+      "last_success_never": "Aún no hay ninguna comprobación correcta.",
+      "how_to_update": "Cómo actualizar depende de cómo se ejecute SnapCon: Docker, la aplicación independiente o desde el código fuente. Las notas de la versión explican cada caso."
     }
   },
   "library": {

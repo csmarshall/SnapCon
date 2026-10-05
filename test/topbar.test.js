@@ -5,7 +5,8 @@
 //                        file list (the design mockup left a cell active after
 //                        another page took over);
 //   fleetStatusSummary() the fleet-wide status pills and "next done";
-//   brandTarget()        where a click on the brand ("back to printers") goes.
+//   brandTarget()        where a click on the brand ("back to printers") goes;
+//   updateDisplay()      whether the bar announces an update.
 //
 // Each is loaded from public/app.js into a sandbox.
 const test = require("node:test");
@@ -21,7 +22,7 @@ function fnSource(name) {
   return m[0];
 }
 const sandbox = vm.createContext({});
-vm.runInContext(["topbarVisibility", "topbarActiveCells", "camBucket", "printRemaining", "fleetStatusSummary", "brandTarget"].map(fnSource).join("\n"), sandbox);
+vm.runInContext(["topbarVisibility", "topbarActiveCells", "camBucket", "printRemaining", "fleetStatusSummary", "brandTarget", "updateDisplay"].map(fnSource).join("\n"), sandbox);
 const call = (name, arg) => JSON.parse(JSON.stringify(vm.runInContext(name, sandbox)(arg)));
 
 const shown = vis => Object.keys(vis).filter(k => vis[k]).sort();
@@ -159,6 +160,44 @@ test("already on the fleet, the brand only scrolls it to the top", () => {
 test("on the single-printer link the brand does nothing, whatever is open", () => {
   assert.deepEqual(brand({ deepLink: true }), { action: "none" });
   assert.deepEqual(brand({ deepLink: true, healthOpen: true, queueOpen: true, viewMode: "printfarm" }), { action: "none" });
+});
+
+// ---- update available ----
+
+const upd = { enabled: true, current: "0.8.0", latest: "0.9.0", updateAvailable: true, lastError: null };
+
+test("the update dot and version text show only for an admin, with a newer release and no warning", () => {
+  const d = vm.runInContext("updateDisplay", sandbox);
+  assert.deepEqual(JSON.parse(JSON.stringify(d(upd, { admin: true, mismatch: false }))), { show: true, latest: "0.9.0", current: "0.8.0" });
+  assert.equal(d(upd, { admin: false, mismatch: false }).show, false, "non-admins see nothing");
+  assert.equal(d(upd, { admin: true, mismatch: true }).show, false, "the page/server version mismatch wins");
+  assert.equal(d({ ...upd, enabled: false }, { admin: true, mismatch: false }).show, false, "the check is off");
+  assert.equal(d({ ...upd, lastError: "unreachable" }, { admin: true, mismatch: false }).show, false, "the last check failed");
+  assert.equal(d({ ...upd, updateAvailable: false }, { admin: true, mismatch: false }).show, false, "up to date");
+  assert.equal(d(null, { admin: true, mismatch: false }).show, false, "no status yet");
+  assert.equal(d(upd, { admin: true, mismatch: false, deepLink: true }).show, false,
+    "nothing on the single-printer link: no dot, suffix, tooltip, announcement or sheet row");
+});
+
+test("checkVersion() re-applies the whole update UI once it knows the version, with the mismatch already set", async () => {
+  // Reported race: a login-time status fetch could show the dot/tooltip/sheet
+  // row before the version check; checkVersion() then only redrew the version
+  // line. It must redraw everything, after marking the mismatch.
+  const m = appSrc.match(/async function checkVersion\(\)\{[\s\S]*?\n\}/);
+  assert.ok(m, "missing in public/app.js: async function checkVersion()");
+  const seen = [];
+  const badge = { className: "vbadge" };
+  const ctx = vm.createContext({
+    $: () => badge,
+    getJSON: async () => ({ version: "0.8.1" }), // server differs from the page
+    renderUpdateUI: () => seen.push({ cls: badge.className, checked: vm.runInContext("VERSION_CHECKED", ctx) }),
+    renderVbadge: () => {},
+  });
+  vm.runInContext('var VERSION="0.8.0"; var VBADGE_BASE=""; var VERSION_CHECKED=false;\n' + m[0], ctx);
+  await vm.runInContext("checkVersion()", ctx);
+  assert.equal(seen.length, 1, "renderUpdateUI() runs once the version is known");
+  assert.equal(seen[0].cls, "vbadge bad", "with the mismatch already marked");
+  assert.equal(seen[0].checked, true);
 });
 
 // ---- the cell maps name real elements ----

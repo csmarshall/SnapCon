@@ -985,6 +985,12 @@
   .tb-name-con{color:var(--tb-accent);}
   .vbadge{font-family:var(--mono); font-size:9px; color:var(--tb-muted);}
   .vbadge.bad{color:var(--bad); font-weight:700;}
+  /* Update available (admins): a dot on the logo, ringed in the bar colour
+     so it separates from the logo's dark tile; the newer version in accent
+     (--tb-active-text passes contrast at 9px in both themes). */
+  .tb-logo-wrap{position:relative; display:inline-flex; flex:none;}
+  .tb-update-dot{position:absolute; top:-3px; right:-3px; width:8px; height:8px; border-radius:50%; background:var(--tb-accent); box-shadow:0 0 0 2px var(--tb-bg);}
+  .tb-update-ver{color:var(--tb-active-text); font-weight:600;}
 
   /* Health: the attention count sits in the cell's top-right corner. */
   .tb-health{padding-right:22px;}
@@ -1080,6 +1086,9 @@
   .tb-sheet-util-btn:last-child{border-right:0;}
   .tb-sheet-util .tb-sheet-lang{order:3; flex:1 1 100%; border-right:0; border-top:1px solid var(--tb-divider);}
   .tb-sheet-lang .topbar-locale-select{width:100%; max-width:100%; text-align:center;}
+  .tb-sheet-update{background:color-mix(in srgb, var(--tb-accent) 10%, transparent);}
+  .tb-update-dot-inline{width:8px; height:8px; border-radius:50%; background:var(--tb-accent); flex:none;}
+  .tb-sheet-chevron{margin-left:auto; color:var(--tb-text-2);}
   .tb-sheet-foot{padding:10px 16px; font-family:var(--mono); font-size:10px; color:var(--tb-muted);}
   .tb-sheet-foot.bad{color:var(--bad);}
   .tb-sheet-row:focus-visible, .tb-sheet-util-btn:focus-visible, .tb-seg button:focus-visible{outline-offset:-2px; border-radius:0;}
@@ -1576,6 +1585,13 @@
   .settings-help{font-size:12px; color:var(--ink-faint); line-height:1.5;}
   .settings-help.warn{color:var(--warn);}
   .settings-help.ok{color:var(--ok);}
+  #settingsUpdates [hidden]{display:none !important;}
+  .upd-values{display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; margin:14px 0 8px;}
+  .upd-k{font-size:12px; color:var(--ink-faint);}
+  .upd-v{font-size:14px; font-weight:600; color:var(--ink); margin-top:2px; overflow-wrap:anywhere;}
+  .upd-v.is-newer{color:var(--accent);}
+  .upd-actions{display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin:10px 0;}
+  .upd-link{color:var(--accent); font-size:13px;}
   .settings-help.err{color:var(--bad);}
   .settings-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:16px;}
   /* Settings > Library: one row per Library location. The path column flexes

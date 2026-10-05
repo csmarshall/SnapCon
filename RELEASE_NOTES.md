@@ -676,3 +676,9 @@ and never silently prints a different one.
   until that file is updated or replaced. A fresh installation is fully translated.
 - A send that is still waiting for a busy printer (not yet transferred) is forgotten if SnapCon
   restarts before the printer frees up. Sends already on the printer keep their Library identity.
+
+Unreleased
+### Update check
+- SnapCon now checks GitHub once a day for a newer release and tells admins in the top bar and in
+  Settings → General → Updates. It is on by default; the request carries only SnapCon's version
+  (nothing about your printers or files), and the "Check for updates" switch turns it off.

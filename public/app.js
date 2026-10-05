@@ -1103,6 +1103,85 @@ function chooseView(mode){
   renderFleet();
 }
 
+// ---- "Update available" ----
+// The server checks GitHub (updateCheck.js); this shows its answer to
+// admins: a dot on the logo and "v0.8.0 → 0.9.0" in the brand cell, the
+// Settings > General > Updates section, and a row in the menu sheet.
+let UPDATE_STATUS = null; // /api/update-status, admins only
+let VERSION_CHECKED = false; // set by checkVersion(); until then a mismatch can't be ruled out
+// Pure: does the bar announce an update? Not for non-admins, not while the
+// page/server version mismatch warning is up (or the version isn't checked
+// yet), not on the single-printer link, not with the check off or after an
+// error, and only for a strictly newer release.
+function updateDisplay(status, { admin, mismatch, deepLink }){
+  if(!admin || mismatch || deepLink || !status || !status.enabled || status.lastError || !status.updateAvailable || !status.latest) return { show:false };
+  return { show:true, latest:status.latest, current:status.current };
+}
+function currentUpdateDisplay(){
+  return updateDisplay(UPDATE_STATUS, {
+    admin: isAdmin(),
+    mismatch: !VERSION_CHECKED || !!($("vbadge") && $("vbadge").classList.contains("bad")),
+    deepLink: !!URL_PRINTER_FILTER,
+  });
+}
+// A local call: the server never contacts GitHub because of it.
+async function fetchUpdateStatus(){
+  if(!isAdmin()){ UPDATE_STATUS=null; renderUpdateUI(); return; }
+  try{ const r=await fetch("/api/update-status"); UPDATE_STATUS = r.ok ? await r.json() : null; }
+  catch{ UPDATE_STATUS=null; }
+  renderUpdateUI();
+}
+function fmtUpdateTime(iso){
+  const d=new Date(iso);
+  return Number.isFinite(d.getTime()) ? d.toLocaleString(uiDateLocale(), { dateStyle:"medium", timeStyle:"short" }) : "—";
+}
+function renderUpdateUI(){
+  renderVbadge();
+  syncBrand();
+  const d=currentUpdateDisplay();
+  if($("tbSheetUpdate")){
+    $("tbSheetUpdate").hidden=!d.show;
+    if(d.show) $("tbSheetUpdateText").textContent=t("global.topbar.sheet_update",{ latest:d.latest });
+  }
+  renderUpdateSettings();
+}
+// GitHub's text (the release name, the link) arrives as plain strings and
+// is only ever set as textContent/href here.
+function renderUpdateSettings(){
+  if(!$("settingsUpdates")) return;
+  const s=UPDATE_STATUS;
+  $("updInstalled").textContent="v"+((s&&s.current)||VERSION);
+  const latest=$("updLatest");
+  latest.classList.toggle("is-newer", !!(s && s.updateAvailable));
+  latest.textContent = !s ? "—" : s.noRelease ? t("settings.updates.no_releases") : s.latest ? "v"+s.latest : "—";
+  $("updChecked").textContent = s && s.checkedAt ? fmtUpdateTime(s.checkedAt) : t("settings.updates.never");
+  $("updUpToDate").hidden = !(s && (s.latest || s.noRelease) && !s.updateAvailable && !s.lastError);
+  const err=$("updError");
+  if(s && s.lastError){
+    const what = s.lastError==="rate_limited" ? t("settings.updates.error_rate_limited",{ time: s.retryAfter ? fmtUpdateTime(s.retryAfter) : "—" })
+               : s.lastError==="bad_response" ? t("settings.updates.error_bad_response")
+               : t("settings.updates.error_unreachable");
+    const last = s.lastSuccessAt ? t("settings.updates.last_success",{ time:fmtUpdateTime(s.lastSuccessAt) }) : t("settings.updates.last_success_never");
+    err.textContent=what+" "+last; err.hidden=false;
+  } else err.hidden=true;
+  const link=$("updReleaseLink");
+  if(s && s.latest && /^https:\/\/github\.com\//.test(s.releaseUrl||"")){
+    link.href=s.releaseUrl; link.textContent=t("settings.updates.release_notes",{ version:s.latest }); link.hidden=false;
+  } else link.hidden=true;
+}
+async function runUpdateCheckNow(){
+  const b=$("updCheckNow");
+  b.disabled=true; b.title=t("settings.updates.checking_title"); b.textContent=t("settings.updates.checking");
+  try{ const r=await fetch("/api/update-check",{ method:"POST" }); if(r.ok) UPDATE_STATUS=await r.json(); }catch{}
+  b.disabled=false; b.removeAttribute("title"); b.textContent=t("settings.updates.check_now");
+  renderUpdateUI();
+}
+function openSettingsUpdates(){
+  if(!$("setup").classList.contains("show")) $("gear").click();
+  showSetTab("general");
+  $("settingsUpdates").scrollIntoView({ block:"start" });
+}
+
 // ---- Top bar ----
 // Where a click on the brand cell ("back to printers") goes. Pure.
 // - single-printer link (/orca/<name>): nowhere;
@@ -1179,10 +1258,7 @@ function applyTopbarVisibility(){
     signedIn: !!(USERS_ENABLED && CURRENT_USER),
   });
   for(const [key,ids] of Object.entries(TB_CELLS)) for(const id of ids){ const el=$(id); if(el) el.hidden=!vis[key]; }
-  // The brand is "back to printers", which means nothing on the
-  // single-printer link: disabled there, with the reason as its title.
-  const brand=$("tbBrandBtn");
-  if(brand){ brand.disabled=!!URL_PRINTER_FILTER; if(URL_PRINTER_FILTER) brand.title=t("global.topbar.brand_single_printer"); else brand.removeAttribute("title"); }
+  syncBrand();
   // A menu whose cell just went away closes with it.
   if(TB_POPUP && TB_POPUP.btn.closest("[hidden]")) closeTopbarPopup(false);
 }
@@ -1226,6 +1302,19 @@ function syncViewMenu(){
     b.setAttribute("aria-checked", b.dataset.view===VIEW_MODE ? "true" : "false");
     if(b.dataset.view==="printfarm") b.hidden=!QUEUE_MANAGEMENT_ENABLED;
   });
+}
+// The brand is "back to printers", which means nothing on the
+// single-printer link: disabled there, with the reason as its title.
+// Otherwise its title and accessible name announce an update, if any.
+function syncBrand(){
+  const brand=$("tbBrandBtn");
+  if(!brand) return;
+  brand.disabled=!!URL_PRINTER_FILTER;
+  const d=currentUpdateDisplay();
+  const title = URL_PRINTER_FILTER ? t("global.topbar.brand_single_printer")
+              : d.show ? t("global.topbar.update_tooltip",{ latest:d.latest, current:d.current }) : "";
+  if(title) brand.title=title; else brand.removeAttribute("title");
+  brand.setAttribute("aria-label", d.show ? t("global.topbar.brand_back_aria_update",{ latest:d.latest }) : t("global.topbar.brand_back_aria"));
 }
 function syncTopbar(){
   applyTopbarVisibility();
@@ -1334,6 +1423,8 @@ function wireTopbarSheet(){
   $("tbSheetTheme").addEventListener("click", ()=>$("themeBtn").click());
   $("tbSheetLogout").addEventListener("click", ()=>{ closeTopbarPopup(false); $("logoutBtn").click(); });
   $("sheetLocale").addEventListener("change", ()=>chooseUserLocale($("sheetLocale").value));
+  $("tbSheetUpdate").addEventListener("click", ()=>{ closeTopbarPopup(false); openSettingsUpdates(); });
+  $("updCheckNow").addEventListener("click", runUpdateCheckNow);
 }
 
 // ---- Top bar fleet status ----
@@ -1478,6 +1569,7 @@ function onLoginSuccess(user){
   applyRoleUI();
   if($("setUserLocale")) $("setUserLocale").value=user.locale||"";
   loadConfigUI(); loadFiles(); loadFleet();
+  fetchUpdateStatus();
 }
 async function doLoginPassword(){
   const loginName=$("loginName").value.trim(), password=$("loginPassword").value;
@@ -1537,6 +1629,7 @@ function wireLoginOverlay(){
   $("logoutBtn").addEventListener("click", async ()=>{
     try{ await fetch("/api/logout",{method:"POST"}); }catch{}
     CURRENT_USER=null;
+    UPDATE_STATUS=null;
     applyRoleUI();
     showLoginOverlay();
   });
@@ -1639,6 +1732,8 @@ async function init(){
     if(fleetSechead) fleetSechead.style.display="none";
   }
   await checkVersion(); await loadConfigUI();
+  fetchUpdateStatus();
+  setInterval(fetchUpdateStatus, 60*60*1000); // hourly while the page is open
   // Resolution: this account's saved locale -> the system default we just
   // learned from loadConfigUI() -> English. The Settings PANEL isn't open at
   // boot, so nothing on-screen needs translated text before this point —
@@ -1894,7 +1989,7 @@ function refreshGlobalUIDynamicText(){
   if($("themeBtn")) syncThemeButton();
   syncTopbar();
   tickTopbarClock();
-  renderVbadge();
+  renderUpdateUI();
   if(TB_STATUS_LAST) renderTopbarStatus(TB_STATUS_LAST);
   if($("configLoadWarningCard")) renderConfigLoadWarning({configLoadFailed:CONFIG_LOAD_FAILED, configLoadQuarantinePath:CONFIG_LOAD_QUARANTINE_PATH});
   // logoutBtn's title carries the current user's display name — set by
@@ -2817,8 +2912,11 @@ function renderVbadge(){
   const suffix=viewMode?" (View Mode)":"";
   // The mismatch text is long; the brand cell shows a short form (keeping the
   // View Mode cue), the full text stays in the title.
+  const upd=currentUpdateDisplay(); // never while the mismatch warning is up
   if(b.classList.contains("bad")){ b.textContent=t("global.topbar.version_mismatch")+suffix; b.title=VBADGE_BASE+suffix; }
+  else if(upd.show){ b.innerHTML=esc(VBADGE_BASE+suffix)+`<span class="tb-update-ver"> → ${esc(upd.latest)}</span>`; b.removeAttribute("title"); }
   else { b.textContent=VBADGE_BASE+suffix; b.removeAttribute("title"); }
+  if($("tbUpdateDot")) $("tbUpdateDot").hidden=!upd.show;
   // Narrow and Phone show the version in the menu sheet's footer instead.
   const foot=$("tbSheetVersion");
   if(foot){ foot.textContent="SnapCon "+VBADGE_BASE+suffix; foot.classList.toggle("bad", b.classList.contains("bad")); }
@@ -2832,7 +2930,11 @@ async function checkVersion(){
   }catch(e){
     b.className="vbadge bad"; VBADGE_BASE="page v"+VERSION+" · server has no version — update & restart server.js";
   }
-  renderVbadge();
+  VERSION_CHECKED=true;
+  // The whole update UI, not just the version line: a status fetched before
+  // this (e.g. at login) may have shown the dot, tooltip or sheet row, and a
+  // mismatch must win everywhere at once.
+  renderUpdateUI();
 }
 $("refresh").addEventListener("click", ()=>{ loadFiles(); loadFleet(); });
 // Empty box = browse the current folder as normal (renderList). Any text =
@@ -8988,7 +9090,7 @@ $("gear").addEventListener("click",()=>{
   // which top bar cells hide while Settings is open is topbarVisibility()'s call.
   syncGearTitle();
   if(open){
-    document.body.classList.remove("showfiles"); syncTopbar(); loadGroupsUI().then(loadUsersUI); loadQueueManagementUI();
+    document.body.classList.remove("showfiles"); syncTopbar(); loadGroupsUI().then(loadUsersUI); loadQueueManagementUI(); fetchUpdateStatus();
     // showSetTab() is what actually hides #globalSaveRow for a registered
     // tab (General) in favor of its sticky dirty footer — that only ever
     // ran on a tab-button click, never on Settings simply opening onto
@@ -10948,6 +11050,7 @@ function generalTabValues(){
     filamentCost:$("setFilamentCost").value, electricityRate:$("setElectricityRate").value,
     allowMapping:$("setAllowMapping").checked, suggestMatching:$("setSuggestMatching").checked,
     skipIdenticalUploads:$("setSkipIdenticalUploads").checked,
+    checkForUpdates:$("setCheckForUpdates").checked,
     allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked,
     overwriteDifferentFiles:$("setOverwriteDifferent").checked,
     logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(),
@@ -10966,6 +11069,7 @@ function setGeneralTabValues(v){
   $("setAllowMapping").checked=v.allowMapping;
   $("setSuggestMatching").checked=v.suggestMatching;
   $("setSkipIdenticalUploads").checked=v.skipIdenticalUploads;
+  $("setCheckForUpdates").checked=v.checkForUpdates;
   $("setAllowUploadWhilePrinting").checked=v.allowUploadWhilePrinting;
   $("setUploadIntoQueue").checked=v.uploadIntoQueue;
   $("setOverwriteDifferent").checked=v.overwriteDifferentFiles;
@@ -11089,6 +11193,7 @@ async function loadConfigUI(){
     SUGGEST_MATCHING=c.suggestMatching!==false; $("setSuggestMatching").checked=SUGGEST_MATCHING;
     // Absent means on, matching the server's own default.
     $("setSkipIdenticalUploads").checked=c.skipIdenticalUploads!==false;
+    $("setCheckForUpdates").checked=c.checkForUpdates!==false;
     $("setAllowUploadWhilePrinting").checked=c.allowUploadWhilePrinting!==false;
     // Off unless explicitly turned on — Upload stages a file, it does not schedule a print.
     $("setUploadIntoQueue").checked=c.uploadIntoQueue===true;
@@ -12582,7 +12687,7 @@ async function saveConfig(){
   const logsRetentionDays=parseInt($("setLogsRetentionDays").value,10);
   const cameraRetentionDays=parseInt($("setCameraRetentionDays").value,10);
   const gcodeSyncRetentionDays=parseInt($("setGcodeSyncRetentionDays").value,10);
-  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked, locale:$("setLocale")?$("setLocale").value:undefined,
+  const body={ gcodeFolder:$("setFolder").value.trim(), firmwareFolder:$("setFirmwareFolder").value.trim(), logsFolder:$("setLogsFolder").value.trim(), cameraFolder:$("setCameraFolder").value.trim(), gcodeSyncFolder:$("setGcodeSyncFolder").value.trim(), logsRetentionDays:logsRetentionDays>0?logsRetentionDays:undefined, cameraRetentionDays:cameraRetentionDays>0?cameraRetentionDays:undefined, gcodeSyncRetentionDays:gcodeSyncRetentionDays>0?gcodeSyncRetentionDays:undefined, refreshInterval:(ri>=1&&ri<=60)?ri:2, cameraViewRefreshInterval:(cr>=3&&cr<=60)?cr:6, cameraViewStagger:CAM_STAGGER, currency:CURRENCY, filamentCost:fc>0?fc:undefined, electricityRate:er>0?er:undefined, tNotation:useTNotation||undefined, defaultView:$("setDefaultView").value, siteName:$("setSiteName").value.trim(), allowMapping:ALLOW_MAPPING, suggestMatching:SUGGEST_MATCHING, skipIdenticalUploads:$("setSkipIdenticalUploads").checked, checkForUpdates:$("setCheckForUpdates").checked, overwriteDifferentFiles:$("setOverwriteDifferent").checked, allowUploadWhilePrinting:$("setAllowUploadWhilePrinting").checked, uploadIntoQueue:$("setUploadIntoQueue").checked, locale:$("setLocale")?$("setLocale").value:undefined,
     usersEnabled:$("setUsersEnabled").checked||undefined,
     resend:{ apiKey:$("setResendKey").value.trim(), fromAddress:$("setResendFrom").value.trim() },
     otp:{
@@ -12667,6 +12772,7 @@ async function saveConfig(){
     collapseAllPrinterRows(); // nothing left to edit in them — back to the compact list
     baselineSettingsTab("general");
     baselineSettingsTab("notif");
+    fetchUpdateStatus(); // "Check for updates" may have changed
   }catch(e){ setSaveStatus("err",e.message); }
   finally{ if(saveBtn) saveBtn.disabled=false; }
 }
