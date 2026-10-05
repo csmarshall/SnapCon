@@ -427,6 +427,10 @@ const { requireAuth, requireRegular, requireAdmin } = auth;
 // a process — happens later, inside app.listen's callback, not here (see
 // that callback for why: the server must be accepting requests first).
 const remoteAccess = createRemoteAccessService({ baseDir: BASE_DIR, getConfig: () => CFG, getUsers: () => USERS, port: PORT });
+// "Update available": asks GitHub for the latest release at startup and
+// daily while Settings > General > "Check for updates" is on (updateCheck.js).
+const { createUpdateChecker } = require("./updateCheck");
+const updateChecker = createUpdateChecker({ baseDir: BASE_DIR, version: VERSION, isEnabled: () => CFG.checkForUpdates !== false });
 
 // Audit log — the only module the routes below talk to for it. Degrades to a
 // silent no-op on a Node runtime too old for node:sqlite (see AuditLog.js);
@@ -3688,6 +3692,7 @@ function publicCfg(role) {
     allowMapping: CFG.allowMapping !== false,
     suggestMatching: CFG.suggestMatching !== false,
     skipIdenticalUploads: CFG.skipIdenticalUploads !== false,
+    checkForUpdates: CFG.checkForUpdates !== false,
     allowUploadWhilePrinting: CFG.allowUploadWhilePrinting !== false,
     uploadIntoQueue: CFG.uploadIntoQueue === true,
     overwriteDifferentFiles: CFG.overwriteDifferentFiles !== false,
@@ -3747,6 +3752,18 @@ function publicCfg(role) {
 }
 app.get("/api/config", requireAuth, (req, res) => res.json(publicCfg(req.user.role)));
 app.get("/api/version", (req, res) => res.json({ version: VERSION }));
+// Update status is admin-only. Reading it never contacts GitHub; "Check now"
+// does, at most once a minute and never against an active rate limit.
+app.get("/api/update-status", requireAdmin, (req, res) => res.json(updateChecker.status()));
+app.post("/api/update-check", requireAdmin, async (req, res) => {
+  // checkNow() is written never to throw; if it somehow does, answer with a
+  // controlled error instead of leaving the request hanging.
+  try { res.json(await updateChecker.checkNow()); }
+  catch (e) {
+    console.error("[update-check] Check now failed:", e && e.message);
+    res.status(500).json({ error: "update_check_failed" });
+  }
+});
 
 // Exits the process so Docker's `restart: unless-stopped` policy relaunches
 // it fresh — picks up an externally-edited config.json or a `docker compose
@@ -4139,6 +4156,7 @@ app.post("/api/config", requireAdmin, async (req, res) => {
     allowMapping: (typeof b.allowMapping === "boolean") ? b.allowMapping : (CFG.allowMapping !== false),
     suggestMatching: (typeof b.suggestMatching === "boolean") ? b.suggestMatching : (CFG.suggestMatching !== false),
     skipIdenticalUploads: (typeof b.skipIdenticalUploads === "boolean") ? b.skipIdenticalUploads : (CFG.skipIdenticalUploads !== false),
+    checkForUpdates: (typeof b.checkForUpdates === "boolean") ? b.checkForUpdates : (CFG.checkForUpdates !== false),
     allowUploadWhilePrinting: (typeof b.allowUploadWhilePrinting === "boolean") ? b.allowUploadWhilePrinting : (CFG.allowUploadWhilePrinting !== false),
     uploadIntoQueue: (typeof b.uploadIntoQueue === "boolean") ? b.uploadIntoQueue : (CFG.uploadIntoQueue === true),
     overwriteDifferentFiles: (typeof b.overwriteDifferentFiles === "boolean") ? b.overwriteDifferentFiles : (CFG.overwriteDifferentFiles !== false),
@@ -4228,6 +4246,7 @@ app.post("/api/config", requireAdmin, async (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
     loadConfig();
     library.syncGcodeRoot();   // the G-code folder may have moved
+    updateChecker.reschedule(); // "Check for updates" may have been switched on or off
     if (configDiff.length) auditLog.log({ category: "admin", event: "settings-updated", ...actorFromReq(req), detail: { changed: configDiff } });
     res.json({ ok: true, ...publicCfg(req.user.role) });
   } catch (e) {
@@ -6017,6 +6036,7 @@ const httpServer = app.listen(PORT, () => {
   // start, once the Library worker is up. Every run adds only what no Print
   // records yet, so this also fills in jobs from while the Library was down.
   setTimeout(() => importPrintHistory().catch(e => console.error("[library] print history import failed:", e.message)), 60 * 1000).unref();
+  updateChecker.start();
 });
 
 // Graceful shutdown — new to this codebase (previously nothing here handled
@@ -6029,6 +6049,7 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log("\n  Received " + signal + " — shutting down...");
   httpServer.close(); // stop accepting new connections; lets in-flight ones finish
+  updateChecker.stop();
 
   // Independent, unconditional deadline — scheduled up front, not nested
   // inside the graceful path's .finally(). A .finally() only ever runs once

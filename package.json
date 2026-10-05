@@ -1,6 +1,10 @@
 {
   "name": "snapcon",
   "version": "0.8.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ezeitoun/SnapCon.git"
+  },
   "private": true,
   "type": "commonjs",
   "bin": "server.js",
