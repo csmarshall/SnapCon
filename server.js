@@ -47,6 +47,7 @@ const locales = require("./locales");
 const { readNotifyToken, ensureNotifyToken, timingSafeTokenEqual } = require("./notifyToken");
 const { isPathWithinFolder, resolveWithinFolder } = require("./pathSafety");
 const { sendWebhook, redactUrls } = require("./webhookNotify");
+const { archivePush } = require("./archivePush");
 // Shared with the browser (served from public/): the one place slicer metadata
 // and connector knowledge become a printer identity.
 const PrinterIdentity = require("./public/printer-identity.js");
@@ -2803,6 +2804,17 @@ app.post("/api/notify-load", rawGcodeBody, async (req, res) => {
     fs.writeFileSync(tmpFile, req.body);
 
     const actor = actorFromReq(req);
+    // Keep a copy of what the slicer pushed (and the settings Orca embeds in it).
+    // The temp file above is deleted once the printer has the file, so without
+    // this the sliced file is gone. On by default; set "archivePushes": false in
+    // config.json to turn it off. A failure here is logged and never stops the print.
+    if (CFG.archivePushes !== false) {
+      // Replay folder: "replayFolder" in config.json, else <gcodeFolder>/Archive (which the Library indexes).
+      const replayRoot = CFG.replayFolder ? path.resolve(BASE_DIR, CFG.replayFolder) : path.join(FOLDER, "Archive");
+      const arch = await archivePush({ fsApi: netfs, root: replayRoot, userLabel: actor.userLabel, name, bytes: req.body });
+      if (arch.status === "error") console.warn("[archive] could not keep a copy of " + name + ": " + arch.error);
+      else auditLog.log({ category: "job", event: "file-archived", ...actor, printerId: p.id, printerName: p.name, detail: { file: name, result: arch.status, ...(arch.path ? { archivedAs: arch.path } : {}) } });
+    }
     if (!(await isPrinterIdle(p))) {
       pendingLoad.set(idx, { file: tmpFile, name, ts: Date.now(), cleanup: true, actor });
       return res.json({ ok: true, mode: "pending", printer: p.name });

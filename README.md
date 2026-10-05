@@ -463,6 +463,15 @@ snapcon-win-x64.exe --load <file> --printer "<name in SnapCon>" [--outputname "<
 any other slicer) runs on the same machine as SnapCon. This is the same mechanism the Experimental Orca
 "Plugin" below is built on.
 
+### Keeping a copy of what the slicer pushes (replay folder)
+A file pushed from a slicer through the CLI hook or the Orca plugin goes to the printer and is then deleted
+from SnapCon's temp area. With **`archivePushes`** on (the default; set it to `false` in `config.json` to turn
+it off) SnapCon also saves one copy, laid out as `<replayFolder>/<user>/<YYYY-MM-DD>/<file name>`. The same
+file pushed twice is kept once; the same name with different content is kept as a second file; nothing is ever
+overwritten. Set **`replayFolder`** to put the copies somewhere other than `<gcodeFolder>/Archive`. A sliced
+file carries the slicer settings it was made with, so a saved copy answers "what settings did we use?".
+Archiving never blocks or fails a print; an error is logged and recorded in the audit log.
+
 ### Experimental Orca "Plugin"
 For those who prefer working with Orca Slicer instead of Snapmaker Orca (Snorca), an option was added to "connect" Orca to SnapCon using the CLI hook above.
 ![orca](./docs/orca.png)
