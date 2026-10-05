@@ -64,6 +64,13 @@ services:
       # a container recreate silently reverts to the two bundled defaults
       # and discards anything an admin added/edited.
       - ./locales:/app/locales                       # installed/edited language files
+      # Optional — a replay folder kept apart from your sliced-file folder. With
+      # "archivePushes" on (the default), every file pushed from a slicer is also
+      # saved as <replayFolder>/<user>/<date>/<name>. Without this mount and
+      # without "replayFolder" in config.json, copies go to ./gcode/Archive (already
+      # persisted by the ./gcode mount above). To keep them separate: create
+      # ./replay, uncomment the next line, and set "replayFolder": "./replay".
+      # - ./replay:/app/replay                       # replay copies of slicer pushes
       # Model Library database and its nightly backups. A directory, for the
       # same WAL-sidecar reason as audit-data above.
       - ./library-data:/app/library-data               # Library index, decisions, history, backups
