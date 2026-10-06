@@ -1,10 +1,10 @@
 # Slicer push identity — design
 
-Status: draft for review · 2026-10-06 · branch `feat/push-identity` (based on `feature/replay-archive`)
+Status: draft for review · 2026-10-06 · branch `feat/push-identity` (based on `main` at `510be2b`, after the archive work merged in #9)
 
 ## Why
 
-The replay library files every slicer push under the person who sent it, and the Replay view filters by person. Today that attribution does not exist for the main path people use:
+The replay library files every slicer push under the person who sent it, and the Replay view filters by person. Today that attribution does not exist for the main path people use.
 
 Pushes from Orca on another computer carry no credentials. With logins off they are all archived under `unknown/`; with logins on they are refused. The details, with code references, are in **Current design** below.
 
@@ -12,43 +12,41 @@ Target use: two or more people, each running Orca on their own computer, pushing
 
 ## Current design
 
-Links are pinned to commit [`f2ffe69`](https://github.com/csmarshall/SnapCon/tree/f2ffe69eca49f1365c20cf93de2a6e996e8c7357), the base of this branch, so line numbers stay valid as the branch moves.
+Links are pinned to commit [`510be2b`](https://github.com/csmarshall/SnapCon/tree/510be2b6f31c1f16fc1b221a304f3ab2320968c3), the base of this branch on `main`, so line numbers stay valid as the branch moves.
 
 ### The slicer hook (CLI side)
 
-- The CLI mode starts at [`server.js:331`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L331): `--load`, `--printer`, `--outputname` and `--snapcon` are read from `process.argv`. It is the same executable as the server, run once per push and then exited.
-- With `--snapcon <host[:port]>` ([`server.js:343-371`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L343-L371)) it POSTs the file's bytes to `/api/notify-load?printer=…&outputname=…&filename=…` as `application/octet-stream`. The request headers are only `Content-Type` and `Content-Length`: **no cookie, no token, no user name**. The body is streamed straight from disk ([`server.js:370`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L370)).
+- The CLI mode starts at [`server.js:331`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L331): `--load`, `--printer`, `--outputname` and `--snapcon` are read from `process.argv`. It is the same executable as the server, run once per push and then exited.
+- With `--snapcon <host[:port]>` ([`server.js:343-371`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L343-L371)) it POSTs the file's bytes to `/api/notify-load?printer=…&outputname=…&filename=…` as `application/octet-stream`. The request headers are only `Content-Type` and `Content-Length`: **no cookie, no token, no user name**. The body is streamed straight from disk ([`server.js:370`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L370)).
 - Without `--snapcon` it uses the separate same-machine path: it reads the local notify token (`notifyToken.js`) and sends a JSON file path to the loopback-only branch. **This change does not touch that path.**
 
 ### Authentication (server side)
 
-- [`auth.js:125-145`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/auth.js#L125-L145) `makeAuthMiddleware`. With `usersEnabled` off, every request becomes `{ role: "admin", implicit: true }` ([`auth.js:128`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/auth.js#L128)). With it on, the only credential recognised is the session cookie; the user record is copied onto `req.user`.
-- [`server.js:456-461`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L456-L461) `actorFromReq`: an implicit user gives `{ userId: null, userLabel: null }`; a real one gives their id and display name.
-- Users live in `users.json`, held in memory as `USERS` and written whole by `saveUsers()` ([`server.js:312`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L312)). `publicUser()` ([`server.js:4276`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L4276)) is the allow-list of fields sent to the browser. User admin routes are `requireAdmin` ([`server.js:4585-4671`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L4585)). The only self-service user routes are `/api/session/theme` and `/api/session/locale` ([`server.js:4304`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L4304)).
+- [`auth.js:125-145`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/auth.js#L125-L145) `makeAuthMiddleware`. With `usersEnabled` off, every request becomes `{ role: "admin", implicit: true }` ([`auth.js:128`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/auth.js#L128)). With it on, the only credential recognised is the session cookie; the user record is copied onto `req.user`.
+- [`server.js:456-461`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L456-L461) `actorFromReq`: an implicit user gives `{ userId: null, userLabel: null }`; a real one gives their id and display name.
+- Users live in `users.json`, held in memory as `USERS` and written whole by `saveUsers()` ([`server.js:312`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L312)). `publicUser()` ([`server.js:4288`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L4288)) is the allow-list of fields sent to the browser. User admin routes are `requireAdmin` ([`server.js:4597`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L4597)). The only self-service user routes are `/api/session/theme` and `/api/session/locale` ([`server.js:4316`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L4316)).
 
 ### The push route
 
-- [`server.js:2777`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L2777) `app.post("/api/notify-load", rawGcodeBody, …)`. A Buffer body selects the raw branch. There, [`server.js:2784-2785`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L2784-L2785) returns 401 without `req.user` and 403 for a `view` role.
+- [`server.js:2785`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2785) `app.post("/api/notify-load", rawGcodeBody, …)`. A Buffer body selects the raw branch. There, [`server.js:2792-2793`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2792-L2793) returns 401 without `req.user` and 403 for a `view` role.
   - With logins off, the implicit admin passes both checks and the actor has no identity.
   - With logins on, the hook (no cookie) is refused. That is why remote pushes only work with logins off today.
-- The printer is resolved and checked for visibility. The bytes go to a temp file, then `archivePush` runs with `userLabel: actor.userLabel` ([`server.js:2814`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L2814)) and the audit event `file-archived` is written ([`server.js:2816`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L2816)). Finally the file is handed to `uploadNotifiedFile`, which deletes the temp file ([`server.js:2822`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L2822)).
-- `isLoopback()` ([`server.js:2772`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/server.js#L2772)) looks at `req.socket.remoteAddress`. Its own comment notes that Remote Access tunnel traffic also arrives as loopback, which matters for the `host` pseudo-identity below.
+- The printer is resolved and checked for visibility, and the bytes go to a temp file. Then `archiveInBackground` is started, not awaited, with `userLabel: actor.userLabel` ([`server.js:2822`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2822)); its `onDone` writes the audit entry built by `archiveAuditEntry` (`file-archived` or `file-archive-failed`, [`server.js:2826`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2826)). The file is handed to `uploadNotifiedFile`, which deletes the temp file ([`server.js:2834`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2834)); the archive keeps its own reference to the bytes.
+- At startup, `sweepPartials` clears interrupted archive leftovers ([`server.js:2781`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2781)).
+- `isLoopback()` ([`server.js:2772`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/server.js#L2772)) looks at `req.socket.remoteAddress`. Its own comment notes that Remote Access tunnel traffic also arrives as loopback, which matters for the `host` pseudo-identity below.
 
 ### The archive
 
-- [`archivePush.js:74-97`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/archivePush.js#L74-L97) computes the sha256 ([line 77](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/archivePush.js#L77)) and writes `<root>/<safeSegment(userLabel, "unknown")>/<YYYY-MM-DD>/<name>` with an exclusive create.
-- It returns one of:
-  - `{ status: "archived", path }`;
-  - `{ status: "duplicate", path }` when the same bytes are already there;
-  - `{ status: "duplicate" }` **with no path** in the edge case where both candidate names were taken ([line 94](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/archivePush.js#L94));
-  - `{ status: "error" }`.
+- [`archivePush.js:190`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L190) `archivePush` computes the sha256 ([line 194](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L194)) and, under a per-folder queue ([`inFolderQueue`, line 129](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L129); case-insensitive key, at most 8 waiting), tries the candidate names `<name>`, `<name>-<sha8>`, `<name>-<sha256>` in `<root>/<safeSegment(userLabel, "unknown")>/<YYYY-MM-DD>/`.
+- Each name is claimed by `claimAndWrite` ([line 155](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L155)): an exclusive create of an empty placeholder, then the bytes written to a hidden `.partial`, then a rename (retried on `EPERM`/`EBUSY`/`EACCES`) over its own placeholder. Nothing is ever overwritten. A taken name is compared by `sameContent` ([line 114](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L114)), whose read errors propagate.
+- It returns `{ status: "archived", path }` ([line 200](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L200)), `{ status: "duplicate", path }` when the same bytes are already there ([line 203](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L203)), or `{ status: "error", error }`, including when every candidate name is taken by different content ([line 205](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/archivePush.js#L205)).
 - It does not return the hash or the size, and **nothing records who pushed, or to which printer, beyond the folder name and the audit log**.
 
 ### Things the new code relies on
 
-- The Library scanner ([`library/Scanner.js:40-48`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/library/Scanner.js#L40-L48)) classifies files by extension. A `.json` file falls through to role `other`; it is not skipped by `SKIP_FILE`. So the sidecars would be listed by the Library unless they are excluded explicitly.
-- `library/gcodeExtract.js` already reads every `key = value` line of the trailing config block into `cfg` ([line 134](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/library/gcodeExtract.js#L134)) using `parser._internal.matchCfgLine`. `post_process` would be among those keys, so the script-path lookup can reuse that parsing.
-- Settings > View already has a per-user section, the language picker ([`public/index.html:417`](https://github.com/csmarshall/SnapCon/blob/f2ffe69eca49f1365c20cf93de2a6e996e8c7357/public/index.html#L417)). The token block sits next to it.
+- The Library scanner ([`library/Scanner.js:41-48`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/library/Scanner.js#L41-L48)) skips dot-files (`SKIP_FILE`), so `.partial` files are invisible to it, but classifies everything else by extension. A `.json` file falls through to role `other`, so the sidecars would be listed by the Library unless they are excluded explicitly.
+- `library/gcodeExtract.js` already reads every `key = value` line of the trailing config block into `cfg` ([line 134](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/library/gcodeExtract.js#L134)) using `parser._internal.matchCfgLine`. `post_process` would be among those keys, so the script-path lookup can reuse that parsing.
+- Settings > View already has a per-user section, the language picker ([`public/index.html:417`](https://github.com/csmarshall/SnapCon/blob/510be2b6f31c1f16fc1b221a304f3ab2320968c3/public/index.html#L417)). The token block sits next to it.
 
 ## Goals
 
@@ -109,20 +107,20 @@ After a successful `archivePush`, write or update `<archived file>.snapcon.json`
 }
 ```
 
-- `status: "archived"`: create the sidecar with one entry in `pushes`.
-- `status: "duplicate"` with a `path` (the same bytes were already archived): read the existing sidecar, append an entry, and write it back through a temp file plus `netfs.rename`. If the sidecar is missing (for example, archived before this change), create it with the one new entry.
-- `status: "duplicate"` with no `path` (both candidate names held other copies of these bytes): no sidecar is written, and a debug line is logged.
+- The sidecar is written inside `archivePush`, in the same per-folder queue turn as the archive itself, so two pushes of the same file cannot both append to it at once.
+- `status: "archived"`: create the sidecar with one entry in `pushes`, using the same reserve-then-fill as the archive (`claimAndWrite`).
+- `status: "duplicate"` (the same bytes were already archived at `path`): read the existing sidecar, append an entry, and replace it by writing a hidden `.partial` and renaming it over the sidecar. Replacing is intended here: the sidecar is ours, and the queue serialises writers. If the sidecar is missing (archived before this change) or unreadable as JSON, create a fresh one with the one new entry; an unreadable one is first renamed to `<name>.snapcon.json.corrupt-<timestamp>` rather than deleted.
 - `basedOn` is reserved for the remix work and is always `null` here.
-- Like the archive itself, a sidecar failure is logged and audited and never blocks the print.
-- The Library scanner must not list `*.snapcon.json`: extend `SKIP_FILE` in `library/Scanner.js`, and add a test.
+- A sidecar failure does not change the archive result: it is logged, audited as `file-archive-sidecar-failed`, and never blocks the print.
+- The Library scanner must not list `*.snapcon.json`: extend `SKIP_FILE` in `library/Scanner.js`, and add a test. `sweepPartials` already covers the sidecar's `.partial` files.
 
 ## Changes by file
 
 | File | Change |
 |---|---|
 | `pushIdentity.js` (new, top level) | `generateToken()`, `hashToken(t)`, `findUserByToken(users, presented)`, `identityFromRequest({ cfg, users, req, bytes, name, reverse })` returning `{ userId, userLabel, identitySource }`, and `scriptPathUser(bytes, name)`. Pure functions with `dns` injected, so unit tests need no server. |
-| `archivePush.js` | Return the sha256 (already computed) and size on every result; add `writeSidecar({ fsApi, archivedPath, entry, meta })`. |
-| `server.js` raw branch of `/api/notify-load` | Resolve identity before the `req.user` check: bearer token when logins are on, pseudo-identity when off; then the existing role and visibility checks; pass the resolved actor to `archivePush`, the sidecar, the audit log and `uploadNotifiedFile`. |
+| `archivePush.js` | Take the resolved identity (`userId`, `userLabel`, `identitySource`) and the printer; write or update the sidecar inside the folder queue turn (`writeSidecar`); return the sha256 and size on every result; `archiveAuditEntry` gains `file-archive-sidecar-failed`. |
+| `server.js` raw branch of `/api/notify-load` | Resolve identity before the `req.user` check: bearer token when logins are on, pseudo-identity when off; then the existing role and visibility checks; pass the resolved identity and printer to `archiveInBackground` (archive, sidecar and audit all happen there) and the actor to `uploadNotifiedFile`. |
 | `server.js` routes | `POST /api/session/push-token` (requireRegular; returns `{ token }` once); `DELETE /api/session/push-token` (requireRegular); `DELETE /api/users/:id/push-token` (requireAdmin). Each route on one line, so the source-grep tests can find it. |
 | `server.js` CLI block | New `--token <t>` / `SNAPCON_TOKEN` and `--user <name>` / `SNAPCON_USER`, sent as headers on the `--snapcon` request. The flags take priority over the environment variables. Usage text updated. |
 | `server.js` `publicUser` | Add `pushToken: { createdAt, lastUsedAt } \| null`. |
@@ -163,7 +161,7 @@ flowchart TD
 ## Tests
 
 - `pushIdentity`: token format and entropy length; hash round-trip; match, mismatch, revoked, and a user with no token; timing-safe compare called with equal lengths; declared-name trimming, length cap and control-character rejection; `scriptPathUser` on Windows, macOS and Linux paths, an empty `post_process` (as in a real Snapmaker Orca 3MF), a missing config block, and a 3MF; `host` fallback with a fake `reverse` that resolves, times out, and with a loopback peer.
-- `archivePush`: the sidecar is created on `saved`, appended on `duplicate`, created when missing on `duplicate`, and a failed write does not throw.
+- `archivePush` sidecar: created on `archived`; appended on `duplicate`; created when missing; a corrupt one is set aside as `.corrupt-<timestamp>`, never deleted; two concurrent pushes of the same bytes give one sidecar with two entries; a failed sidecar write leaves the archive result unchanged and produces `file-archive-sidecar-failed`.
 - Route wiring (source-grep, as `test/archivePush.test.js` does): the bearer token is read only inside the raw branch; the three token routes exist with the right guards; the CLI forwards `--token`/`--user` as headers.
 - An express test, in the style of `test/library/routes.test.js`: with logins on, a token push succeeds as that user, no token gives 401, and a `view` user's token gives 403. With logins off, a declared name lands in that folder.
 - The Library scanner ignores `*.snapcon.json`.
