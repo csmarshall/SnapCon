@@ -470,7 +470,9 @@ it off) SnapCon also saves one copy, laid out as `<replayFolder>/<user>/<YYYY-MM
 file pushed twice is kept once; the same name with different content is kept as a second file; nothing is ever
 overwritten. Set **`replayFolder`** to put the copies somewhere other than `<gcodeFolder>/Archive`. A sliced
 file carries the slicer settings it was made with, so a saved copy answers "what settings did we use?".
-Archiving never blocks or fails a print; an error is logged and recorded in the audit log.
+Archiving runs in the background, so a slow or offline share never holds up or fails a print; a copy that
+could not be kept is logged and recorded in the audit log (`file-archive-failed`). File and folder names are
+made safe for Windows shares, and a copy only appears under its name once it has been written completely.
 
 ### Experimental Orca "Plugin"
 For those who prefer working with Orca Slicer instead of Snapmaker Orca (Snorca), an option was added to "connect" Orca to SnapCon using the CLI hook above.

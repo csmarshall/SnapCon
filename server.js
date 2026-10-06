@@ -47,7 +47,7 @@ const locales = require("./locales");
 const { readNotifyToken, ensureNotifyToken, timingSafeTokenEqual } = require("./notifyToken");
 const { isPathWithinFolder, resolveWithinFolder } = require("./pathSafety");
 const { sendWebhook, redactUrls } = require("./webhookNotify");
-const { archivePush } = require("./archivePush");
+const { archivePush, replayRootFor } = require("./archivePush");
 // Shared with the browser (served from public/): the one place slicer metadata
 // and connector knowledge become a printer identity.
 const PrinterIdentity = require("./public/printer-identity.js");
@@ -2807,13 +2807,18 @@ app.post("/api/notify-load", rawGcodeBody, async (req, res) => {
     // Keep a copy of what the slicer pushed (and the settings Orca embeds in it).
     // The temp file above is deleted once the printer has the file, so without
     // this the sliced file is gone. On by default; set "archivePushes": false in
-    // config.json to turn it off. A failure here is logged and never stops the print.
+    // config.json to turn it off. It runs in the background on its own copy of
+    // the bytes (req.body), so a slow or offline share never holds up the print,
+    // and archivePush() never rejects; a failure is logged and audited.
     if (CFG.archivePushes !== false) {
-      // Replay folder: "replayFolder" in config.json, else <gcodeFolder>/Archive (which the Library indexes).
-      const replayRoot = CFG.replayFolder ? path.resolve(BASE_DIR, CFG.replayFolder) : path.join(FOLDER, "Archive");
-      const arch = await archivePush({ fsApi: netfs, root: replayRoot, userLabel: actor.userLabel, name, bytes: req.body });
-      if (arch.status === "error") console.warn("[archive] could not keep a copy of " + name + ": " + arch.error);
-      else auditLog.log({ category: "job", event: "file-archived", ...actor, printerId: p.id, printerName: p.name, detail: { file: name, result: arch.status, ...(arch.path ? { archivedAs: arch.path } : {}) } });
+      archivePush({ fsApi: netfs, root: replayRootFor(CFG.replayFolder, BASE_DIR, FOLDER), userLabel: actor.userLabel, name, bytes: req.body }).then(arch => {
+        if (arch.status === "error") {
+          console.warn("[archive] could not keep a copy of " + name + ": " + arch.error);
+          auditLog.log({ category: "job", event: "file-archive-failed", ...actor, printerId: p.id, printerName: p.name, detail: { file: name, error: arch.error } });
+        } else {
+          auditLog.log({ category: "job", event: "file-archived", ...actor, printerId: p.id, printerName: p.name, detail: { file: name, result: arch.status, archivedAs: arch.path } });
+        }
+      }).catch(e => console.warn("[archive] could not record the archive result for " + name + ": " + (e && e.message)));
     }
     if (!(await isPrinterIdle(p))) {
       pendingLoad.set(idx, { file: tmpFile, name, ts: Date.now(), cleanup: true, actor });
