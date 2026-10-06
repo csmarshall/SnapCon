@@ -44,6 +44,13 @@ const MAX_QUEUED_PER_FOLDER = 8;
 // interactive calls, and a timeout marks the whole share offline, so a large
 // duplicate check over a slow link must not run under it.
 const ARCHIVE_IO_TIMEOUT_MS = 120000;
+// Windows and SMB refuse to rename over a file something else has open
+// (antivirus, the search indexer, the Library fingerprinting the new name, a
+// person previewing it). That clears in moments, so the final rename is retried
+// a few times, 250 ms apart, before the archive is reported as failed.
+const RENAME_ATTEMPTS = 4;
+const RENAME_RETRY_MS = 250;
+const RENAME_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
 
 // Folder-name safe version of a display name. Keeps letters and digits in any
 // script, dot, dash and underscore; everything else (spaces, slashes, quotes,
@@ -138,28 +145,35 @@ function inFolderQueue(dir, fn) {
 //   2. write the bytes to a hidden, uniquely named ".partial" beside it
 //      (exclusive create; the Library skips dot-files);
 //   3. rename the complete file over our own empty placeholder.
-// On a failure after step 1 both our placeholder and the partial are removed
-// (best effort; a partial that cannot be removed is swept later). Returns false
-// when the name was already taken.
+// On a failure after step 1 the partial is removed, and our placeholder too
+// while it is still empty (if the rename went through after all, the complete
+// copy stays). Cleanup is best effort: on a share that has stopped answering it
+// cannot run, and an interrupted partial or empty placeholder is removed by
+// sweepPartials() at the next start. A failure of step 1 itself (other than
+// EEXIST) removes nothing: there is no way to tell that the name is ours.
+// Returns false when the name was already taken.
 async function claimAndWrite(fsApi, target, bytes) {
   try { await fsApi.writeFileExclusive(target, Buffer.alloc(0)); }
-  catch (e) {
-    if (e && e.code === "EEXIST") return false;
-    // Any other failure: the exclusive create may still have made the (empty)
-    // file before failing. Remove it only while it is still empty, so nothing
-    // with content is ever deleted.
-    await fsApi.stat(target).then(st => st && st.size === 0 ? fsApi.unlink(target) : null).catch(() => {});
-    throw e;
-  }
+  catch (e) { if (e && e.code === "EEXIST") return false; throw e; }
   const partial = path.join(path.dirname(target), "." + path.basename(target) + "." + crypto.randomBytes(4).toString("hex") + ".partial");
   try {
     await fsApi.writeFileExclusive(partial, bytes);
-    await fsApi.rename(partial, target);
+    await renameWithRetry(fsApi, partial, target);
     return true;
   } catch (e) {
     await fsApi.unlink(partial).catch(() => {});
-    await fsApi.unlink(target).catch(() => {});
+    await fsApi.stat(target).then(st => st && st.size === 0 ? fsApi.unlink(target) : null).catch(() => {});
     throw e;
+  }
+}
+
+async function renameWithRetry(fsApi, from, to) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await fsApi.rename(from, to); }
+    catch (e) {
+      if (attempt >= RENAME_ATTEMPTS || !(e && RENAME_RETRY_CODES.has(e.code))) throw e;
+      await new Promise(r => setTimeout(r, RENAME_RETRY_MS));
+    }
   }
 }
 
@@ -215,12 +229,14 @@ function archiveAuditEntry(arch, { actor, printer, name }) {
   return { ...base, event: "file-archived", detail: { file: name, result: arch.status, archivedAs: arch.path } };
 }
 
-// Remove hidden ".partial" files that a failed or interrupted archive could not
-// clean up (a crash mid-write, a share that dropped). Only names this module
-// creates are touched — "." + name + "." + 8 hex + ".partial", two levels down
-// (<user>/<date>/) — and only when older than `olderThanMs`, so a write in
-// progress is never removed. Never throws; returns the paths removed.
+// Remove what a failed or interrupted archive could not clean up (a crash
+// mid-write, a share that dropped): hidden ".partial" files ("." + name + "." +
+// 8 hex + ".partial") and empty placeholders, two levels down (<user>/<date>/).
+// Empty files are only removed from folders named like a date (YYYY-MM-DD), the
+// archive's own layout. Only files older than `olderThanMs` are touched, so a
+// write in progress is never removed. Never throws; returns the paths removed.
 const PARTIAL_NAME = /^\..+\.[0-9a-f]{8}\.partial$/;
+const DATE_DIR = /^\d{4}-\d{2}-\d{2}$/;
 async function sweepPartials({ fsApi, root, now, olderThanMs }) {
   const removed = [];
   if (typeof root !== "string" || !root) return removed;
@@ -229,12 +245,18 @@ async function sweepPartials({ fsApi, root, now, olderThanMs }) {
     for (const dateDir of await dirsIn(userDir)) {
       let entries;
       try { entries = await fsApi.readdir(dateDir); } catch { continue; }
+      const isDateDir = DATE_DIR.test(path.basename(dateDir));
       for (const e of entries) {
-        if (!e.isFile || !PARTIAL_NAME.test(e.name)) continue;
+        if (!e.isFile) continue;
+        const partial = PARTIAL_NAME.test(e.name);
+        if (!partial && (!isDateDir || e.name.startsWith("."))) continue;
         const p = path.join(dateDir, e.name);
         try {
           const st = await fsApi.stat(p);
           if (now - st.mtimeMs < olderThanMs) continue;
+          // Besides partials, only empty files: an archive placeholder whose
+          // fill never finished. The archive never stores an empty push.
+          if (!partial && st.size !== 0) continue;
           await fsApi.unlink(p);
           removed.push(p);
         } catch { /* gone already, or the share dropped: next sweep */ }
@@ -244,4 +266,4 @@ async function sweepPartials({ fsApi, root, now, olderThanMs }) {
   return removed;
 }
 
-module.exports = { archivePush, archiveInBackground, archiveAuditEntry, sweepPartials, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor, MAX_QUEUED_PER_FOLDER, ARCHIVE_IO_TIMEOUT_MS };
+module.exports = { archivePush, archiveInBackground, archiveAuditEntry, sweepPartials, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor, MAX_QUEUED_PER_FOLDER, ARCHIVE_IO_TIMEOUT_MS, RENAME_ATTEMPTS };

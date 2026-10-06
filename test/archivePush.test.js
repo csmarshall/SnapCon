@@ -12,7 +12,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const { archivePush, archiveInBackground, archiveAuditEntry, sweepPartials, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor, MAX_QUEUED_PER_FOLDER, ARCHIVE_IO_TIMEOUT_MS } = require("../archivePush");
+const { archivePush, archiveInBackground, archiveAuditEntry, sweepPartials, RENAME_ATTEMPTS, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor, MAX_QUEUED_PER_FOLDER, ARCHIVE_IO_TIMEOUT_MS } = require("../archivePush");
 
 // Same shape as netfs: mkdir(p, {recursive}), an exclusive writer that rejects
 // with code EEXIST rather than overwrite, exists() that is false only for "not
@@ -175,13 +175,13 @@ test("a read error while checking an existing copy is reported, not mistaken for
   assert.equal(fs.readdirSync(path.join(root, "x", "2026-10-05")).length, 1, "no second copy was written");
 });
 
-test("a reservation that fails after creating the name leaves nothing behind", async () => {
+test("a reservation that fails never deletes anything; an empty leftover is left for the sweep", async () => {
   const root = tmp();
-  const dying = { ...fsApi, writeFileExclusive: async (p, data) => { fs.writeFileSync(p, data.subarray(0, 2), { flag: "wx" }); throw new Error("ENOSPC"); } };
+  const dying = { ...fsApi, writeFileExclusive: async (p, data) => { fs.writeFileSync(p, data.subarray(0, 2), { flag: "wx" }); throw new Error("EIO"); } };
   const r = await archivePush({ fsApi: dying, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1 X10\n"), now: NOON });
   assert.equal(r.status, "error");
-  const left = fs.readdirSync(path.join(root, "x", "2026-10-05"));
-  assert.deepEqual(left, [], "the reserved name and the partial are both removed: " + left);
+  assert.deepEqual(fs.readdirSync(path.join(root, "x", "2026-10-05")), ["a.gcode"], "left in place, not guessed at");
+  assert.equal(fs.statSync(path.join(root, "x", "2026-10-05", "a.gcode")).size, 0);
 });
 
 test("a write that dies part-way never leaves a file under the archived name", async () => {
@@ -209,6 +209,33 @@ test("a failed reservation never removes a file that has content", async () => {
   const r = await archivePush({ fsApi: odd, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("ours\n"), now: NOON });
   assert.equal(r.status, "error");
   assert.equal(fs.readFileSync(path.join(dir, "a.gcode"), "utf8"), "theirs");
+});
+
+test("a rename that completes but reports an error never deletes the finished copy", async () => {
+  const root = tmp();
+  const liar = { ...fsApi, rename: async (a, b) => { fs.renameSync(a, b); throw Object.assign(new Error("EIO after rename"), { code: "EIO" }); } };
+  const bytes = Buffer.from("G1 X10\n");
+  const r = await archivePush({ fsApi: liar, root, userLabel: "x", name: "a.gcode", bytes, now: NOON });
+  assert.equal(r.status, "error");
+  assert.deepEqual(read(path.join(root, "x", "2026-10-05", "a.gcode")), bytes, "the complete copy stays");
+});
+
+test("a rename refused because something has the placeholder open is retried", async () => {
+  const root = tmp();
+  let fails = RENAME_ATTEMPTS - 1;
+  const busy = { ...fsApi, rename: async (a, b) => { if (fails-- > 0) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" }); return fsApi.rename(a, b); } };
+  const r = await archivePush({ fsApi: busy, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1\n"), now: NOON });
+  assert.equal(r.status, "archived");
+});
+
+test("a rename that stays refused gives up after RENAME_ATTEMPTS and cleans up", async () => {
+  const root = tmp();
+  let calls = 0;
+  const busy = { ...fsApi, rename: async () => { calls++; throw Object.assign(new Error("EPERM"), { code: "EPERM" }); } };
+  const r = await archivePush({ fsApi: busy, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1\n"), now: NOON });
+  assert.equal(r.status, "error");
+  assert.equal(calls, RENAME_ATTEMPTS);
+  assert.deepEqual(fs.readdirSync(path.join(root, "x", "2026-10-05")), []);
 });
 
 test("two identical pushes at the same moment are stored once", async () => {
@@ -364,6 +391,20 @@ test("sweepPartials removes only old hidden .partial files inside user/date fold
   const removed = await sweepPartials({ fsApi, root, now, olderThanMs: 86400000 });
   assert.deepEqual(removed, [old]);
   for (const f of [fresh, real, lookalike, hidden]) assert.ok(fs.existsSync(f), f + " kept");
+});
+
+test("sweepPartials also removes old empty placeholders, only inside <user>/<YYYY-MM-DD>/", async () => {
+  const root = tmp();
+  const day = path.join(root, "x", "2026-10-05"), other = path.join(root, "x", "projects");
+  fs.mkdirSync(day, { recursive: true }); fs.mkdirSync(other, { recursive: true });
+  const now = Date.now(), old = new Date(now - 2 * 86400000);
+  const emptyOld = path.join(day, "a.gcode"), emptyFresh = path.join(day, "b.gcode"), full = path.join(day, "c.gcode"), emptyElsewhere = path.join(other, "d.gcode");
+  for (const f of [emptyOld, emptyFresh, emptyElsewhere]) fs.writeFileSync(f, "");
+  fs.writeFileSync(full, "G1\n");
+  for (const f of [emptyOld, full, emptyElsewhere]) fs.utimesSync(f, old, old);
+  const removed = await sweepPartials({ fsApi, root, now, olderThanMs: 86400000 });
+  assert.deepEqual(removed, [emptyOld]);
+  for (const f of [emptyFresh, full, emptyElsewhere]) assert.ok(fs.existsSync(f), f + " kept");
 });
 
 test("sweepPartials on a missing or unset folder does nothing and does not throw", async () => {
