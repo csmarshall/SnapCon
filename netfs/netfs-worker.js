@@ -85,6 +85,8 @@ const ops = {
   writeFileExclusive: (p, data) => { fs.writeFileSync(p, Buffer.from(data.buffer, data.byteOffset, data.byteLength), { flag: "wx" }); return true; },
   mkdir: (p, { recursive = false } = {}) => { fs.mkdirSync(p, { recursive }); return true; },
   rename: (a, b) => { fs.renameSync(a, b); return true; },
+  // Files only: unlinkSync refuses a folder (EISDIR/EPERM), which is the point.
+  unlink: p => { fs.unlinkSync(p); return true; },
   // File search: a recursive walk matching names, capped. Dot-directories
   // (.thumbs) are skipped, as the file browser's own walk always did.
   walk: (dir, { query, filter, limit = 300 }) => {
