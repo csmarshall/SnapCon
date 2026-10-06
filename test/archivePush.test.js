@@ -12,7 +12,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
-const { archivePush, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor } = require("../archivePush");
+const { archivePush, archiveInBackground, archiveAuditEntry, sweepPartials, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor, MAX_QUEUED_PER_FOLDER, ARCHIVE_IO_TIMEOUT_MS } = require("../archivePush");
 
 // Same shape as netfs: mkdir(p, {recursive}), an exclusive writer that rejects
 // with code EEXIST rather than overwrite, exists() that is false only for "not
@@ -23,6 +23,8 @@ const fsApi = {
   exists: async p => fs.existsSync(p),
   stat: async p => fs.statSync(p),
   rename: async (a, b) => fs.renameSync(a, b),
+  unlink: async p => fs.unlinkSync(p),
+  readdir: async p => fs.readdirSync(p, { withFileTypes: true }).map(e => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
   readFile: async (p, maxBytes) => {
     const buf = fs.readFileSync(p);
     return maxBytes != null ? buf.subarray(0, maxBytes) : buf;
@@ -173,14 +175,40 @@ test("a read error while checking an existing copy is reported, not mistaken for
   assert.equal(fs.readdirSync(path.join(root, "x", "2026-10-05")).length, 1, "no second copy was written");
 });
 
-test("a write that dies part-way never leaves a file under the archived name", async () => {
+test("a reservation that fails after creating the name leaves nothing behind", async () => {
   const root = tmp();
   const dying = { ...fsApi, writeFileExclusive: async (p, data) => { fs.writeFileSync(p, data.subarray(0, 2), { flag: "wx" }); throw new Error("ENOSPC"); } };
   const r = await archivePush({ fsApi: dying, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1 X10\n"), now: NOON });
   assert.equal(r.status, "error");
   const left = fs.readdirSync(path.join(root, "x", "2026-10-05"));
-  assert.ok(!left.includes("a.gcode"), "nothing under the real name: " + left);
-  assert.ok(left.every(n => n.startsWith(".")), "leftovers are hidden partials the Library skips: " + left);
+  assert.deepEqual(left, [], "the reserved name and the partial are both removed: " + left);
+});
+
+test("a write that dies part-way never leaves a file under the archived name", async () => {
+  const root = tmp();
+  // The empty reservation succeeds; the real bytes die half-written.
+  const dying = { ...fsApi, writeFileExclusive: async (p, data) => {
+    if (!data.length) return fsApi.writeFileExclusive(p, data);
+    fs.writeFileSync(p, data.subarray(0, 2), { flag: "wx" }); throw new Error("ENOSPC");
+  } };
+  const r = await archivePush({ fsApi: dying, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1 X10\n"), now: NOON });
+  assert.equal(r.status, "error");
+  assert.match(r.error, /ENOSPC/);
+  assert.deepEqual(fs.readdirSync(path.join(root, "x", "2026-10-05")), [], "placeholder and partial both removed");
+});
+
+test("a failed reservation never removes a file that has content", async () => {
+  const root = tmp();
+  const dir = path.join(root, "x", "2026-10-05");
+  // The create fails with something other than EEXIST, and by the time we look
+  // the name holds real bytes (someone else's): it must be left alone.
+  const odd = { ...fsApi, writeFileExclusive: async (p, data) => {
+    if (!data.length) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, "theirs"); throw Object.assign(new Error("EIO"), { code: "EIO" }); }
+    return fsApi.writeFileExclusive(p, data);
+  } };
+  const r = await archivePush({ fsApi: odd, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("ours\n"), now: NOON });
+  assert.equal(r.status, "error");
+  assert.equal(fs.readFileSync(path.join(dir, "a.gcode"), "utf8"), "theirs");
 });
 
 test("two identical pushes at the same moment are stored once", async () => {
@@ -215,16 +243,130 @@ test("replayRootFor: default under the G-code folder, relative to the app, absol
   assert.equal(replayRootFor({}, base, gcode), null);
 });
 
-test("server.js archives in the push route, in the background, behind the opt-out, and audits failures", () => {
+test("server.js starts the archive in the background, behind the opt-out, audits through archiveAuditEntry, and sweeps partials at startup", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const route = src.slice(src.indexOf('app.post("/api/notify-load"'));
-  const end = route.indexOf("uploadNotifiedFile(idx, { file: tmpFile");
-  const block = route.slice(0, end);
-  const at = block.indexOf("archivePush({");
-  assert.ok(at > 0, "the push route must call archivePush before the temp copy is handed off");
+  const block = route.slice(0, route.indexOf("uploadNotifiedFile(idx, { file: tmpFile"));
+  const at = block.indexOf("archiveInBackground({");
+  assert.ok(at > 0, "the push route starts the archive before the temp copy is handed off");
   assert.ok(block.lastIndexOf("CFG.archivePushes !== false", at) > 0, "behind the archivePushes opt-out");
-  assert.ok(!/await\s+archivePush\(/.test(block), "never awaited: a slow share must not hold up the print");
-  assert.ok(block.includes("replayRootFor("), "the folder is resolved by replayRootFor, which cannot throw");
-  assert.ok(/event:\s*"file-archive-failed"/.test(block), "a failed archive is audited");
-  assert.ok(/event:\s*"file-archived"/.test(block), "a kept copy is audited");
+  assert.ok(!/archivePush\(\{/.test(block), "the route never calls archivePush directly (archiveInBackground is what cannot block)");
+  assert.ok(/auditLog\.log\(archiveAuditEntry\(/.test(block), "the result is audited through archiveAuditEntry");
+  assert.ok(/CFG\.archivePushes !== false\) \{\s*sweepPartials\(\{/.test(src), "leftover partials are swept at startup, behind the same opt-out");
+});
+
+test("archiveInBackground returns at once even when the share never answers", () => {
+  const hung = { ...fsApi, mkdir: () => new Promise(() => {}) };
+  let done = false;
+  const ret = archiveInBackground({ fsApi: hung, root: tmp(), userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1\n"), onDone: () => { done = true; } });
+  assert.equal(ret, undefined, "nothing to await");
+  assert.equal(done, false);
+});
+
+test("archiveInBackground reports the result, and a throwing onDone is contained", async () => {
+  const root = tmp();
+  const result = await new Promise(resolve => archiveInBackground({ fsApi, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("G1\n"), now: NOON, onDone: resolve }));
+  assert.equal(result.status, "archived");
+  const errors = [];
+  const origWarn = console.warn; console.warn = m => errors.push(m);
+  try {
+    await new Promise(resolve => archiveInBackground({ fsApi, root, userLabel: "y", name: "a.gcode", bytes: Buffer.from("G1\n"), now: NOON, onDone: () => { setTimeout(resolve, 5); throw new Error("audit db gone"); } }));
+    await new Promise(r => setTimeout(r, 10));
+  } finally { console.warn = origWarn; }
+  assert.ok(errors.some(m => /audit db gone/.test(m)), "logged, not an unhandled rejection");
+});
+
+test("archiveAuditEntry: kept copies and failures are distinct audit events", () => {
+  const ctx = { actor: { userId: "u1", userLabel: "C" }, printer: { id: "p1", name: "U1" }, name: "a.gcode" };
+  const ok = archiveAuditEntry({ status: "archived", path: "/r/C/d/a.gcode" }, ctx);
+  assert.deepEqual(ok, { category: "job", event: "file-archived", userId: "u1", userLabel: "C", printerId: "p1", printerName: "U1", detail: { file: "a.gcode", result: "archived", archivedAs: "/r/C/d/a.gcode" } });
+  const bad = archiveAuditEntry({ status: "error", error: "share down" }, ctx);
+  assert.equal(bad.event, "file-archive-failed");
+  assert.deepEqual(bad.detail, { file: "a.gcode", error: "share down" });
+});
+
+test("a file someone else puts at the name is never overwritten, even if the share reported the name free", async () => {
+  const root = tmp();
+  const dir = path.join(root, "x", "2026-10-05");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "a.gcode"), "theirs");
+  const liar = { ...fsApi, exists: async () => false };
+  const r = await archivePush({ fsApi: liar, root, userLabel: "x", name: "a.gcode", bytes: Buffer.from("ours\n"), now: NOON });
+  assert.equal(r.status, "archived");
+  assert.equal(fs.readFileSync(path.join(dir, "a.gcode"), "utf8"), "theirs", "the other file is untouched");
+  assert.notEqual(r.path, path.join(dir, "a.gcode"));
+});
+
+test("on a case-insensitive share, 'Charles' and 'charles' pushing at once both keep their copies", async () => {
+  const root = tmp();
+  const fold = p => p.toLowerCase();
+  const ci = {};
+  for (const [k, f] of Object.entries(fsApi)) ci[k] = (...a) => f(...a.map(x => typeof x === "string" ? fold(x) : x));
+  const slowWrite = ci.writeFileExclusive;
+  ci.writeFileExclusive = async (p, d) => { await new Promise(r => setTimeout(r, 15)); return slowWrite(p, d); };
+  const [a, b] = await Promise.all([
+    archivePush({ fsApi: ci, root, userLabel: "Charles", name: "a.gcode", bytes: Buffer.from("one\n"), now: NOON }),
+    archivePush({ fsApi: ci, root, userLabel: "charles", name: "a.gcode", bytes: Buffer.from("two\n"), now: NOON })
+  ]);
+  assert.deepEqual([a.status, b.status], ["archived", "archived"]);
+  assert.notEqual(fold(a.path), fold(b.path));
+  const kept = fs.readdirSync(path.join(fold(root), "charles", "2026-10-05")).filter(n => !n.startsWith(".")).map(n => fs.readFileSync(path.join(fold(root), "charles", "2026-10-05", n), "utf8")).sort();
+  assert.deepEqual(kept, ["one\n", "two\n"]);
+});
+
+test("on a case-insensitive share, the same bytes from 'Charles' and 'charles' at once are stored once", async () => {
+  const root = tmp();
+  const fold = p => p.toLowerCase();
+  const ci = {};
+  for (const [k, f] of Object.entries(fsApi)) ci[k] = (...a) => f(...a.map(x => typeof x === "string" ? fold(x) : x));
+  const slowWrite = ci.writeFileExclusive;
+  ci.writeFileExclusive = async (p, d) => { await new Promise(r => setTimeout(r, 15)); return slowWrite(p, d); };
+  const bytes = Buffer.from("same\n");
+  const [a, b] = await Promise.all(["Charles", "charles"].map(u => archivePush({ fsApi: ci, root, userLabel: u, name: "a.gcode", bytes, now: NOON })));
+  assert.deepEqual([a.status, b.status].sort(), ["archived", "duplicate"]);
+  assert.deepEqual(fs.readdirSync(path.join(fold(root), "charles", "2026-10-05")).filter(n => !n.startsWith(".")), ["a.gcode"]);
+});
+
+test("a burst beyond the per-folder queue limit is refused, not held in memory", async () => {
+  const root = tmp();
+  const slow = { ...fsApi, writeFileExclusive: async (p, d) => { await new Promise(r => setTimeout(r, 5)); return fsApi.writeFileExclusive(p, d); } };
+  const n = MAX_QUEUED_PER_FOLDER + 3;
+  const results = await Promise.all(Array.from({ length: n }, (_, i) => archivePush({ fsApi: slow, root, userLabel: "x", name: "f" + i + ".gcode", bytes: Buffer.from("G" + i + "\n"), now: NOON })));
+  assert.ok(results.filter(r => r.status === "error" && /busy/.test(r.error)).length >= 1, JSON.stringify(results.map(r => r.status)));
+  assert.ok(results.filter(r => r.status === "archived").length >= MAX_QUEUED_PER_FOLDER);
+});
+
+test("the duplicate check reads with the archive's long timeout, so a big file over a slow link does not mark the share offline", async () => {
+  const root = tmp();
+  const bytes = Buffer.from("G1\n");
+  await archivePush({ fsApi, root, userLabel: "x", name: "a.gcode", bytes, now: NOON });
+  let seen = null;
+  const spy = { ...fsApi, readFile: async (p, max, o) => { seen = o; return fsApi.readFile(p, max); } };
+  await archivePush({ fsApi: spy, root, userLabel: "x", name: "a.gcode", bytes, now: NOON });
+  assert.ok(seen && seen.timeoutMs === ARCHIVE_IO_TIMEOUT_MS, JSON.stringify(seen));
+});
+
+test("a very long extension cannot turn the name into a hidden file", () => {
+  const n = safeFileName("x." + "g".repeat(300));
+  assert.ok(!n.startsWith("."), n);
+  assert.ok(n.length <= 150, String(n.length));
+});
+
+test("sweepPartials removes only old hidden .partial files inside user/date folders", async () => {
+  const root = tmp();
+  const dir = path.join(root, "x", "2026-10-05");
+  fs.mkdirSync(dir, { recursive: true });
+  const old = path.join(dir, ".a.gcode.1234abcd.partial"), fresh = path.join(dir, ".b.gcode.5678abcd.partial");
+  const real = path.join(dir, "c.gcode"), lookalike = path.join(dir, "d.partial"), hidden = path.join(dir, ".keep");
+  for (const f of [old, fresh, real, lookalike, hidden]) fs.writeFileSync(f, "x");
+  const now = Date.now();
+  fs.utimesSync(old, new Date(now - 2 * 86400000), new Date(now - 2 * 86400000));
+  const removed = await sweepPartials({ fsApi, root, now, olderThanMs: 86400000 });
+  assert.deepEqual(removed, [old]);
+  for (const f of [fresh, real, lookalike, hidden]) assert.ok(fs.existsSync(f), f + " kept");
+});
+
+test("sweepPartials on a missing or unset folder does nothing and does not throw", async () => {
+  assert.deepEqual(await sweepPartials({ fsApi, root: path.join(tmp(), "nope"), now: Date.now(), olderThanMs: 1 }), []);
+  assert.deepEqual(await sweepPartials({ fsApi, root: null, now: Date.now(), olderThanMs: 1 }), []);
 });

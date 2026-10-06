@@ -30,6 +30,20 @@ const RESERVED_NAMES = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i;
 // Room for the 64-char content hash that may be added to a file name, inside the
 // 255-character limit most filesystems put on one path segment.
 const MAX_NAME = 150;
+// Longer than any real extension (".gcode", ".3mf", ".bgcode"); anything past
+// it is treated as part of the name, so the cap can never cut a name down to a
+// bare, hidden ".extension".
+const MAX_EXT = 16;
+// How many pushes may wait for one archive folder before more are refused. Each
+// waiting push holds its file in memory, and each write may take up to
+// ARCHIVE_IO_TIMEOUT_MS on a slow share; refusing (an error result, audited)
+// bounds that instead of queueing without limit.
+const MAX_QUEUED_PER_FOLDER = 8;
+// The time a single archive read or write may take: the same budget netfs gives
+// an exclusive write. netfs's default per-operation timeout is meant for small
+// interactive calls, and a timeout marks the whole share offline, so a large
+// duplicate check over a slow link must not run under it.
+const ARCHIVE_IO_TIMEOUT_MS = 120000;
 
 // Folder-name safe version of a display name. Keeps letters and digits in any
 // script, dot, dash and underscore; everything else (spaces, slashes, quotes,
@@ -49,7 +63,8 @@ function safeSegment(s, fallback) {
 // total is capped with the extension kept.
 function safeFileName(name) {
   const base = path.basename(String(name || "")).trim();
-  const ext = path.extname(base);
+  const rawExt = path.extname(base);
+  const ext = rawExt.length <= MAX_EXT + 1 ? rawExt : "";
   const stem = safeSegment(ext ? base.slice(0, -ext.length) : base, "upload");
   const cleanExt = ext ? "." + safeSegment(ext.slice(1), "") : "";
   if (!ext && stem === "upload") return "upload.gcode";
@@ -92,7 +107,7 @@ function candidateNames(name, sha256) {
 async function sameContent(fsApi, target, bytes, sha256) {
   const st = await fsApi.stat(target);
   if (!st || st.size !== bytes.length) return false;
-  const existing = await fsApi.readFile(target, bytes.length + 1);
+  const existing = await fsApi.readFile(target, bytes.length + 1, { timeoutMs: ARCHIVE_IO_TIMEOUT_MS });
   return crypto.createHash("sha256").update(existing).digest("hex") === sha256;
 }
 
@@ -100,30 +115,57 @@ async function sameContent(fsApi, target, bytes, sha256) {
 // a second push arriving while the first is still being written would see a
 // half-written file, decide it is different content, and store the same bytes
 // again. Only this process writes the archive, so an in-process queue is enough.
-const folderQueues = new Map();
+// The key ignores case: on APFS, SMB and NTFS "Charles" and "charles" are the
+// same folder. Returns null when the folder already has MAX_QUEUED_PER_FOLDER
+// pushes waiting.
+const folderQueues = new Map();   // folder key -> { tail: Promise, waiting: number }
 function inFolderQueue(dir, fn) {
-  const prev = folderQueues.get(dir) || Promise.resolve();
-  const run = prev.then(fn, fn);
-  const tail = run.catch(() => {});
-  folderQueues.set(dir, tail);
-  tail.then(() => { if (folderQueues.get(dir) === tail) folderQueues.delete(dir); });
+  const key = dir.toLowerCase();
+  const q = folderQueues.get(key) || { tail: Promise.resolve(), waiting: 0 };
+  if (q.waiting >= MAX_QUEUED_PER_FOLDER) return null;
+  q.waiting++;
+  const run = q.tail.then(fn, fn);
+  q.tail = run.catch(() => {}).then(() => { if (--q.waiting === 0 && folderQueues.get(key) === q) folderQueues.delete(key); });
+  folderQueues.set(key, q);
   return run;
 }
 
-// Write `bytes` to `target` without ever leaving a partial file under that name:
-// the bytes go to a hidden, uniquely named ".partial" file first (exclusive
-// create; the Library skips dot-files), and only a complete file is renamed into
-// place. A write that fails or times out part-way leaves just that hidden file.
-// The caller has checked that `target` is free, under the folder queue above.
-async function writeStaged(fsApi, target, bytes) {
+// Claim `target` and fill it, never overwriting anything and never leaving a
+// partial file under that name. Works on every share (no hard links needed):
+//   1. reserve the name with an exclusive create of an empty file — atomic, so
+//      a name that exists for any reason (another push, a person, another
+//      program) is refused with EEXIST rather than replaced;
+//   2. write the bytes to a hidden, uniquely named ".partial" beside it
+//      (exclusive create; the Library skips dot-files);
+//   3. rename the complete file over our own empty placeholder.
+// On a failure after step 1 both our placeholder and the partial are removed
+// (best effort; a partial that cannot be removed is swept later). Returns false
+// when the name was already taken.
+async function claimAndWrite(fsApi, target, bytes) {
+  try { await fsApi.writeFileExclusive(target, Buffer.alloc(0)); }
+  catch (e) {
+    if (e && e.code === "EEXIST") return false;
+    // Any other failure: the exclusive create may still have made the (empty)
+    // file before failing. Remove it only while it is still empty, so nothing
+    // with content is ever deleted.
+    await fsApi.stat(target).then(st => st && st.size === 0 ? fsApi.unlink(target) : null).catch(() => {});
+    throw e;
+  }
   const partial = path.join(path.dirname(target), "." + path.basename(target) + "." + crypto.randomBytes(4).toString("hex") + ".partial");
-  await fsApi.writeFileExclusive(partial, bytes);
-  await fsApi.rename(partial, target);
+  try {
+    await fsApi.writeFileExclusive(partial, bytes);
+    await fsApi.rename(partial, target);
+    return true;
+  } catch (e) {
+    await fsApi.unlink(partial).catch(() => {});
+    await fsApi.unlink(target).catch(() => {});
+    throw e;
+  }
 }
 
 /**
  * @param {object} o
- * @param {object} o.fsApi    { mkdir, exists, stat, readFile, writeFileExclusive, rename } — netfs in the server
+ * @param {object} o.fsApi    { mkdir, stat, readFile, writeFileExclusive, rename, unlink } — netfs in the server
  * @param {string|null} o.root the replay folder (from replayRootFor; null when misconfigured)
  * @param {string|null} o.userLabel  who pushed it (actorFromReq(req).userLabel)
  * @param {string} o.name     the file name as pushed
@@ -137,22 +179,69 @@ async function archivePush({ fsApi, root, userLabel, name, bytes, now = Date.now
     if (!Buffer.isBuffer(bytes) || !bytes.length) return { status: "error", error: "empty file" };
     const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
     const dir = path.join(root, safeSegment(userLabel, "unknown"), dateStamp(now));
-    return await inFolderQueue(dir, async () => {
+    const queued = inFolderQueue(dir, async () => {
       await fsApi.mkdir(dir, { recursive: true });
       for (const candidate of candidateNames(name, sha256)) {
         const target = path.join(dir, candidate);
-        if (!(await fsApi.exists(target))) {
-          await writeStaged(fsApi, target, bytes);
-          return { status: "archived", path: target };
-        }
+        if (await claimAndWrite(fsApi, target, bytes)) return { status: "archived", path: target };
         // Name taken. Exactly these bytes: nothing to do. Anything else: try the
         // next name — an existing file is never overwritten.
         if (await sameContent(fsApi, target, bytes, sha256)) return { status: "duplicate", path: target };
       }
       return { status: "error", error: "every archive name for " + safeFileName(name) + " is taken by different content" };
     });
+    if (!queued) return { status: "error", error: "archive folder busy: " + MAX_QUEUED_PER_FOLDER + " pushes already waiting" };
+    return await queued;
   } catch (e) {
     return { status: "error", error: e && e.message ? e.message : String(e) };
   }
 }
-module.exports = { archivePush, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor };
+// Start archivePush() and return at once: nothing for the caller to await, so a
+// slow or unreachable share can never hold up the push route. `onDone` receives
+// the result; if it throws (say, the audit log is unavailable) that is logged
+// rather than left as an unhandled rejection.
+function archiveInBackground({ onDone, ...args }) {
+  Promise.resolve()
+    .then(() => archivePush(args))
+    .then(result => onDone(result))
+    .catch(e => console.warn("[archive] could not record the archive result for " + args.name + ": " + (e && e.message ? e.message : e)));
+}
+
+// The audit-log entry for one archive result: "file-archived" for a kept copy
+// (new or already there), "file-archive-failed" otherwise.
+function archiveAuditEntry(arch, { actor, printer, name }) {
+  const base = { category: "job", ...actor, printerId: printer.id, printerName: printer.name };
+  if (arch.status === "error") return { ...base, event: "file-archive-failed", detail: { file: name, error: arch.error } };
+  return { ...base, event: "file-archived", detail: { file: name, result: arch.status, archivedAs: arch.path } };
+}
+
+// Remove hidden ".partial" files that a failed or interrupted archive could not
+// clean up (a crash mid-write, a share that dropped). Only names this module
+// creates are touched — "." + name + "." + 8 hex + ".partial", two levels down
+// (<user>/<date>/) — and only when older than `olderThanMs`, so a write in
+// progress is never removed. Never throws; returns the paths removed.
+const PARTIAL_NAME = /^\..+\.[0-9a-f]{8}\.partial$/;
+async function sweepPartials({ fsApi, root, now, olderThanMs }) {
+  const removed = [];
+  if (typeof root !== "string" || !root) return removed;
+  const dirsIn = async p => { try { return (await fsApi.readdir(p)).filter(e => e.isDirectory).map(e => path.join(p, e.name)); } catch { return []; } };
+  for (const userDir of await dirsIn(root)) {
+    for (const dateDir of await dirsIn(userDir)) {
+      let entries;
+      try { entries = await fsApi.readdir(dateDir); } catch { continue; }
+      for (const e of entries) {
+        if (!e.isFile || !PARTIAL_NAME.test(e.name)) continue;
+        const p = path.join(dateDir, e.name);
+        try {
+          const st = await fsApi.stat(p);
+          if (now - st.mtimeMs < olderThanMs) continue;
+          await fsApi.unlink(p);
+          removed.push(p);
+        } catch { /* gone already, or the share dropped: next sweep */ }
+      }
+    }
+  }
+  return removed;
+}
+
+module.exports = { archivePush, archiveInBackground, archiveAuditEntry, sweepPartials, safeSegment, safeFileName, dateStamp, candidateNames, replayRootFor, MAX_QUEUED_PER_FOLDER, ARCHIVE_IO_TIMEOUT_MS };

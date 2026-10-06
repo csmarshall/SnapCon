@@ -47,7 +47,7 @@ const locales = require("./locales");
 const { readNotifyToken, ensureNotifyToken, timingSafeTokenEqual } = require("./notifyToken");
 const { isPathWithinFolder, resolveWithinFolder } = require("./pathSafety");
 const { sendWebhook, redactUrls } = require("./webhookNotify");
-const { archivePush, replayRootFor } = require("./archivePush");
+const { archiveInBackground, archiveAuditEntry, sweepPartials, replayRootFor } = require("./archivePush");
 // Shared with the browser (served from public/): the one place slicer metadata
 // and connector knowledge become a printer identity.
 const PrinterIdentity = require("./public/printer-identity.js");
@@ -2774,6 +2774,14 @@ function isLoopback(req) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
+// A slicer-push archive that was interrupted (crash, share dropped mid-write)
+// can leave a hidden ".partial" file in the replay folder; clear any older than
+// a day at startup. Never throws and never touches anything else.
+if (CFG.archivePushes !== false) {
+  sweepPartials({ fsApi: netfs, root: replayRootFor(CFG.replayFolder, BASE_DIR, FOLDER), now: Date.now(), olderThanMs: 24 * 3600 * 1000 })
+    .then(removed => { if (removed.length) console.log("[archive] removed " + removed.length + " interrupted partial file(s)"); });
+}
+
 app.post("/api/notify-load", rawGcodeBody, async (req, res) => {
   // A remote --snapcon CLI call arrives as raw gcode bytes (application/octet-
   // stream) instead of a JSON {file} path reference, since it can't assume
@@ -2807,18 +2815,17 @@ app.post("/api/notify-load", rawGcodeBody, async (req, res) => {
     // Keep a copy of what the slicer pushed (and the settings Orca embeds in it).
     // The temp file above is deleted once the printer has the file, so without
     // this the sliced file is gone. On by default; set "archivePushes": false in
-    // config.json to turn it off. It runs in the background on its own copy of
-    // the bytes (req.body), so a slow or offline share never holds up the print,
-    // and archivePush() never rejects; a failure is logged and audited.
+    // config.json to turn it off. It runs in the background on its own reference
+    // to the bytes (req.body), so a slow or offline share never holds up the
+    // print; a failure is logged and audited (file-archive-failed).
     if (CFG.archivePushes !== false) {
-      archivePush({ fsApi: netfs, root: replayRootFor(CFG.replayFolder, BASE_DIR, FOLDER), userLabel: actor.userLabel, name, bytes: req.body }).then(arch => {
-        if (arch.status === "error") {
-          console.warn("[archive] could not keep a copy of " + name + ": " + arch.error);
-          auditLog.log({ category: "job", event: "file-archive-failed", ...actor, printerId: p.id, printerName: p.name, detail: { file: name, error: arch.error } });
-        } else {
-          auditLog.log({ category: "job", event: "file-archived", ...actor, printerId: p.id, printerName: p.name, detail: { file: name, result: arch.status, archivedAs: arch.path } });
+      archiveInBackground({
+        fsApi: netfs, root: replayRootFor(CFG.replayFolder, BASE_DIR, FOLDER), userLabel: actor.userLabel, name, bytes: req.body,
+        onDone: arch => {
+          if (arch.status === "error") console.warn("[archive] could not keep a copy of " + name + ": " + arch.error);
+          auditLog.log(archiveAuditEntry(arch, { actor, printer: p, name }));
         }
-      }).catch(e => console.warn("[archive] could not record the archive result for " + name + ": " + (e && e.message)));
+      });
     }
     if (!(await isPrinterIdle(p))) {
       pendingLoad.set(idx, { file: tmpFile, name, ts: Date.now(), cleanup: true, actor });

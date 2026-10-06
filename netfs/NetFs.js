@@ -270,6 +270,7 @@ function createNetFs({
     writeFileExclusive: (p, data, o) => submit("writeFileExclusive", [p, data], opts(p, { timeoutMs: 120000, ...o })),
     mkdir: (p, mo, o) => submit("mkdir", [p, mo || {}], opts(p, o)),
     rename: (a, b, o) => submit("rename", [a, b], opts(a, o)),
+    unlink: (p, o) => submit("unlink", [p], opts(p, o)),
     walk: (dir, wo, o) => submit("walk", [dir, { ...wo, filter: wo.filter ? wo.filter.source : null }], opts(dir, { timeoutMs: 60000, ...o })),
     firmwareInspect: (p, io, o) => submit("firmwareInspect", [p, io || {}], opts(p, { timeoutMs: 60000, ...o })),
     threemfRead: (p, ro, o) => submit("threemfRead", [p, ro], opts(p, o)),

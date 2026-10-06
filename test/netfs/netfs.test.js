@@ -36,6 +36,9 @@ test("the operations work on a real folder", async t => {
   await nf.mkdir(path.join(d, "made"));
   await nf.rename(path.join(d, "new.gcode"), path.join(d, "made", "new.gcode"));
   assert.ok(fs.existsSync(path.join(d, "made", "new.gcode")));
+  await nf.unlink(path.join(d, "made", "new.gcode"));
+  assert.ok(!fs.existsSync(path.join(d, "made", "new.gcode")), "unlink removes a file");
+  await assert.rejects(nf.unlink(path.join(d, "made")), "unlink never removes a folder");
   assert.deepEqual((await nf.walk(d, { query: "drag", filter: /\.gcode$/i })).map(r => r.sub + "/" + r.name), ["sub/dragon.gcode"]);
   const h = await nf.hashFile(path.join(d, "a.gcode"));
   assert.equal(h.sha256, crypto.createHash("sha256").update(fs.readFileSync(path.join(d, "a.gcode"))).digest("hex"));
