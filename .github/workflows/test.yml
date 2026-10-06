@@ -1,0 +1,32 @@
+name: test
+
+# Run the full node:test suite on every pull request and on pushes to main, so a
+# green check (not a local "tests pass" claim) gates each merge.
+#
+# Node 22 matches package.json "engines" and the node22 pkg targets in release.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
